@@ -8,10 +8,20 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+from pvdetect.changepoint import Commissioning, assign_regime
 from pvdetect.daily import daily_signal
-from pvdetect.features import CAPACITY_FEATURES, FEATURE_NAMES, LOG1P_CAPACITY, baseline_features
+from pvdetect.features import (
+    EXPORT_CAPACITY_FEATURES,
+    LOG1P_CAPACITY,
+    fitted_features,
+    label_free_features,
+)
 from pvdetect.io import LoadedTimeseries, day_matrix
 from pvdetect.model import linear_score, sigmoid
+from pvdetect.season import Climatology
+
+EXT_COLUMNS = ["customer_id", "extension_date", "pv_capacity_after_extension_kwp"]
+SIGNED_SHARE = 0.01
 
 
 @dataclass(frozen=True)
@@ -32,6 +42,9 @@ class FeatureTable:
     ids: list[str]
     customers: dict[str, CustomerData | None]
     cache: dict = field(default_factory=dict)
+
+    def dailies(self) -> dict[str, pd.DataFrame]:
+        return {c: d.daily for c, d in self.customers.items() if d is not None}
 
 
 def build_feature_table(loaded: LoadedTimeseries) -> FeatureTable:
@@ -54,15 +67,19 @@ def build_feature_table(loaded: LoadedTimeseries) -> FeatureTable:
     return FeatureTable(ids=list(loaded.customer_ids), customers=customers)
 
 
-def baseline_feature_frame(table: FeatureTable, ids: list[str]) -> tuple[pd.DataFrame, dict]:
-    cache = table.cache.setdefault("baseline", {})
+def compute_features(table: FeatureTable, ids: list[str], clim: Climatology) -> tuple[pd.DataFrame, dict]:
+    """All features for `ids` under `clim`; only the label-free part is cached on the table."""
+    lf_cache = table.cache.setdefault("label_free", {})
     rows, cps = {}, {}
     for cid in ids:
-        if cid not in cache:
-            cd = table.customers.get(cid)
-            cache[cid] = baseline_features(cd.daily) if cd is not None else (dict.fromkeys(FEATURE_NAMES, np.nan), None)
-        rows[cid], cps[cid] = cache[cid]
-    return pd.DataFrame.from_dict(rows, orient="index").reindex(index=ids, columns=list(FEATURE_NAMES)), cps
+        cd = table.customers.get(cid)
+        if cid not in lf_cache:
+            lf_cache[cid] = label_free_features(cd)
+        lf = lf_cache[cid]
+        fitted, cp = fitted_features(cd, clim, lf)
+        rows[cid] = {**lf, **fitted}
+        cps[cid] = cp
+    return pd.DataFrame.from_dict(rows, orient="index").reindex(ids), cps
 
 
 def capacity_matrix(F: pd.DataFrame, names: list[str]) -> np.ndarray:
@@ -73,39 +90,86 @@ def capacity_matrix(F: pd.DataFrame, names: list[str]) -> np.ndarray:
     return X
 
 
+def classifier_proba(clf: dict, objects: dict, F: pd.DataFrame, names: list[str], kind: str | None = None) -> np.ndarray:
+    kind = kind or clf["kind"]
+    X = F[names].to_numpy(float)
+    if kind == "logreg":
+        return sigmoid(linear_score(clf["logreg"], X))
+    return objects["catboost_clf"].predict_proba(X)[:, 1]
+
+
+def capacity_log(cap: dict, objects: dict, F: pd.DataFrame, names: list[str], kind: str | None = None) -> np.ndarray:
+    """log(kWp) before κ; ridge uses the export model for signed customers when available."""
+    kind = kind or cap["kind"]
+    if kind == "catboost":
+        cb_names = names + (["neg_frac"] if "export_kw" in names else [])
+        return objects["catboost_cap"].predict(F[cb_names].to_numpy(float))
+    out = linear_score(cap["ridge"], capacity_matrix(F, names))
+    if cap.get("ridge_export") is not None:
+        signed = F["neg_frac"].to_numpy(float) >= SIGNED_SHARE
+        if signed.any():
+            ex = linear_score(cap["ridge_export"], capacity_matrix(F, list(EXPORT_CAPACITY_FEATURES)))
+            out = np.where(signed, ex, out)
+    return out
+
+
+def to_kwp(log_kwp: np.ndarray, kappa: float, fallback: float) -> np.ndarray:
+    with np.errstate(over="ignore", invalid="ignore"):
+        k = np.clip(kappa * np.exp(log_kwp), 0.5, 500)
+    return np.where(np.isfinite(k), k, fallback)
+
+
+def regime_date(
+    cp: Commissioning | None, regime: str, cd: CustomerData | None, date_params: dict, rule: str
+) -> dt.date | None:
+    if cd is None:
+        return None
+    if regime == "event":
+        return cp.date + dt.timedelta(days=date_params["offset_event"])
+    if regime == "present_at_start":
+        return cd.first_date - dt.timedelta(days=date_params["start_lag"])
+    if rule == "weak_candidate" and cp is not None and cp.weak_date is not None:
+        return cp.weak_date
+    return cd.first_date
+
+
+def regimes_and_dates(table: FeatureTable, ids: list[str], F: pd.DataFrame, cps: dict, date_params: dict, rule: str):
+    regimes, dates = [], []
+    for cid in ids:
+        r = assign_regime(cps[cid], F.at[cid, "early_contrast"], date_params["contrast_cut"])
+        regimes.append(r)
+        dates.append(regime_date(cps[cid], r, table.customers.get(cid), date_params, rule))
+    return regimes, dates
+
+
 def predict(model: dict, table: FeatureTable, ids: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Predictions for `ids`. TRUE rows always carry a date and a positive capacity."""
-    F, cps = baseline_feature_frame(table, ids)
+    clim = Climatology.from_json(model["climatology"])
+    objects = model.get("_objects", {})
+    F, cps = compute_features(table, ids, clim)
     clf = model["classifier"]
-    prob = sigmoid(linear_score(clf["logreg"], F[model["feature_names"]].to_numpy(float)))
+    prob = classifier_proba(clf, objects, F, model["feature_names"])
     cap = model["capacity"]
-    log_kwp = linear_score(cap["ridge"], capacity_matrix(F, model["capacity_feature_names"]))
-    kwp = np.clip(cap["kappa"] * np.exp(log_kwp), 0.5, 500)
-    kwp = np.where(np.isfinite(kwp), kwp, cap["fallback_kwp"])
+    kwp = to_kwp(capacity_log(cap, objects, F, model["capacity_feature_names"]), cap["kappa"], cap["fallback_kwp"])
+    regimes, dates = regimes_and_dates(table, ids, F, cps, model["date"], model["date"]["insufficient_rule"])
     rows = []
     for i, cid in enumerate(ids):
         cd = table.customers.get(cid)
         on = bool(prob[i] >= clf["threshold"]) and cd is not None and cd.n_valid > 0
         cp = cps[cid]
-        if cp is not None and cp.found:
-            regime, date = "event", cp.date + dt.timedelta(days=model["date"]["offset_event"])
-        else:
-            regime, date = "insufficient", cd.first_date if cd is not None else None
         rows.append(
             {
                 "customer_id": cid,
                 "pv_installed": on,
-                "pv_installation_date": pd.Timestamp(date) if on else pd.NaT,
+                "pv_installation_date": pd.Timestamp(dates[i]) if on else pd.NaT,
                 "pv_capacity_kwp": float(kwp[i]) if on else np.nan,
                 "prob": float(prob[i]),
-                "regime": regime,
+                "regime": regimes[i],
                 "cp_found": bool(cp is not None and cp.found),
                 "first_date": pd.Timestamp(cd.first_date) if cd is not None else pd.NaT,
-                "raw_date": pd.Timestamp(date) if date is not None else pd.NaT,
+                "raw_date": pd.Timestamp(dates[i]) if dates[i] is not None else pd.NaT,
                 "raw_kwp": float(kwp[i]),
             }
         )
-    pred = pd.DataFrame(rows)
-    pred = pd.concat([pred, F.reset_index(drop=True)], axis=1)
-    ext = pd.DataFrame(columns=["customer_id", "extension_date", "pv_capacity_after_extension_kwp"])
-    return pred, ext
+    pred = pd.concat([pd.DataFrame(rows), F.reset_index(drop=True)], axis=1)
+    return pred, pd.DataFrame(columns=EXT_COLUMNS)

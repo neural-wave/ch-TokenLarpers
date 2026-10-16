@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 
 import numpy as np
 
-CURRENT_VERSION = 1
+CURRENT_VERSION = 2
 
 
 def standardize_params(X: np.ndarray) -> dict:
     """Median imputation (0 for all-NaN columns) followed by z-scoring (zero scale -> 1)."""
-    with np.errstate(all="ignore"):
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
         impute = np.nanmedian(X, axis=0) if X.size else np.zeros(X.shape[1])
     impute = np.where(np.isfinite(impute), impute, 0.0)
     Xi = np.where(np.isnan(X), impute, X)

@@ -25,7 +25,17 @@ or plain `pip install -r requirements.txt`. `requirements.txt` is compiled from 
 python train.py --timeseries energy.csv --labels labels.csv --out artifacts/model.json [--cv] [--outer-repeats 4] [--report-dir DIR]
 ```
 
-`--cv` runs nested customer-level cross-validation of the whole training procedure and prints aggregate lines only (`data:`, `nested:`, `dates:`, `regime_confusion:`, `selection:`); the final model is always fit on all labelled customers. `--report-dir` writes the repeat-0 out-of-fold table and selection records.
+`--cv` runs nested customer-level cross-validation of the whole training procedure and prints aggregate lines only: `data:` (including whether readings are signed, which switches export features on), `nested:` (score ± SD over repeats, bootstrap 90% interval, F1/D/P, and `outer_informed_decisions=k`), `dates:` (date accuracy per regime), `regime_confusion:`, `selection:` (how often each inner-CV choice was made). The final model is always fit on all labelled customers. `--report-dir` writes the repeat-0 out-of-fold table (`oof_repeat0.csv`) and selection records.
+
+Inside each fit, inner CV on the training customers chooses: logistic regression vs CatBoost (CatBoost needs ≥2.0 points and a stable bootstrap), the decision threshold, ridge vs CatBoost capacity, a capacity factor κ, and the date rule for weak-evidence customers. The week-of-year climatology (from labelled non-PV training customers) deseasonalizes the changepoint signal; candidates whose step recurs at the same time in other years are rejected.
+
+Dates come from one of three regimes: `event` (detected changepoint + learned offset), `present_at_start` (PV already present when data starts: first date − learned lag), `insufficient` (weak candidate or first date, chosen by inner CV).
+
+### Review plots (dev requirement: matplotlib)
+
+```
+python -m pvdetect.review REPORT_DIR/oof_repeat0.csv --timeseries energy.csv --out-dir PLOTS_DIR
+```
 
 ## Inference
 
@@ -53,8 +63,18 @@ Remove `artifacts/` afterwards so no synthetic model is left where the real one 
 
 ## Validation policy
 
-All data-driven choices happen inside the training procedure and are chosen by inner CV; outer CV estimates the whole procedure. Decisions taken after looking at outer results are logged in `DECISIONS.md` and the estimate is then labelled `selection-biased`. Evidence tiers: unit tests, synthetic regression tests (dev seeds), a held-out synthetic benchmark run only at phase gates (`benchmarks/LOG.md`), and real-data nested CV (primary evidence).
+All data-driven choices happen inside the training procedure and are chosen by inner CV; outer CV estimates the whole procedure. Decisions taken after looking at outer results are logged in `DECISIONS.md` and the estimate is then labelled `selection-biased`. Evidence tiers: unit tests, synthetic regression tests (dev seeds), a held-out synthetic benchmark run only at phase gates, and real-data nested CV (primary evidence).
+
+### Synthetic benchmarks
+
+```
+python -m pvdetect.benchmark --pilot                         # times a small run, projects the full one
+python -m pvdetect.benchmark --suite dev [--scenarios a,b] [--n 40] [--repeats 2]
+python -m pvdetect.benchmark --suite holdout --log benchmarks/LOG.md   # phase gates only
+```
+
+Every full run starts with the pilot and is refused if the projection exceeds `--budget-min` (default 30) or memory looks too high, unless `--force`. The holdout suite uses generator variant B (different PV, cloud and load models plus confounders absent from the dev generator) and seeds from `benchmarks/HOLDOUT_SEED_BLOCK`; a code change made in response to a holdout result burns the block.
 
 ## Status
 
-submit-v0: baseline (physical features, `ruptures` changepoint, logistic regression, ridge capacity); synthetic-validated only; extensions header-only; unlabelled data unused.
+submit-v1: season-aware detection, date regimes, confounder features, inner-CV selection (logistic regression vs CatBoost, ridge vs CatBoost capacity, threshold, κ); synthetic-validated only; extensions header-only; unlabelled data unused.
