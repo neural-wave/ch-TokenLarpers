@@ -1,0 +1,22 @@
+{
+  "generator_version": "augmentation_v1",
+  "min_pre_days": 7,
+  "min_post_days": 7,
+  "min_daytime_observed_fraction": 0.75,
+  "strength_min": 0.05,
+  "strength_max": 1.5,
+  "ramp_days_min": 1,
+  "ramp_days_max": 3,
+  "daytime_start_hour": 10,
+  "daytime_end_hour": 15,
+  "support_start_hour": 5.0,
+  "support_end_hour": 21.0,
+  "width_hours_min": 2.5,
+  "width_hours_max": 4.5,
+  "asymmetry_min": 0.85,
+  "asymmetry_max": 1.15,
+  "demand_decline_min": 0.20,
+  "demand_decline_max": 0.45,
+  "holiday_days_min": 1,
+  "holiday_days_max": 3
+}
