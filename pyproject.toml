@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neuralwave-data"
+version = "0.1.0"
+description = "Privacy-safe NeuralWave preprocessing and canonical data contract"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy>=1.24,<2",
+  "pandas>=2.0,<3",
+  "pyarrow>=12,<18",
+  "scikit-learn>=1.2,<2",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[project.scripts]
+neuralwave-prepare = "neuralwave_data.prepare:main"
