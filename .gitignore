@@ -1,1 +1,13 @@
-AIL_data_for_neural_wave_v1.1
+# Keep the organizer raw-data ignore.
+AIL_data_for_neural_wave_v1.1/
+/data_private/
+/artifacts_private/
+/.env
+/predictions.csv
+/pv_extensions_predictions.csv
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
