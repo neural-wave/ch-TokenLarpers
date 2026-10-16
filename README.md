@@ -1,6 +1,6 @@
 # NeuralWave data pipelines
 
-This branch implements Pipeline A: strict, privacy-safe conversion of authorized CSV manifests into the versioned canonical Parquet contract. It does not read, package, or log organizer files during development; use fabricated fixtures for checks.
+The repository implements Pipeline A, strict, privacy-safe conversion of authorized CSV manifests into the versioned canonical Parquet contract, and Pipeline B, deterministic paired synthetic PV scenarios. Neither pipeline reads, packages, or logs organizer files during development; use fabricated fixtures for checks.
 
 ## Install and run
 
@@ -19,4 +19,8 @@ Unlabelled rows are filtered before parsing: only non-null, case-sensitive liter
 
 The output directory is never overwritten when populated. It contains `measurements.parquet`, `daily_features.parquet`, `run_manifest.json`, and `qa_report.json`; labels, extensions, and splits are written when supplied/requested. `measurements.parquet` preserves null energy and distinguishes `observed`, `missing_input`, and reindexed `absent_interval` records. IDs remain strings, including leading zeroes. Raw inputs and all generated artifacts must stay under private paths.
 
-Run the regression suite with `python -m pytest -q tests/test_preprocessing.py` after installing dependencies. The tests construct only temporary artificial CSV/JSON data and exercise the actual module CLI.
+Run the regression suite with `PYTHONPATH=src python -m pytest -q tests/test_preprocessing.py tests/test_augmentation.py` after installing dependencies. The tests construct only temporary artificial data and exercise preprocessing and synthesis.
+
+## Synthetic data
+
+See [the synthetic data guide](docs/synthetic_data.md) for the synthesis CLI, validation API, output contract, and the fully fabricated local dataset example. Generated measurements, labels, provenance, and latent components stay under ignored private directories; they are not distributed through Git.
