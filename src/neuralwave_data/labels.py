@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 from typing import Any
+import math
 import re
 
 import pandas as pd
@@ -14,8 +15,8 @@ from .schema import EXTENSION_COLUMNS, LABEL_COLUMNS, SPLIT_COLUMNS, arrow_table
 
 
 def _read_source(source: dict[str, Any]) -> pd.DataFrame:
-    return pd.read_csv(source["_path"], sep=source.get("delimiter", ";"), decimal=source.get("decimal", "."),
-                       encoding=source.get("encoding", "utf-8"), dtype={"customer_id": "string", "CustomerID": "string", "pod_id": "string", "POD": "string"}, keep_default_na=True)
+    return pd.read_csv(source["_path"], sep=source.get("delimiter", ";"), encoding=source.get("encoding", "utf-8"),
+                       dtype=str, keep_default_na=False, na_filter=False)
 
 
 def _id_column(frame: pd.DataFrame) -> str:
@@ -49,16 +50,17 @@ def _date(value: Any, field: str, nullable: bool = True) -> date | None:
     return parsed.date()
 
 
-def _capacity(value: Any, field: str, nullable: bool = True) -> float | None:
+def _capacity(value: Any, field: str, decimal: str = ".", nullable: bool = True) -> float | None:
     if value is None or pd.isna(value) or str(value).strip() == "":
         if nullable:
             return None
         raise ValueError(f"{field} is required")
+    text = str(value).strip().replace(decimal, ".") if decimal != "." else str(value).strip()
     try:
-        number = float(value)
+        number = float(text)
     except Exception as exc:
         raise ValueError(f"{field} must be numeric") from exc
-    if not pd.notna(number) or not pd.api.types.is_number(number) or number <= 0:
+    if not math.isfinite(number) or number <= 0:
         raise ValueError(f"{field} must be finite and positive")
     return number
 
@@ -91,7 +93,7 @@ def parse_labels(source: dict[str, Any]) -> pd.DataFrame:
         seen.add(customer)
         installed = _parse_bool(row[bool_col])
         installation = _date(row[date_col], "pv_installation_date") if date_col else None
-        capacity = _capacity(row[cap_col], "pv_capacity_kwp") if cap_col else None
+        capacity = _capacity(row[cap_col], "pv_capacity_kwp", source.get("decimal", ".")) if cap_col else None
         if not installed and (installation is not None or capacity is not None):
             raise ValueError("non-PV labels must have null date and capacity")
         rows.append((customer, installed, installation, capacity))
@@ -104,8 +106,8 @@ def parse_extensions(source: dict[str, Any], labels: pd.DataFrame | None = None)
     date_col = _find(frame, ("extension_date", "date", "pv_extension_date"), "extension_date")
     cap_col = _find(frame, ("pv_capacity_after_extension_kwp", "capacity_after_extension_kwp", "extension_capacity_kwp", "capacity_kwp"), "pv_capacity_after_extension_kwp")
     rows = []
-    seen: set[tuple[str, date]] = set()
     installed_dates = {} if labels is None else dict(zip(labels["customer_id"], labels["pv_installation_date"]))
+    known_labels = {} if labels is None else dict(zip(labels["customer_id"], labels["pv_installed"]))
     for values in frame.itertuples(index=False, name=None):
         row = dict(zip(frame.columns, values))
         raw_id = row[id_col]
@@ -117,7 +119,9 @@ def parse_extensions(source: dict[str, Any], labels: pd.DataFrame | None = None)
         if key in seen:
             raise ValueError("extensions contain duplicate events")
         seen.add(key)
-        capacity = _capacity(row[cap_col], "pv_capacity_after_extension_kwp", nullable=False)
+        if labels is not None and (customer not in known_labels or not bool(known_labels[customer])):
+            raise ValueError("extensions require a known PV-labelled customer")
+        capacity = _capacity(row[cap_col], "pv_capacity_after_extension_kwp", source.get("decimal", "."), nullable=False)
         initial = installed_dates.get(customer)
         if initial is not None and extension_date <= initial:
             raise ValueError("extension dates must follow installation dates")

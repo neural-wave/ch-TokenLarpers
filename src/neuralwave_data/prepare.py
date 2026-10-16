@@ -14,7 +14,7 @@ from typing import Any
 import pandas as pd
 import pyarrow
 import pyarrow.parquet as pq
-from .features import daily_features
+from .features import write_daily_features
 from .io import load_manifest, source_hash, stage_measurements, write_canonical
 from .labels import make_splits, parse_extensions, parse_labels, write_frame
 from .schema import SCHEMA_VERSION, validate_schema_version
@@ -65,9 +65,7 @@ def prepare(manifest_path: str | Path, output_dir: str | Path, config_path: str 
             measurement_count = write_canonical(conn, output / "measurements.parquet", counts)
         finally:
             conn.close()
-    measurements = pq.read_table(output / "measurements.parquet").to_pandas()
-    features = daily_features(measurements, float(config["daily_coverage_threshold"]))
-    pq.write_table(__import__("pyarrow").Table.from_pandas(features, preserve_index=False), output / "daily_features.parquet")
+    daily_count = write_daily_features(output / "measurements.parquet", output / "daily_features.parquet", float(config["daily_coverage_threshold"]))
     labels = None
     label_sources = _sources_by_role(manifest["sources"], "development_labels")
     if len(label_sources) > 1:
@@ -102,7 +100,7 @@ def prepare(manifest_path: str | Path, output_dir: str | Path, config_path: str 
                     "software_versions": software_versions,
                     "settings": {"epoch_unit": "seconds", "timezone": "Europe/Zurich", **config,
                                  "requested_folds": folds, "actual_folds": actual_folds, "seed": int(seed)},
-                    "counts": {**counts, "canonical_measurement_rows": measurement_count, "daily_feature_rows": len(features),
+                    "counts": {**counts, "canonical_measurement_rows": measurement_count, "daily_feature_rows": daily_count,
                                "label_rows": 0 if labels is None else len(labels)},
                     "artifacts": ["measurements.parquet", "daily_features.parquet"] + (["labels.parquet"] if labels is not None else [])
                     + (["extensions.parquet"] if extensions_sources else []) + (["splits.parquet"] if actual_folds is not None else [])}

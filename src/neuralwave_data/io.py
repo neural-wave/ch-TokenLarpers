@@ -27,7 +27,7 @@ def _columns(frame: pd.DataFrame, required: str) -> str:
         "customer_id": ("customer_id", "CustomerID", "customer", "pod_id", "POD"),
         "timestamp": ("timestamp", "timestamp_local", "datetime", "date_time", "time", "utc_timestamp"),
         "timestamp_epoch": ("timestamp_epoch", "epoch", "unix_timestamp"),
-        "energy": ("energy_kwh", "energy", "value", "consumption", "power_kwh"),
+        "energy": ("energy_kwh", "energy_consumption_kwh", "energy", "value", "consumption", "power_kwh"),
     }
     for name in aliases[required]:
         if name in frame.columns:
@@ -61,6 +61,21 @@ def _parse_epoch(value: Any, column: str) -> int:
     if epoch % 900 != 0:
         raise ValueError("timestamp is not aligned to a 900-second grid")
     return epoch
+
+def _validate_epoch_backed_timestamp(value: Any, epoch: int, column: str) -> None:
+    if value is None or str(value).strip() == "":
+        raise ValueError("missing timestamp")
+    try:
+        stamp = pd.Timestamp(str(value).strip())
+    except Exception as exc:
+        raise ValueError("invalid timestamp") from exc
+    local = datetime.fromtimestamp(epoch, tz=timezone.utc).astimezone(_TZ)
+    if stamp.tzinfo is None or stamp.utcoffset() is None:
+        # Challenge files may supply a naive Swiss wall-clock alongside epoch seconds.
+        if stamp.to_pydatetime().replace(tzinfo=None) != local.replace(tzinfo=None):
+            raise ValueError("timestamp fields disagree")
+    elif stamp.timestamp() != epoch:
+        raise ValueError("timestamp fields disagree")
 
 
 def _parse_energy(value: Any, decimal: str) -> float | None:
@@ -142,9 +157,8 @@ def stage_measurements(sources: list[dict[str, Any]], conn: sqlite3.Connection) 
         path = source["_path"]
         input_count = retained_count = 0
         try:
-            chunks = pd.read_csv(path, sep=source["delimiter"], decimal=source["decimal"], encoding=source["encoding"],
-                                 dtype={"customer_id": "string", "CustomerID": "string", "pod_id": "string", "POD": "string"},
-                                 chunksize=10_000, keep_default_na=True)
+            chunks = pd.read_csv(path, sep=source["delimiter"], encoding=source["encoding"],
+                                 dtype=str, chunksize=10_000, keep_default_na=False, na_filter=False)
             for chunk in chunks:
                 input_count += len(chunk)
                 customer_col = _columns(chunk, "customer_id")
@@ -163,13 +177,13 @@ def stage_measurements(sources: list[dict[str, Any]], conn: sqlite3.Connection) 
                 # This is intentionally before timestamp/energy parsing for unlabelled junk rows.
                 ids = chunk[customer_col]
                 if role == "unlabelled_measurements":
-                    null_mask = ids.isna()
-                    pod_mask = ids.notna() & ids.astype("string").str.startswith("POD", na=False)
+                    null_mask = ids.isna() | ids.eq("")
+                    pod_mask = ids.notna() & ids.ne("") & ids.str.startswith("POD", na=False)
                     counts["excluded_null_customer"] += int(null_mask.sum())
                     counts["excluded_non_pod"] += int((~null_mask & ~pod_mask).sum())
                     chunk = chunk.loc[pod_mask].copy()
                 else:
-                    bad = ids.isna() | (ids.astype("string").str.len() == 0)
+                    bad = ids.isna() | ids.eq("")
                     if bool(bad.any()):
                         raise ValueError(f"{role} contains null or empty customer_id")
                 rows: list[tuple[str, int, float | None, int, str]] = []
@@ -182,9 +196,7 @@ def stage_measurements(sources: list[dict[str, Any]], conn: sqlite3.Connection) 
                         raise ValueError(f"{role} contains empty customer_id")
                     epoch = _parse_epoch(timestamp, parse_timestamp_col)
                     if timestamp_position is not None and timestamp_position != epoch_position:
-                        supplied_epoch = _parse_epoch(record[timestamp_position], timestamp_col)
-                        if supplied_epoch != epoch:
-                            raise ValueError("timestamp fields disagree")
+                        _validate_epoch_backed_timestamp(record[timestamp_position], epoch, timestamp_col)
                     parsed_energy = _parse_energy(energy, source["decimal"])
                     rows.append((customer, epoch, parsed_energy, source_id, role))
                 if rows:
