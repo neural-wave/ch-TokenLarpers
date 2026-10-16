@@ -14,6 +14,9 @@ dependencies = [
   "scikit-learn>=1.2,<2",
 ]
 
+[project.optional-dependencies]
+experiment = ["torch>=2.2,<3"]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
