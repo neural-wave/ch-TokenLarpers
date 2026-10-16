@@ -31,9 +31,11 @@ class NumericPatchEncoder(nn.Module):
         self.transformer = nn.TransformerEncoder(layer, config.n_layers)
         # TransformerEncoder clones one layer; explicitly randomize each clone.
         for block in self.transformer.layers:
-            for parameter in block.parameters():
+            for parameter_name, parameter in block.named_parameters():
                 if parameter.dim() > 1:
                     nn.init.xavier_uniform_(parameter)
+                elif "norm" in parameter_name:
+                    nn.init.ones_(parameter)
                 else:
                     nn.init.zeros_(parameter)
         self.norm = nn.LayerNorm(config.d_model)

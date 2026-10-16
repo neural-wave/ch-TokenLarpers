@@ -1,4 +1,5 @@
 {
+  "encoder_backend": "custom",
   "context_length": 672,
   "stride": 96,
   "min_observed_fraction": 0.75,

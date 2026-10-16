@@ -1,6 +1,6 @@
 # NeuralWave data pipelines
 
-This branch combines canonical preprocessing, constrained synthetic PV generation, and an offline numerical time-series embedding experiment. Raw organizer data and all data-derived artifacts remain private; development checks use independently fabricated inputs only.
+This branch combines canonical preprocessing, constrained synthetic PV generation, and offline numerical time-series embedding experiments. Raw organizer data and all data-derived artifacts remain private. Regression tests use independently fabricated inputs; authorized local evaluation can use AIL data.
 
 ## Install and run
 
@@ -37,4 +37,18 @@ python -m neuralwave_experiment.experiment \
   --seed 17 --device cpu
 ```
 
-The experiment compares raw-feature baseline, frozen numerical embeddings, and limited supervised fine-tuning. It does not download pretrained weights or use a language model. Optional synthetic inputs must be organized by held-out fold. Real-data generalization is unmeasured until an authorized human executes the protocol locally.
+The experiment compares raw-feature baseline, frozen numerical embeddings, and limited supervised fine-tuning. It does not download pretrained weights or use a language model. Optional synthetic inputs must be organized by held-out fold.
+
+## Official PatchTST versus custom encoder
+
+The [comparison guide](docs/official_patchtst_comparison.md) explains the attributed official-source adapter, its missingness/calendar adaptations, and matched evaluation.
+
+```bash
+python -m neuralwave_experiment.comparison \
+  --canonical-dir /private/artifacts/run \
+  --out /private/artifacts/patchtst-comparison \
+  --config configs/embedding_experiment.json \
+  --seed 17 --device cpu
+```
+
+This runs both backends with identical folds and training budgets, writes per-backend predictions/checkpoints and `comparison.json`, and requires identical raw-feature baseline outputs. Set `encoder_backend` to `custom` or `official_patchtst` to run just one backend through the experiment CLI. The upstream source is pinned and distributed with Apache-2.0 license and modification notices; no source checkout or download is needed at runtime.

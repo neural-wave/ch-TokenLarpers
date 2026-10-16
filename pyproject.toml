@@ -22,3 +22,6 @@ where = ["src"]
 
 [project.scripts]
 neuralwave-prepare = "neuralwave_data.prepare:main"
+
+[tool.setuptools.package-data]
+"neuralwave_experiment.vendor.patchtst" = ["LICENSE", "NOTICE", "README.txt"]

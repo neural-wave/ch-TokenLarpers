@@ -10,6 +10,7 @@ import copy
 import hashlib
 import json
 import platform
+import time
 import random
 from dataclasses import asdict
 from datetime import date
@@ -23,7 +24,8 @@ from .features import aggregate_customer_features, date_candidates
 from .heads import CapacityHead, DateHead, PresenceHead, fit_heads, training_date_labels
 from .scoring import score_predictions, validate_predictions
 from .windows import WindowConfig, build_windows
-from .encoder import EncoderConfig, NumericPatchEncoder, encode_windows
+from .encoder import EncoderConfig, encode_windows
+from .encoder_factory import build_encoder, finetune_parameters
 from .pretraining import pretrain_encoder
 
 def default_config() -> dict[str, Any]:
@@ -32,7 +34,7 @@ def default_config() -> dict[str, Any]:
             "dropout": .1, "pretrain_epochs": 5, "finetune_epochs": 3,
             "batch_size": 32, "learning_rate": .001, "finetune_learning_rate": .0001,
             "mask_ratio": .3, "seed": 0, "max_windows_per_customer": 128,
-            "include_unlabelled": False}
+            "include_unlabelled": False, "encoder_backend": "custom"}
 
 
 def _load_config(path: str | Path | None) -> dict[str, Any]:
@@ -119,6 +121,19 @@ def _initial_batch(batch: object, extensions: pd.DataFrame) -> object:
                    center_dates=[batch.center_dates[i] for i in indices], start_epochs=batch.start_epochs[indices])
 
 
+def _initial_indices(batch: object, extensions: pd.DataFrame) -> np.ndarray:
+    """Return the initial-capacity rows, for filtering embeddings identically."""
+    if extensions is None or extensions.empty or "extension_date" not in extensions:
+        return np.arange(len(batch.values), dtype=int)
+    cutoff = {str(customer): pd.to_datetime(group.extension_date).dt.date.min()
+              for customer, group in extensions.assign(customer_id=extensions.customer_id.astype(str)).groupby("customer_id")}
+    indices = np.flatnonzero(np.array([
+        str(c) not in cutoff or center < cutoff[str(c)]
+        for c, center in zip(batch.customer_ids, batch.center_dates)]))
+    if len(indices) == 0:
+        raise ValueError("extensions exclude every capacity window for a customer")
+    return indices
+
 def _concat_batches(batches: list[object]) -> object:
     if not batches:
         raise ValueError("no windows available for representation fitting")
@@ -154,7 +169,7 @@ def _finetune(model: object, batch: object, labels: pd.DataFrame, epochs: int, l
     target = torch.tensor(targets, dtype=torch.float32, device=device)
     for parameter in model.parameters():
         parameter.requires_grad_(False)
-    params = list(model.transformer.layers[-1].parameters()) if hasattr(model, "transformer") else []
+    params = list(finetune_parameters(model))
     for parameter in params:
         parameter.requires_grad_(True)
     dimension = int(getattr(model, "config").d_model)
@@ -241,11 +256,16 @@ def run_experiment(canonical_dir: str | Path, out_dir: str | Path, config: Mappi
         for part in pq.ParquetFile(measurement_path).iter_batches(columns=["customer_id"]):
             seen.update(map(str, part.column("customer_id").to_pylist()))
         unlabelled_ids = sorted(seen - set(all_ids))
+    backend = str(cfg.get("encoder_backend", "custom"))
+    if backend not in {"custom", "official_patchtst"}:
+        raise ValueError(f"unsupported encoder_backend: {backend!r}")
     windows = _windows_by_customer(measurement_path, all_ids + unlabelled_ids, cfg)
     measurements = _read_measurements(measurement_path, all_ids)
     arms = {"baseline": [], "frozen": [], "finetuned": []}
     fold_metrics: dict[str, dict[str, Any]] = {}
     lineage_audit: list[dict[str, Any]] = []
+    started = time.perf_counter()
+    parameter_count: int | None = None
     for fold in folds:
         head_records: dict[str, Any] = {}
         heldout = {c for c in all_ids if fold_map[c] == fold}
@@ -268,7 +288,10 @@ def run_experiment(canonical_dir: str | Path, out_dir: str | Path, config: Mappi
         base_features = aggregate_customer_features(eval_batch)
         base_lookup = {c: i for i, c in enumerate(base_features.customer_ids)}
         train_rows = [base_lookup[c] for c in sorted(train)]
-        base_cap = aggregate_customer_features(_initial_batch(eval_batch, extensions))
+        # Extension labels are held-out metadata; do not use them as predictors.
+        capacity_batch = _initial_batch(eval_batch, pd.DataFrame())
+        capacity_indices = _initial_indices(eval_batch, pd.DataFrame())
+        base_cap = aggregate_customer_features(capacity_batch)
         base_cap_lookup = {c: i for i, c in enumerate(base_cap.customer_ids)}
         base_candidates = date_candidates(measurements, all_ids)
         presence, date_head, cap_head, head_audit = fit_heads(
@@ -281,15 +304,16 @@ def run_experiment(canonical_dir: str | Path, out_dir: str | Path, config: Mappi
         arms["baseline"].append(base_pred[base_pred.customer_id.isin(heldout)])
         enc_cfg = EncoderConfig(context_length=int(cfg["context_length"]), patch_length=int(cfg["patch_length"]), d_model=int(cfg["d_model"]),
                                 n_heads=int(cfg["n_heads"]), n_layers=int(cfg["n_layers"]), dropout=float(cfg["dropout"]))
+        model = build_encoder(enc_cfg, backend=backend).to(device)
         import torch
-        model = NumericPatchEncoder(enc_cfg).to(device)
+        parameter_count = sum(p.numel() for p in model.parameters())
         pretrain_history = pretrain_encoder(model, train_batch, epochs=int(cfg["pretrain_epochs"]), batch_size=int(cfg["batch_size"]),
                                              learning_rate=float(cfg["learning_rate"]), mask_ratio=float(cfg["mask_ratio"]), seed=cfg["seed"] + fold, device=device)
         frozen_emb = encode_windows(model, eval_batch, batch_size=int(cfg["batch_size"]), device=device)
         frozen_features = aggregate_customer_features(eval_batch, frozen_emb)
         lookup = {c: i for i, c in enumerate(frozen_features.customer_ids)}
         rows = [lookup[c] for c in sorted(train)]
-        frozen_cap = aggregate_customer_features(_initial_batch(eval_batch, extensions), frozen_emb)
+        frozen_cap = aggregate_customer_features(capacity_batch, frozen_emb[capacity_indices])
         frozen_cap_lookup = {c: i for i, c in enumerate(frozen_cap.customer_ids)}
         frozen_candidates = date_candidates(measurements, all_ids, window_batch=eval_batch, window_embeddings=frozen_emb)
         presence, date_head, cap_head, head_audit = fit_heads(
@@ -311,7 +335,7 @@ def run_experiment(canonical_dir: str | Path, out_dir: str | Path, config: Mappi
         fine_emb = encode_windows(fine_model, eval_batch, batch_size=int(cfg["batch_size"]), device=device)
         fine_features = aggregate_customer_features(eval_batch, fine_emb)
         lookup = {c: i for i, c in enumerate(fine_features.customer_ids)}; rows = [lookup[c] for c in sorted(train)]
-        fine_cap = aggregate_customer_features(_initial_batch(eval_batch, extensions), fine_emb)
+        fine_cap = aggregate_customer_features(capacity_batch, fine_emb[capacity_indices])
         fine_cap_lookup = {c: i for i, c in enumerate(fine_cap.customer_ids)}
         fine_candidates = date_candidates(measurements, all_ids, window_batch=eval_batch, window_embeddings=fine_emb)
         presence, date_head, cap_head, head_audit = fit_heads(
@@ -323,10 +347,11 @@ def run_experiment(canonical_dir: str | Path, out_dir: str | Path, config: Mappi
         fine_pred = _predictions(fine_features, all_ids, presence, date_head, cap_head, measurements,
                                  capacity_features=fine_cap.matrix, candidates=fine_candidates)
         arms["finetuned"].append(fine_pred[fine_pred.customer_id.isin(heldout)])
-        torch.save(model.state_dict(), out / f"encoder_fold_{fold}.pt")
-        torch.save(fine_model.state_dict(), out / f"encoder_finetuned_fold_{fold}.pt")
+        torch.save(model.state_dict(), out / f"encoder_{backend}_fold_{fold}.pt")
+        torch.save(fine_model.state_dict(), out / f"encoder_{backend}_finetuned_fold_{fold}.pt")
         (out / f"heads_fold_{fold}.json").write_text(json.dumps({
-            "arms": head_records, "encoder_config": asdict(enc_cfg)}, indent=2, default=str), encoding="utf-8")
+            "backend": backend, "arms": head_records, "encoder_config": asdict(enc_cfg),
+            "parameter_count": sum(p.numel() for p in model.parameters())}, indent=2, default=str), encoding="utf-8")
         (out / f"history_fold_{fold}.json").write_text(json.dumps({"pretraining": pretrain_history, "finetune": fine_history}, indent=2), encoding="utf-8")
         for arm, pred in (("baseline", base_pred), ("frozen", frozen_pred), ("finetuned", fine_pred)):
             fold_metrics.setdefault(arm, {})[str(fold)] = score_predictions(labels[labels.customer_id.isin(heldout)], pred[pred.customer_id.isin(heldout)])
@@ -338,7 +363,9 @@ def run_experiment(canonical_dir: str | Path, out_dir: str | Path, config: Mappi
         # silently choosing a duplicate if a fold implementation regresses.
         pred.to_csv(out / f"predictions_{arm}.csv", sep=";", index=False)
         pooled[arm] = score_predictions(labels, pred)
-    result = {"fold_metrics": fold_metrics, "pooled_metrics": pooled, "lineage_audit": lineage_audit, "arms": list(arms)}
+    result = {"fold_metrics": fold_metrics, "pooled_metrics": pooled, "lineage_audit": lineage_audit,
+              "arms": list(arms), "backend": backend, "parameter_count": parameter_count,
+              "runtime_seconds": time.perf_counter() - started}
     (out / "metrics.json").write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
     (out / "experiment_config.json").write_text(json.dumps(cfg, indent=2, sort_keys=True, default=str), encoding="utf-8")
     (out / "feature_definitions.json").write_text(json.dumps({"baseline": "customer mean/std/first-last of raw windows", "frozen": "same plus encoder embedding", "finetuned": "same plus active-window fine-tuned embedding"}, indent=2), encoding="utf-8")
@@ -346,6 +373,7 @@ def run_experiment(canonical_dir: str | Path, out_dir: str | Path, config: Mappi
     import torch, sklearn
     (out / "run_manifest.json").write_text(json.dumps({
         "schema_version": 1, "canonical_manifest_sha256": identity, "seed": cfg["seed"],
+        "encoder_backend": backend, "parameter_count": parameter_count,
         "library": {"python": platform.python_version(), "numpy": np.__version__,
                     "pandas": pd.__version__, "torch": torch.__version__, "sklearn": sklearn.__version__}}, indent=2), encoding="utf-8")
     return result
