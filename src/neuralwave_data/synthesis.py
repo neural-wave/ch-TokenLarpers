@@ -108,8 +108,6 @@ def _validate_canonical_measurements(measurements: pd.DataFrame) -> None:
         raise ValueError("measurements contains no rows")
     if measurements["customer_id"].isna().any() or measurements["timestamp_epoch"].isna().any():
         raise ValueError("measurements has null customer IDs or epochs")
-    if measurements["customer_id"].astype(str).duplicated(keep=False).any() is False:
-        pass
     epochs = pd.to_numeric(measurements["timestamp_epoch"], errors="coerce")
     if epochs.isna().any() or (~np.isfinite(epochs)).any():
         raise ValueError("measurements has invalid timestamp epochs")
@@ -230,8 +228,9 @@ def generate_synthetic(measurements: pd.DataFrame, labels: pd.DataFrame,
     cfg = dict(default_config())
     if config:
         cfg.update(dict(config))
-    cfg = load_config_from_mapping(cfg)
-    _validate_canonical_measurements(measurements)
+    # Eligibility is selected before baseline-specific validation. Excluded positive,
+    # unlabelled, and held-out sources may use meter semantics that are irrelevant here.
+    # Each retained source is validated immediately before its statistics are computed.
     _validate_labels(labels)
     fold_map = _validate_splits(splits)
     label_map = labels.set_index(labels.customer_id.astype(str))
@@ -251,6 +250,7 @@ def generate_synthetic(measurements: pd.DataFrame, labels: pd.DataFrame,
         if int(fold_map[customer]) == int(held_out_fold):
             excluded["held_out_fold"] = excluded.get("held_out_fold", 0) + 1
             continue
+        _validate_canonical_measurements(source_groups[customer])
         days, day_sums = _observed_dates(source_groups[customer], cfg)
         onset = _choose_onset(days, seed, customer, cfg)
         if onset is None:
@@ -268,7 +268,7 @@ def generate_synthetic(measurements: pd.DataFrame, labels: pd.DataFrame,
     for _, group, _ in eligible:
         _, sums = _observed_dates(group, cfg)
         all_day_values.extend(value for value in sums.values() if value > 0 and np.isfinite(value))
-    robust_scale = float(np.median(np.asarray(all_day_values, dtype=float))) if all_day_values else 0.0
+    robust_scale = float(cfg.get("_robust_daytime_scale", np.median(np.asarray(all_day_values, dtype=float)) if all_day_values else 0.0))
     if not math.isfinite(robust_scale) or robust_scale <= 0:
         raise ValueError("eligible training backgrounds have zero daytime scale")
 
@@ -306,7 +306,6 @@ def generate_synthetic(measurements: pd.DataFrame, labels: pd.DataFrame,
         demand = baseline * change
         scenarios = [baseline, baseline - pv, demand, demand - pv]
         scenario_pv = [np.zeros_like(pv), pv, np.zeros_like(pv), pv]
-        source_hash = hashlib.sha256(customer.encode()).hexdigest()
         for index, scenario in enumerate(scenario_names):
             generated_id = "syn_" + hashlib.sha256(f"{seed}:{customer}:{index}".encode()).hexdigest()[:24]
             observed = np.isfinite(source_energy)
@@ -331,9 +330,9 @@ def generate_synthetic(measurements: pd.DataFrame, labels: pd.DataFrame,
                 "generator_version": str(cfg.get("generator_version", GENERATOR_VERSION)),
                 "scenario": scenario, "meter_mode": meter_mode, "onset_date": onset if is_positive else None,
                 "ramp_days": ramp_days, "scale": float(strength * robust_scale),
-                "strength_fraction": strength, "demand_change_kind": demand_kind,
                 "demand_decline": decline, "basis_width_hours": width,
-                "basis_asymmetry": asymmetry, "config_hash": _json_hash(cfg),
+                "basis_asymmetry": asymmetry, "support_start_hour": float(cfg["support_start_hour"]),
+                "support_end_hour": float(cfg["support_end_hour"]), "config_hash": _json_hash(cfg),
             })
             latent_out.append(pd.DataFrame({
                 "customer_id": generated_id, "timestamp_epoch": source_epoch,

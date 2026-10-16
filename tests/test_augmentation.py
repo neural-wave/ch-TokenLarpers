@@ -79,6 +79,14 @@ def test_held_out_and_real_pv_are_excluded_before_statistics():
         generate_synthetic(measurements, labels, splits, 1, "import_only", seed=2)
 
 
+def test_excluded_negative_sources_do_not_abort_generation():
+    measurements, labels, splits = artificial_inputs()
+    measurements.loc[measurements.customer_id.isin(["background-b", "real-pv"]), "energy_kwh"] = -3.0
+    splits.loc[splits.customer_id == "background-b", "fold"] = 0
+    result = generate_synthetic(measurements, labels, splits, 0, "signed_net", seed=8)
+    assert set(result.provenance.source_customer_id) == {"background-a"}
+
+
 def test_determinism_is_independent_of_input_order():
     measurements, labels, splits = artificial_inputs()
     first = generate_synthetic(measurements, labels, splits, 0, "import_only", seed=5)

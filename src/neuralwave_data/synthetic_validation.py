@@ -28,7 +28,8 @@ def validate_equations(measurements: pd.DataFrame, provenance: pd.DataFrame,
                        tolerance: float = 1e-9) -> dict[str, Any]:
     """Recompute every observed output reading from independent latent components."""
     _require(measurements, MEASUREMENT_COLUMNS, "measurements")
-    _require(provenance, ["customer_id", "scenario", "meter_mode", "onset_date"], "provenance")
+    _require(provenance, ["customer_id", "scenario", "meter_mode", "onset_date",
+                          "support_start_hour", "support_end_hour"], "provenance")
     _require(latent, ["customer_id", "timestamp_epoch", "baseline_kwh", "demand_kwh", "pv_kwh"], "latent")
     if meter_mode is not None and meter_mode not in {"import_only", "signed_net"}:
         raise ValueError("unknown meter mode")
@@ -50,7 +51,9 @@ def validate_equations(measurements: pd.DataFrame, provenance: pd.DataFrame,
     if (joined["_merge"] != "both").any():
         raise ValueError("latent values missing for generated measurement")
     joined = joined.merge(p[["customer_id", "scenario", "meter_mode", "onset_date", "ramp_days",
-                             "basis_width_hours", "basis_asymmetry"]], on="customer_id", how="left", validate="many_to_one")
+                             "basis_width_hours", "basis_asymmetry", "support_start_hour", "support_end_hour"]], on="customer_id", how="left", validate="many_to_one")
+    if meter_mode is not None and (joined.meter_mode.astype(str) != meter_mode).any():
+        raise ValueError("requested meter mode does not match provenance")
     if joined[["baseline_kwh", "demand_kwh", "pv_kwh"]].apply(lambda col: (~np.isfinite(col)).any()).any():
         # Missing source intervals are represented by NaN baseline/demand and must remain missing;
         # pv is always defined, including for those intervals.
@@ -97,7 +100,9 @@ def validate_equations(measurements: pd.DataFrame, provenance: pd.DataFrame,
         if np.any(pv[local_dates < onset_day] > tolerance):
             raise ValueError("PV generated before onset")
         hours = ((group.timestamp_epoch.to_numpy(dtype=np.int64) + 3600) % 86400) / 3600.0
-        outside = (hours < 5.0) | (hours > 21.0)
+        support_start = float(group.support_start_hour.iloc[0])
+        support_end = float(group.support_end_hour.iloc[0])
+        outside = (hours < support_start) | (hours > support_end)
         if np.any(pv[outside] > tolerance):
             raise ValueError("PV generated outside declared support")
     return {"rows": int(len(joined)), "customers": int(provenance.customer_id.nunique()), "equations": True}
@@ -135,9 +140,6 @@ def validate_outputs(measurements: pd.DataFrame, synthetic_labels: pd.DataFrame,
     result.update(validate_labels(synthetic_labels, provenance))
     if held_out_fold is not None and (pd.to_numeric(provenance.source_fold, errors="coerce") == int(held_out_fold)).any():
         raise ValueError("held-out source ancestry present in synthetic output")
-    if provenance.source_customer_id.astype(str).duplicated().any():
-        # Four scenarios intentionally share a source; this is not an error.
-        pass
     return result
 
 
@@ -156,5 +158,3 @@ def validate_synthetic_directory(directory: str | Path, held_out_fold: int | Non
     latent = pd.read_parquet(directory / "latent.parquet")
     return validate_outputs(measurements, labels, provenance, latent, held_out_fold, meter_mode)
 
-# Friendly aliases used by downstream smoke tests.
-validate = validate_outputs
