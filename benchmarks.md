@@ -134,6 +134,37 @@ Customer POD78:
 1. **Non-PV rejection:** Non-PV customers (`POD74`–`POD77`) produce clean near-zero scores ($0.002$–$0.004$). The model is not fooled by heavy daytime consumption spikes (e.g. `POD76` drawing 65 kWh at noon).
 2. **Solar adoption detection in the wild:** `POD78` produced a minimum probability of **$0.0044$** early in their record, which then jumped to a peak of **$0.9144$** in sunny seasons. The model detected solar adoption on a completely unseen household.
 
+### Extended Wild Generalization: 20 Additional Unseen Customers (POD79 to POD98)
+
+To stress-test the model across a broader range of real-world Swiss customer profiles, we evaluated 20 additional, consecutive unlabelled customers (`POD79` through `POD98`) extracted from `energy_consumption_unlabelled_dev.csv` (over 1.5 million interval readings).
+
+| Customer ID | Model Decision | Aggregated Score | Min Window Prob | Max Window Prob | Midday Avg (kWh) | Night Avg (kWh) | Physical Interpretation |
+|---|---|---:|---:|---:|---:|---:|---|
+| **`POD79`** | `NO PV` | 0.0638 | 0.0028 | 0.2752 | 17.99 | 12.26 | Standard commercial demand |
+| **`POD80`** | **`PV INSTALLED`** | 0.6910 | 0.0112 | 0.8973 | 10.46 | 1.52 | Mid-record solar adoption |
+| **`POD81`** | **`PV INSTALLED`** | 0.9977 | 0.8228 | 0.9981 | 10.98 | 5.15 | Pre-existing PV (active across all 4 years) |
+| **`POD82`** | `NO PV` | 0.3219 | 0.0038 | 0.9737 | 20.08 | 18.33 | Commercial load; summer dip insufficient for $P_{90}$ |
+| **`POD83`** | **`PV INSTALLED`** | 0.6096 | 0.0052 | 0.9706 | 3.05 | 0.75 | Clear physical adoption ($0.005 \rightarrow 0.971$) |
+| **`POD84`** | **`PV INSTALLED`** | 0.9936 | 0.0032 | 0.9941 | 3.16 | 1.02 | Clean residential adoption ($0.003 \rightarrow 0.994$) |
+| **`POD85`** | `NO PV` | 0.1584 | 0.0058 | 0.2749 | 3.41 | 2.16 | Non-PV residential load |
+| **`POD86`** | **`PV INSTALLED`** | 0.9983 | 0.0027 | 0.9984 | 1.84 | 1.95 | Clean residential adoption ($0.003 \rightarrow 0.998$) |
+| **`POD87`** | **`PV INSTALLED`** | 0.9984 | 0.9435 | 0.9984 | 45.82 | 53.13 | High-load pre-existing PV ($p > 0.94$ everywhere) |
+| **`POD88`** | `NO PV` | 0.2625 | 0.0032 | 0.9872 | 0.70 | 0.39 | Low-demand customer with seasonal variations |
+| **`POD89`** | **`PV INSTALLED`** | 0.5751 | 0.0029 | 0.9552 | 3.98 | 3.05 | Mid-record solar adoption ($0.003 \rightarrow 0.955$) |
+| **`POD90`** | **`PV INSTALLED`** | 0.7707 | 0.0066 | 0.8157 | 2.23 | 0.40 | Clean solar adoption |
+| **`POD91`** | **`PV INSTALLED`** | 0.7122 | 0.0037 | 0.9436 | 23.93 | 7.71 | Medium commercial solar adoption |
+| **`POD92`** | **`PV INSTALLED`** | 0.9982 | 0.0061 | 0.9986 | 23.98 | 35.82 | High-demand solar adoption |
+| **`POD93`** | **`PV INSTALLED`** | 0.8533 | 0.0053 | 0.8991 | 20.46 | 0.70 | High daytime generation |
+| **`POD94`** | `NO PV` | 0.0288 | 0.0029 | 0.7952 | 5.03 | 3.41 | Non-PV; single-window spike ignored by $P_{90}$ |
+| **`POD95`** | `NO PV` | 0.1724 | 0.0031 | 0.3564 | 11.86 | 9.02 | Stable commercial load |
+| **`POD96`** | **`PV INSTALLED`** | 0.9980 | 0.0022 | 0.9981 | 75.51 | 64.04 | Heavy industrial PV adoption |
+| **`POD97`** | `NO PV` | 0.0022 | 0.0020 | 0.0022 | 100.71 | 47.80 | Heavy factory (100 kWh noon); probability dead flat at 0.002 |
+| **`POD98`** | **`PV INSTALLED`** | 0.7913 | 0.0045 | 0.8837 | 13.22 | 1.18 | Clean solar adoption |
+
+### Three Distinct Physical Archetypes Recognized in the Wild:
+1. **The Heavy Industrial Non-PV Site (`POD97`):** Consumes over 100 kWh during midday and 48 kWh at night. The model output is dead flat at **$0.0020$–$0.0022$**, completely unbothered by the immense power volume.
+2. **The Clean Mid-Record Adoption (`POD83`, `POD84`, `POD86`, `POD89`, `POD92`, `POD96`):** The model registers baseline probabilities of **$0.002$–$0.006$** early in history, and then jumps sharply to **$0.95$–$0.998$** post-commissioning.
+3. **The Pre-Existing Solar Site (`POD81`, `POD87`):** The model registers high probabilities ($0.82$–$0.998$) across their entire 4-year history, correctly identifying that the installation was commissioned prior to the recording start.
 ---
 
 ## 7. Direct Progression to Tasks 2 and 3
