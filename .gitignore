@@ -1,1 +1,7 @@
 AIL_data_for_neural_wave_v1.1
+artifacts/
+predictions.csv
+pv_extensions_predictions.csv
+__pycache__/
+.venv/
+.pytest_cache/

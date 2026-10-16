@@ -1,0 +1,156 @@
+"""Train the PV model; `--cv` reports a nested customer-level CV estimate of the whole procedure."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from collections import Counter
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from pvdetect.evaluation import REGIMES, count_decisions, nested_cv, outer_splits
+from pvdetect.io import load_extension_labels, load_labels, load_timeseries
+from pvdetect.model import save_model
+from pvdetect.pipeline import build_feature_table, predict
+from pvdetect.procedure import export_enabled_for, fit
+
+REPO = Path(__file__).resolve().parent
+
+
+def _fmt(x: float, nd: int = 3) -> str:
+    return "nan" if x is None or not np.isfinite(x) else f"{x:.{nd}f}"
+
+
+def _selection_line(infos: list[dict]) -> str:
+    n = len(infos)
+    clf = Counter(i.get("classifier") for i in infos)
+    cap = Counter(i.get("capacity") for i in infos)
+    th = np.array([i.get("threshold", np.nan) for i in infos], float)
+    ka = np.array([i.get("kappa", np.nan) for i in infos], float)
+    off = np.array([i.get("offset_event", np.nan) for i in infos], float)
+    rule = Counter(i.get("insufficient_rule") for i in infos if i.get("insufficient_rule"))
+    parts = [
+        f"classifier logreg={clf.get('logreg', 0)}/{n} catboost={clf.get('catboost', 0)}/{n}",
+        f"capacity ridge={cap.get('ridge', 0)}/{n} catboost={cap.get('catboost', 0)}/{n}",
+        f"threshold median={_fmt(np.nanmedian(th), 2)} [{_fmt(np.nanmin(th), 2)},{_fmt(np.nanmax(th), 2)}]",
+        f"kappa median={_fmt(np.nanmedian(ka), 2)}",
+        f"offset median={_fmt(np.nanmedian(off), 1)}",
+    ]
+    if rule:
+        parts.append("insufficient_rule " + " ".join(f"{k}={v}/{n}" for k, v in sorted(rule.items())))
+    return "selection: " + " | ".join(parts)
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--timeseries", required=True)
+    ap.add_argument("--labels", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--ext-labels")
+    ap.add_argument("--cv", action="store_true")
+    ap.add_argument("--outer-repeats", type=int, default=4)
+    ap.add_argument("--report-dir")
+    args = ap.parse_args(argv)
+
+    loaded = load_timeseries(args.timeseries)
+    labels = load_labels(args.labels)
+    missing = set(labels["customer_id"]) - set(loaded.customer_ids)
+    if missing:
+        raise ValueError(f"{len(missing)} labelled customers missing from timeseries")
+    ext_labels = load_extension_labels(args.ext_labels) if args.ext_labels else None
+    table = build_feature_table(loaded)
+    ids = labels["customer_id"].tolist()
+    rep = loaded.report
+    dl = rep["day_length_counts"]
+    signed = sum(1 for c in ids if table.customers[c] is not None and table.customers[c].neg_frac >= 0.01)
+    print(
+        f"data: customers={rep['customers']} labelled={len(ids)} customers_signed={signed}/{len(ids)} "
+        f"export_enabled={str(export_enabled_for(table, ids)).lower()} days92={dl['92']} days100={dl['100']} "
+        f"rows_total={rep['rows_total']} rows_bad_epoch={rep['rows_bad_epoch']} "
+        f"rows_bad_energy={rep['rows_bad_energy']} rows_duplicate={rep['rows_duplicate']}"
+    )
+
+    if args.cv:
+        try:
+            splits = outer_splits(labels, repeats=args.outer_repeats)
+        except ValueError:
+            print("cv skipped: fewer than 2 customers in a class")
+            splits = None
+        if splits is not None:
+            res = nested_cv(fit, predict, table, labels, splits, ext_labels=ext_labels)
+            k = count_decisions(REPO / "DECISIONS.md")
+            biased = " selection-biased" if k > 0 else ""
+            print(
+                f"nested: score={res.mean('score'):.2f}±{res.sd('score'):.2f} "
+                f"ci90=[{res.ci90[0]:.2f},{res.ci90[1]:.2f}] f1={res.mean('f1'):.3f} "
+                f"D={res.mean('D'):.3f} P={res.mean('P'):.3f} outer_informed_decisions={k}{biased}"
+            )
+            by = {r: [x["by_regime"][r] for x in res.regimes] for r in REGIMES}
+            print(
+                "dates: "
+                + " | ".join(
+                    f"{r} n={np.mean([b['n'] for b in by[r]]):.1f} D={_fmt(np.nanmean([b['D'] for b in by[r]]) if any(b['n'] for b in by[r]) else np.nan)}"
+                    for r in REGIMES
+                )
+            )
+            conf = res.regimes[0]["confusion"]
+            short = {"event": "event", "present_at_start": "start", "insufficient": "insuff"}
+            print(
+                "regime_confusion: "
+                + " ".join(f"{short[k.split('->')[0]]}->{short[k.split('->')[1]]}={v}" for k, v in conf.items())
+            )
+            if res.ext_scores:
+                b = res.ext_scores
+                print(
+                    f"ext: bonus={np.mean([x['bonus'] for x in b]):.2f} f1_ext={np.mean([x['f1_ext'] for x in b]):.3f} "
+                    f"D_ext={np.mean([x['D_ext'] for x in b]):.3f} P_ext={np.mean([x['P_ext'] for x in b]):.3f}"
+                )
+            print(_selection_line(res.fit_infos))
+            if args.report_dir:
+                _write_report(Path(args.report_dir), res, labels)
+
+    model = fit(table, labels, ids)
+    save_model(model, args.out)
+    sel = model["selection"]
+    print(
+        f"final: classifier={sel['classifier']} threshold={sel['threshold']:.2f} capacity={sel['capacity']} "
+        f"kappa={sel['kappa']:.2f} offset_days={sel['offset_event']} start_lag_days={sel.get('start_lag', 0)}"
+    )
+    return 0
+
+
+def _write_report(out: Path, res, labels: pd.DataFrame) -> None:
+    out.mkdir(parents=True, exist_ok=True)
+    p = res.oof[0]
+    t = labels.set_index("customer_id").loc[p["customer_id"]].reset_index()
+    rep = pd.DataFrame(
+        {
+            "customer_id": p["customer_id"],
+            "true_pv": t["pv_installed"].map({True: "TRUE", False: "FALSE"}),
+            "prob": p["prob"].round(4),
+            "pred_pv": p["pv_installed"].map({True: "TRUE", False: "FALSE"}),
+            "true_date": t["pv_installation_date"].dt.strftime("%Y-%m-%d"),
+            "pred_date": p["raw_date"].dt.strftime("%Y-%m-%d"),
+            "date_err_days": (p["raw_date"] - t["pv_installation_date"]).dt.days,
+            "pred_regime": p["regime"],
+            "true_regime": np.where(
+                ~t["pv_installed"],
+                "",
+                np.where(t["pv_installation_date"] < p["first_date"], "present_at_start", "event"),
+            ),
+            "true_kwp": t["pv_capacity_kwp"],
+            "pred_kwp": p["raw_kwp"].round(2),
+            "ape": ((p["raw_kwp"] - t["pv_capacity_kwp"]).abs() / t["pv_capacity_kwp"]).round(4),
+            "cp_found": p["cp_found"],
+        }
+    )
+    feats = p.drop(columns=[c for c in p.columns if c in set(rep.columns) | {
+        "pv_installed", "pv_installation_date", "pv_capacity_kwp", "regime", "first_date", "raw_date", "raw_kwp"}])
+    pd.concat([rep, feats.reset_index(drop=True)], axis=1).to_csv(out / "oof_repeat0.csv", sep=";", index=False)
+    (out / "fit_infos.json").write_text(json.dumps(res.fit_infos, indent=2, default=str))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
