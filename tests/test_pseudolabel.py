@@ -269,8 +269,10 @@ def test_label_flip_invariant_with_pool(data, monkeypatch, force):
     if force:  # every option adopted, so the pseudo path runs in the inner and the final fit
         monkeypatch.setattr(procedure, "_adopt", lambda base, cand: (True, 1.0))
     train_ids, test_ids = outer_splits(labels, repeats=1, folds=3)[0][0]
-    m_a = fit(pooled, labels, train_ids)
-    m_b = fit(pooled, _flip(labels, test_ids), train_ids)
+    # forced tail_guard / onset_first re-select the classifier (weekly here), which pseudo-labels never refit
+    opts = procedure.DEFAULT_OPTIONS - {"tail_guard", "onset_first"}
+    m_a = fit(pooled, labels, train_ids, options=opts)
+    m_b = fit(pooled, _flip(labels, test_ids), train_ids, options=opts)
     if force:
         assert m_a["selection"]["pseudo"] == "on" and m_a["selection"]["pseudo_counts"]["inner_pos"] > 0
     pdt.assert_frame_equal(predict(m_a, pooled, test_ids)[0], predict(m_b, pooled, test_ids)[0])
