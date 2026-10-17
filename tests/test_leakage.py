@@ -28,8 +28,8 @@ def _fold_predictions(table, labels, train_ids, test_ids, options=DEFAULT_OPTION
 
 @pytest.mark.parametrize(
     "options",
-    [DEFAULT_OPTIONS, DEFAULT_OPTIONS | {"schedule"}, frozenset()],
-    ids=["default", "with-schedule", "no-e1e2"],
+    [DEFAULT_OPTIONS, DEFAULT_OPTIONS | {"schedule"}, DEFAULT_OPTIONS | {"sun"}, frozenset()],
+    ids=["default", "with-schedule", "with-sun", "no-e1e2"],
 )
 def test_flipping_held_out_labels_changes_nothing_in_their_fold(data, options):
     """Any cache, climatology or selection fitted on held-out labels would change these predictions."""

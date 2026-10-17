@@ -10,7 +10,13 @@ import pandas as pd
 
 from pvdetect.changepoint import shrunk_median, triangle_offset
 from pvdetect.evaluation import inner_splits
-from pvdetect.features import EXPORT_CAPACITY_FEATURES, SCHEDULE_FEATURES, capacity_feature_names, feature_names
+from pvdetect.features import (
+    EXPORT_CAPACITY_FEATURES,
+    SCHEDULE_FEATURES,
+    SUN_FEATURES,
+    capacity_feature_names,
+    feature_names,
+)
 from pvdetect.model import CURRENT_VERSION, fit_logreg, fit_ridge, standardize_params
 from pvdetect.pipeline import (
     SIGNED_SHARE,
@@ -20,9 +26,10 @@ from pvdetect.pipeline import (
     classifier_proba,
     compute_features,
     regimes_and_dates,
+    sun_anomaly,
     to_kwp,
 )
-from pvdetect.season import Climatology, climatology_from_curves, fit_climatology
+from pvdetect.season import Climatology, climatology_from_curves, fit_climatology, fit_sun_index
 from pvdetect.selection import (
     ape_array,
     bootstrap_prob_better,
@@ -46,10 +53,11 @@ START_LAG_CAP = 365
 START_LAG_MIN_N = 3  # fewer present-at-start gaps: 0 (today) or, with `offset_tri`, a shrunk estimate
 # Optional inner-CV options: E1 persistence block, E2 `avg` classifier, schedule-robust feature block,
 # the weekly-evidence head (`weekly`/`avg_weekly` classifiers), the logreg C choice (`ctune`), the
-# score-matched date offsets (`offset_tri`) and the strict short-series detection rule (`recur_strict`).
+# score-matched date offsets (`offset_tri`), the strict short-series detection rule (`recur_strict`) and
+# the sunshine-coupling feature block (`sun`).
 # Without e1/e2/weekly/ctune/offset_tri/recur_strict the procedure is exactly the pre-E1/E2 one
-# (`train.py --no-e1e2 --no-weekly --no-ctune --no-offset-tri --no-recur-strict`); schedule is opt-in.
-ALL_OPTIONS = frozenset({"e1", "e2", "schedule", "weekly", "ctune", "offset_tri", "recur_strict"})
+# (`train.py --no-e1e2 --no-weekly --no-ctune --no-offset-tri --no-recur-strict`); schedule and sun are opt-in.
+ALL_OPTIONS = frozenset({"e1", "e2", "schedule", "weekly", "ctune", "offset_tri", "recur_strict", "sun"})
 DEFAULT_OPTIONS = frozenset({"e1", "e2", "weekly", "ctune", "offset_tri", "recur_strict"})
 LOGREG_C = 0.5  # the default; another C of C_OPTIONS only by the margin rule on the logreg path
 C_OPTIONS = (0.1, 0.5, 2.0)
@@ -184,7 +192,7 @@ def _fit_components(
     y = sub["pv_installed"].to_numpy(bool)
     dates = {c: d.date() for c, d in sub.loc[y, "pv_installation_date"].items() if pd.notna(d)}
     nonpv = [c for c, on in zip(ids, y) if not on]
-    clim = _climatology(table, nonpv, dates, setting)
+    clim = _climatology(table, nonpv, dates, setting, sun="sun_coupling" in names)
     F, cps = compute_features(table, ids, clim, recur_strict=recur_strict)
     date_params = fit_date_params(table, lab, ids, F, cps, tri=offset_tri)
     logreg, objects = _fit_classifiers(F[names].to_numpy(float), y, clf_kinds, C=C)
@@ -207,8 +215,11 @@ def _fit_components(
     return Components(clim, F, cps, date_params, logreg, ridge, ridge_export, fallback, objects, C, recur_strict)
 
 
-def _climatology(table: FeatureTable, nonpv: list[str], pv_dates: dict, setting: tuple[str, str]) -> Climatology:
-    """Climatology for one fit; unlabelled options use the label-free prior's curves/spread."""
+def _climatology(
+    table: FeatureTable, nonpv: list[str], pv_dates: dict, setting: tuple[str, str], *, sun: bool = False
+) -> Climatology:
+    """Climatology for one fit; unlabelled options use the label-free prior's curves/spread; `sun` adds the
+    sunshine index of the fit's labelled PV customers (only when the classifier names include its feature)."""
     clim_kind, scale_kind = setting
     dailies = table.dailies()
     if clim_kind == "unlabelled_0.5":
@@ -217,6 +228,8 @@ def _climatology(table: FeatureTable, nonpv: list[str], pv_dates: dict, setting:
         clim = fit_climatology(dailies, nonpv, pv_dates)
     if scale_kind == "unlabelled_spread":
         clim = replace(clim, evidence_scale=table.unlabelled.evidence_scale)
+    if sun:
+        clim = replace(clim, sun=fit_sun_index({c: sun_anomaly(table, c) for c in pv_dates}, pv_dates))
     return clim
 
 
@@ -571,20 +584,21 @@ def _choose_feature_block(
     return (cand_names, *cand, info) if adopt else (names, oof, sel, info)
 
 
-def _choose_schedule(
-    table, labels, lab, train_ids, splits, names, cap_names, setting, oof, sel, avg=True, C=LOGREG_C, weekly=False,
-    dkw=None,
+def _choose_block(
+    block, extra, table, labels, lab, train_ids, splits, names, cap_names, setting, oof, sel, avg=True, C=LOGREG_C,
+    weekly=False, dkw=None,
 ):
-    """Schedule-robust block (classifier only) on top of the current names, same inner splits and rule."""
-    cand_names = names + list(SCHEDULE_FEATURES)
+    """Optional feature block `extra` (classifier only) on top of the current names, same inner splits and rule;
+    reported as `{block}_block` and `{block}_options`."""
+    cand_names = names + list(extra)
     c_oof = _inner_oof(
         table, labels, lab, train_ids, splits, cand_names, cap_names, setting, C=C, weekly=weekly, **(dkw or {})
     )
     cand = (c_oof, _select(c_oof, avg))
     adopt, boot = _adopt((oof, sel), cand)
     info = {
-        "schedule_block": "on" if adopt else "off",
-        "schedule_options": {"off": sel["inner_score"], "on": cand[1]["inner_score"], "bootstrap_p": boot},
+        f"{block}_block": "on" if adopt else "off",
+        f"{block}_options": {"off": sel["inner_score"], "on": cand[1]["inner_score"], "bootstrap_p": boot},
     }
     return (cand_names, *cand, info) if adopt else (names, oof, sel, info)
 
@@ -610,6 +624,7 @@ def fit(
     C, c_info = LOGREG_C, ({"logreg_C": LOGREG_C} if "ctune" in options else {})
     feat_info = {"feature_block": "base"} if "e1" in options else {}
     sched_info = {"schedule_block": "off"} if "schedule" in options else {}
+    sun_info = {"sun_block": "off"} if "sun" in options else {}
     pseudo_info = {"pseudo": "off"} if table.unlabelled_pool else {}
     tri_info = {"offset_tri": "off"} if "offset_tri" in options else {}
     strict_info = {"recur_strict": "off"} if "recur_strict" in options else {}
@@ -641,9 +656,14 @@ def fit(
             names, oof, sel, feat_info = _choose_feature_block(
                 table, labels, lab, train_ids, splits, export, cap_names, setting, oof, sel, avg, C, weekly, dkw
             )
+        block_args = (table, labels, lab, train_ids, splits)
         if "schedule" in options:
-            names, oof, sel, sched_info = _choose_schedule(
-                table, labels, lab, train_ids, splits, names, cap_names, setting, oof, sel, avg, C, weekly, dkw
+            names, oof, sel, sched_info = _choose_block(
+                "schedule", SCHEDULE_FEATURES, *block_args, names, cap_names, setting, oof, sel, avg, C, weekly, dkw
+            )
+        if "sun" in options:
+            names, oof, sel, sun_info = _choose_block(
+                "sun", SUN_FEATURES, *block_args, names, cap_names, setting, oof, sel, avg, C, weekly, dkw
             )
         if table.unlabelled_pool:
             from pvdetect.pseudolabel import choose_pseudo  # pseudolabel imports this module
@@ -687,6 +707,7 @@ def fit(
     sel.update(unl_info)
     sel.update(feat_info)
     sel.update(sched_info)
+    sel.update(sun_info)
     sel.update(pseudo_info)
     uses_cb = sel["classifier"] in ("catboost", "avg")
     objects = {}

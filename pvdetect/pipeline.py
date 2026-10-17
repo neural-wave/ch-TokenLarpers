@@ -16,10 +16,11 @@ from pvdetect.features import (
     LOG1P_CAPACITY,
     fitted_features,
     label_free_features,
+    sun_coupling,
 )
 from pvdetect.io import LoadedTimeseries, day_matrix
 from pvdetect.model import linear_score, sigmoid
-from pvdetect.season import Climatology
+from pvdetect.season import Climatology, sun_residual
 from pvdetect.weekly import customer_scores
 
 if TYPE_CHECKING:
@@ -79,11 +80,21 @@ def build_feature_table(loaded: LoadedTimeseries) -> FeatureTable:
     return FeatureTable(ids=list(loaded.customer_ids), customers=customers)
 
 
+def sun_anomaly(table: FeatureTable, cid: str) -> pd.Series:
+    """Cached label-free `sun_residual` of one customer (§2 cache rule)."""
+    cache = table.cache.setdefault("sun_residual", {})
+    if cid not in cache:
+        cd = table.customers.get(cid)
+        cache[cid] = sun_residual(cd.daily) if cd is not None and cd.n_valid else pd.Series(dtype=float)
+    return cache[cid]
+
+
 def compute_features(
     table: FeatureTable, ids: list[str], clim: Climatology, *, recur_strict: bool = False
 ) -> tuple[pd.DataFrame, dict]:
     """All features for `ids` under `clim` (and the fit's `recur_strict` detection option); only the
-    label-free part is cached on the table."""
+    label-free part is cached on the table. With a sunshine index, a contributor's `sun_coupling` uses the
+    index without itself."""
     lf_cache = table.cache.setdefault("label_free", {})
     rows, cps = {}, {}
     for cid in ids:
@@ -92,6 +103,8 @@ def compute_features(
             lf_cache[cid] = label_free_features(cd)
         lf = lf_cache[cid]
         fitted, cp = fitted_features(cd, clim, lf, recur_strict=recur_strict)
+        if clim.sun is not None:
+            fitted["sun_coupling"] = sun_coupling(sun_anomaly(table, cid), clim.sun.series(cid))
         rows[cid] = {**lf, **fitted}
         cps[cid] = cp
     return pd.DataFrame.from_dict(rows, orient="index").reindex(ids), cps
