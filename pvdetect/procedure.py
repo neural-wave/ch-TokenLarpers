@@ -12,7 +12,9 @@ from pvdetect.changepoint import shrunk_median, triangle_offset
 from pvdetect.evaluation import inner_splits
 from pvdetect.features import (
     EXPORT_CAPACITY_FEATURES,
+    RECENT_FEATURES,
     SCHEDULE_FEATURES,
+    SMALLPV_FEATURES,
     SUN_FEATURES,
     capacity_feature_names,
     feature_names,
@@ -57,8 +59,13 @@ START_LAG_MIN_N = 3  # fewer present-at-start gaps: 0 (today) or, with `offset_t
 # the sunshine-coupling feature block (`sun`).
 # Without e1/e2/weekly/ctune/offset_tri/recur_strict the procedure is exactly the pre-E1/E2 one
 # (`train.py --no-e1e2 --no-weekly --no-ctune --no-offset-tri --no-recur-strict`); schedule and sun are opt-in.
-ALL_OPTIONS = frozenset({"e1", "e2", "schedule", "weekly", "ctune", "offset_tri", "recur_strict", "sun"})
-DEFAULT_OPTIONS = frozenset({"e1", "e2", "weekly", "ctune", "offset_tri", "recur_strict"})
+# Recall-targeted feature blocks (missed PV): `recent` (tail evidence against the same weeks of earlier years and
+# the customer's own earlier level) and `smallpv` (scale-free midday deficit against night/evening load).
+# Both are in the default pool; `train.py --no-recent --no-smallpv` removes them.
+ALL_OPTIONS = frozenset(
+    {"e1", "e2", "schedule", "weekly", "ctune", "offset_tri", "recur_strict", "sun", "recent", "smallpv"}
+)
+DEFAULT_OPTIONS = frozenset({"e1", "e2", "weekly", "ctune", "offset_tri", "recur_strict", "recent", "smallpv"})
 LOGREG_C = 0.5  # the default; another C of C_OPTIONS only by the margin rule on the logreg path
 C_OPTIONS = (0.1, 0.5, 2.0)
 WEEKLY_KINDS = ("weekly", "avg_weekly")
@@ -749,6 +756,8 @@ def fit(
     feat_info = {"feature_block": "base"} if "e1" in options else {}
     sched_info = {"schedule_block": "off"} if "schedule" in options else {}
     sun_info = {"sun_block": "off"} if "sun" in options else {}
+    recent_info = {"recent_block": "off"} if "recent" in options else {}
+    smallpv_info = {"smallpv_block": "off"} if "smallpv" in options else {}
     pseudo_info = {"pseudo": "off"} if table.unlabelled_pool else {}
     tri_info = {"offset_tri": "off"} if "offset_tri" in options else {}
     strict_info = {"recur_strict": "off"} if "recur_strict" in options else {}
@@ -799,6 +808,16 @@ def fit(
                 "sun", SUN_FEATURES, *block_args, names, cap_names, setting, oof, sel, avg, C, weekly, dkw
             )
             sel["inner_score"] = _full_inner_score(oof, sel)
+        for key, extra in (("recent", RECENT_FEATURES), ("smallpv", SMALLPV_FEATURES)):
+            if key in options:
+                names, oof, sel, info = _choose_block(
+                    key, extra, *block_args, names, cap_names, setting, oof, sel, avg, C, weekly, dkw
+                )
+                sel["inner_score"] = _full_inner_score(oof, sel)
+                if key == "recent":
+                    recent_info = info
+                else:
+                    smallpv_info = info
         base_oof, base_sel = oof, sel
         option_oof, option_sel = oof, sel
     else:
@@ -901,6 +920,8 @@ def fit(
     sel.update(unl_info)
     sel.update(sched_info)
     sel.update(sun_info)
+    sel.update(recent_info)
+    sel.update(smallpv_info)
     sel.update(pseudo_info)
     clf_kinds = ("logreg", "catboost") if sel["classifier"] in ("avg", "catboost") or labeller else ("logreg", "logreg")
     comp = _fit_components(

@@ -53,13 +53,21 @@ SCHEDULE_MIN_DAYS = 20  # valid days per stratum (weekday / weekend) on each sid
 # classifier only when inner CV picks it.
 SUN_FEATURES = ("sun_coupling",)
 SUN_MIN_DAYS = 40  # shared April–September days with a finite index
+# Recall blocks (options `recent`, `smallpv`): label-free, so cached with the other label-free features; the
+# classifier uses them only when inner CV picks the block.
+RECENT_FEATURES = ("recent_matched_step", "recent_prior_step", "recent_zero_frac")
+SMALLPV_FEATURES = ("deficit_contrast", "deficit_q10_contrast")
+RECENT_DAYS = 84  # the tail: the last 12 weeks of valid days
+RECENT_MIN_DAYS = 20  # valid days in the tail and in each comparison window
+RECENT_MATCH_GAP = 300  # matched weeks lie at least this many days before the tail
+SMALLPV_MIN_DAYS = 30  # valid summer and winter days in the last 365
 CAPACITY_FEATURES = ("dip_kw", "log_kwp_phys", "zero_window_h", "night_kw", "log_mean_daily_kwh")
 EXPORT_CAPACITY_FEATURES = ("export_kw", "night_kw")
 LOG1P_CAPACITY = ("dip_kw", "zero_window_h", "night_kw", "export_kw")
 NOON_SLOT = 50  # 12:30 UTC+1
 
 
-def feature_names(export_enabled: bool, persistence: bool = False) -> list[str]:
+def feature_names(export_enabled: bool, persistence: bool = False) -> list[str]:  # blocks are appended by `fit`
     return (
         list(FEATURE_NAMES)
         + (list(EXPORT_FEATURES) if export_enabled else [])
@@ -93,6 +101,55 @@ def sun_coupling(z: pd.Series, sun: pd.Series) -> float:
     if a.std() == 0 or b.std() == 0:
         return np.nan
     return float(np.corrcoef(a, b)[0, 1])
+
+
+def recent_features(v: pd.DataFrame) -> dict[str, float]:
+    """Tail evidence from the last RECENT_DAYS days of valid days (label-free; NaN when a window is short).
+
+    `recent_matched_step`: median `s` of the same ISO weeks at least RECENT_MATCH_GAP days before the tail minus
+    the tail's median `s` (season-matched: positive when the midday dip is deeper now than in earlier years).
+    `recent_prior_step`: median `s` of the RECENT_DAYS days before the tail minus the tail's (the customer's own
+    earlier level; season is not removed, but both windows are adjacent). `recent_zero_frac`: mean share of
+    near-zero midday slots in the tail."""
+    out = dict.fromkeys(RECENT_FEATURES, np.nan)
+    if v.empty:
+        return out
+    end = v.index[-1]
+    tail_start = end - pd.Timedelta(days=RECENT_DAYS - 1)
+    tail = v[v.index >= tail_start]
+    if len(tail) < RECENT_MIN_DAYS:
+        return out
+    s_tail = _med(tail["s"], RECENT_MIN_DAYS)
+    out["recent_zero_frac"] = float(tail["zero"].mean())
+    earlier = v[v.index <= tail_start - pd.Timedelta(days=RECENT_MATCH_GAP)]
+    matched = earlier[earlier["woy"].isin(set(tail["woy"]))]
+    out["recent_matched_step"] = _med(matched["s"], RECENT_MIN_DAYS) - s_tail
+    prior = v[(v.index < tail_start) & (v.index >= tail_start - pd.Timedelta(days=RECENT_DAYS))]
+    out["recent_prior_step"] = _med(prior["s"], RECENT_MIN_DAYS) - s_tail
+    return out
+
+
+def smallpv_features(v: pd.DataFrame) -> dict[str, float]:
+    """Scale-free midday deficit against the customer's own night and evening load (label-free).
+
+    Daily log ratio r = log((mid⁺+ε)/(mean(night, eve)⁺+ε)) over the last 365 days. `deficit_contrast` is the
+    summer median of r minus the winter median; `deficit_q10_contrast` the same with the 10th percentiles, which
+    follow the sunny days a small PV system still dents when the median day is clouded. NaN with fewer than
+    SMALLPV_MIN_DAYS summer or winter days."""
+    out = dict.fromkeys(SMALLPV_FEATURES, np.nan)
+    w = last365(v)
+    if w.empty:
+        return out
+    ref = (w["night"].to_numpy(float) + w["eve"].to_numpy(float)) / 2
+    r = np.log((np.maximum(w["mid"].to_numpy(float), 0) + EPS) / (np.maximum(ref, 0) + EPS))
+    months = w["month"].to_numpy()
+    su, wi = r[np.isin(months, SUMMER)], r[np.isin(months, WINTER)]
+    su, wi = su[np.isfinite(su)], wi[np.isfinite(wi)]
+    if su.size < SMALLPV_MIN_DAYS or wi.size < SMALLPV_MIN_DAYS:
+        return out
+    out["deficit_contrast"] = float(np.median(su) - np.median(wi))
+    out["deficit_q10_contrast"] = float(np.quantile(su, 0.10) - np.quantile(wi, 0.10))
+    return out
 
 
 def first365(v: pd.DataFrame) -> pd.DataFrame:
@@ -178,11 +235,13 @@ def daily_label_free_features(daily: pd.DataFrame) -> dict[str, float]:
 
 def label_free_features(cd) -> dict[str, float]:
     """Features that never depend on labels or fitted artifacts (cacheable across folds)."""
-    out = dict.fromkeys(LABEL_FREE + EXPORT_FEATURES, np.nan)
+    out = dict.fromkeys(LABEL_FREE + EXPORT_FEATURES + RECENT_FEATURES + SMALLPV_FEATURES, np.nan)
     if cd is None or cd.n_valid == 0:
         return out
     v = cd.daily[cd.daily["valid"]]
     out.update(daily_label_free_features(cd.daily))
+    out.update(recent_features(v))
+    out.update(smallpv_features(v))
     out["dip_center_hour"] = _dip_center_hour(cd.dates, cd.M, v)
     out["zero_window_h"] = _zero_window_h(cd.dates, cd.M, v)
     out["neg_frac"] = cd.neg_frac

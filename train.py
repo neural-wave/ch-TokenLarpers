@@ -60,7 +60,7 @@ def _selection_line(infos: list[dict]) -> str:
     block = Counter(i.get("feature_block") for i in infos if i.get("feature_block"))
     if block:
         parts.append(f"features base={block.get('base', 0)}/{n} persistence={block.get('persistence', 0)}/{n}")
-    for key in ("schedule", "sun"):
+    for key in ("schedule", "sun", "recent", "smallpv"):
         got = Counter(i.get(f"{key}_block") for i in infos if i.get(f"{key}_block"))
         if got:
             parts.append(f"{key} off={got.get('off', 0)}/{n} on={got.get('on', 0)}/{n}")
@@ -123,6 +123,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-ctune", action="store_true", help="keep the logreg C at its default (no inner-CV C choice)")
     ap.add_argument("--no-offset-tri", action="store_true", help="keep the shrunk-median date offsets (no inner-CV choice)")
     ap.add_argument("--no-recur-strict", action="store_true", help="drop the strict short-series detection option")
+    ap.add_argument("--no-recent", action="store_true", help="drop the recent-evidence feature-block option")
+    ap.add_argument("--no-smallpv", action="store_true", help="drop the scale-free small-PV feature-block option")
     ap.add_argument("--schedule", action="store_true", help="add the schedule-robust feature-block option")
     ap.add_argument("--sun", action="store_true", help="add the sunshine-coupling feature-block option")
     ap.add_argument(
@@ -146,6 +148,8 @@ def main(argv: list[str] | None = None) -> int:
         | ({"ctune"} if args.no_ctune else set())
         | ({"offset_tri"} if args.no_offset_tri else set())
         | ({"recur_strict"} if args.no_recur_strict else set())
+        | ({"recent"} if args.no_recent else set())
+        | ({"smallpv"} if args.no_smallpv else set())
     )
     options = DEFAULT_OPTIONS - dropped | {o for o in ("schedule", "sun") if getattr(args, o)}
     if args.oof_out and not args.cv:
