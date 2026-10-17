@@ -83,3 +83,58 @@ def test_reconstruction_uses_observed_positions_only():
 def test_bad_divisibility():
     from neuralwave_experiment.encoder import EncoderConfig, NumericPatchEncoder
     with pytest.raises(ValueError): NumericPatchEncoder(EncoderConfig(context_length=10,patch_length=4))
+
+def test_mask_selection_requires_visible_observations():
+    torch = pytest.importorskip("torch")
+    from neuralwave_experiment.windows import WindowBatch
+    from neuralwave_experiment.encoder import EncoderConfig, NumericPatchEncoder
+    from neuralwave_experiment.pretraining import pretrain_encoder
+    batch = WindowBatch(
+        values=np.ones((1, 4, 1), dtype=np.float32),
+        observed=np.ones((1, 4, 1), dtype=bool),
+        calendar=np.zeros((1, 4, 4), dtype=np.float32),
+        magnitude=np.ones((1, 4), dtype=np.float32),
+        customer_ids=["a"], center_dates=[], start_epochs=np.array([0], dtype=np.int64),
+    )
+    model = NumericPatchEncoder(EncoderConfig(context_length=4, patch_length=4, d_model=8, n_heads=2, n_layers=1))
+    with pytest.raises(ValueError):
+        pretrain_encoder(model, batch, epochs=1, mask_ratio=1.0)
+
+
+@pytest.mark.parametrize("flat_visible", [False, True])
+def test_hidden_targets_cannot_change_visible_pretraining_inputs(flat_visible):
+    torch = pytest.importorskip("torch")
+    from neuralwave_experiment.windows import WindowConfig, build_windows
+    from neuralwave_experiment.encoder import EncoderConfig, NumericPatchEncoder
+    from neuralwave_experiment.pretraining import pretrain_encoder
+
+    raw = np.ones(16) if flat_visible else np.tile([1., 2., 3., 4.], 4)
+    captured = []
+
+    def train_and_capture(signal):
+        frame = pd.DataFrame({
+            "customer_id": ["fabricated"] * 16,
+            "timestamp_epoch": np.arange(16) * 900,
+            "energy_kwh": signal,
+            "value_status": ["observed"] * 16,
+        })
+        batch = build_windows(frame, WindowConfig(context_length=16))
+        model = NumericPatchEncoder(EncoderConfig(
+            context_length=16, patch_length=4, d_model=8,
+            n_heads=2, n_layers=1, dropout=0.))
+        actual = model.token_outputs
+
+        def capture(values, observed, calendar, **kwargs):
+            captured.append((values.detach().clone(), observed.detach().clone()))
+            return actual(values, observed, calendar, **kwargs)
+
+        model.token_outputs = capture
+        pretrain_encoder(model, batch, epochs=1, mask_ratio=.25, seed=17)
+
+    train_and_capture(raw)
+    hidden = ~captured[0][1].numpy().reshape(-1)
+    altered = raw.copy()
+    altered[hidden] = np.arange(hidden.sum()) + 1000.
+    train_and_capture(altered)
+    assert torch.equal(captured[0][1], captured[1][1])
+    assert torch.allclose(captured[0][0], captured[1][0], atol=1e-4)

@@ -24,6 +24,20 @@ Run the regression suite with `python -m pytest -q tests/test_preprocessing.py` 
 
 See [the synthesis usage guide](docs/synthetic_data.md). Use only confirmed non-PV training backgrounds and explicitly choose the meter mode. Synthetic capacity targets are deliberately invalid.
 
+## Frozen matched evaluation
+
+Use the [evaluation protocol](docs/evaluation_protocol.md) for the current matched comparison. Architecture settings are fixed; the arms are hourly-profile logistic regression, PatchTST from scratch, and the same PatchTST with masked pretraining. Thresholds use inner customer-OOF predictions; outer customer assignments genuinely change across repetitions. Persistence uses timestamps and observed coverage, not positions in subsampled arrays.
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m neuralwave_experiment.evaluation \
+  --canonical-dir data_private/patchtst_comparison_canonical \
+  --out artifacts_private/evaluation_v1 \
+  --config configs/evaluation.json \
+  --data-kind development
+```
+
+Install the `experiment` extra first. This retains all split assignments, inner/outer predictions, calibration candidates, models, histories, and input/config identities. It reports presence and temporal diagnostics, not a capacity or blind-test score. The [benchmark status](benchmarks.md) distinguishes historical development numbers from the new protocol. Verification so far is an artificial-data smoke, not a new AIL benchmark.
+
 ## Numerical embedding experiment
 
 The [implementation plan](docs/time_series_experiment_plan.md) was written before parallel implementation. See [the experiment guide](docs/embedding_experiment.md) for the three-arm customer-held-out comparison and [encoder details](docs/representation_encoder.md).
