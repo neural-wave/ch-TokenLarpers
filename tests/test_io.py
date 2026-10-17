@@ -5,7 +5,7 @@ import pandas as pd
 import pandas.testing as pdt
 import pytest
 
-from pvdetect.io import day_matrix, load_timeseries
+from pvdetect.io import day_matrix, load_timeseries, split_by_customer
 from pvdetect.synthetic import CustomerSpec, generate_customer
 
 SPEC = CustomerSpec("000123", "2024-03-01", "2024-11-30", missing=False)
@@ -57,3 +57,28 @@ def test_missing_required_column_raises(tmp_path, clean):
     clean.drop(columns=["timestamp_local"]).to_csv(path, index=False)
     with pytest.raises(ValueError, match="missing required columns"):
         load_timeseries(path)
+
+
+def test_split_by_customer_partitions_customers_and_rows(tmp_path):
+    ids = [f"{i:05d}" for i in range(1, 9)]
+    df = pd.concat(
+        [generate_customer(CustomerSpec(c, "2024-03-01", "2024-03-10", missing=False), i) for i, c in enumerate(ids)],
+        ignore_index=True,
+    )
+    src = tmp_path / "in.csv"
+    df.to_csv(src, index=False, sep=";", decimal=",")
+    raw = pd.read_csv(src, sep=";", dtype=str, keep_default_na=False)
+
+    train, test = split_by_customer(src, tmp_path / "a", seed=3, chunksize=1000)
+    assert (len(train), len(test)) == (6, 2)
+    assert sorted(train + test) == ids
+    tr = pd.read_csv(tmp_path / "a" / "training.csv", sep=";", dtype=str, keep_default_na=False)
+    te = pd.read_csv(tmp_path / "a" / "test.csv", sep=";", dtype=str, keep_default_na=False)
+    assert list(tr.columns) == list(raw.columns) == list(te.columns)
+    assert sorted(set(tr["customer_id"])) == train and sorted(set(te["customer_id"])) == test
+    key = list(raw.columns)
+    both = pd.concat([tr, te]).sort_values(key, ignore_index=True)
+    pdt.assert_frame_equal(both, raw.sort_values(key, ignore_index=True))
+
+    assert split_by_customer(src, tmp_path / "b", seed=3) == (train, test)
+    assert split_by_customer(src, tmp_path / "c", seed=4) != (train, test)
