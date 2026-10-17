@@ -4,6 +4,8 @@ Supersedes v3.2 and earlier. Repo: `neural-wave/ch-TokenLarpers`, branch `Jeffre
 
 Status note (2026-10-17, `main`): evaluation protocol v2 (`docs/evaluation_lockbox_plan.md`) is implemented and synthetic-verified: pre-registered `configs/lockbox.json`, stratified `split_by_customer`, `pvdetect.lockbox` / `scripts/lockbox.sh` (seal → develop / compare within the decision budget → freeze → open once → final), `ci90` pooled over all repeats, `pvdetect.stability`, and the GUI's single-look lock-box card. The real-data stages are run by the data holder (README, "Lock-box protocol"); no lock-box has been sealed or opened on real data by an agent.
 
+Status note (2026-10-17, `main`): recall-targeted Tier A options `recent` and `smallpv` (label-free feature blocks) are in the default inner pool, with dev scenarios `late_install` and `small_pv`; inner CV decides per fit, and `--no-recent` / `--no-smallpv` remove them. Synthetic only; nothing is validated on real data (README, "Recall-targeted options").
+
 ## 0. Decisions and audit
 
 ### 0.1 User decision: no isolation gate
