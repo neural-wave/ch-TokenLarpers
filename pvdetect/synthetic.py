@@ -32,6 +32,8 @@ SCENARIOS = (
     "label_lag_60",
     "meter_spikes",
     "shared_weather",
+    "late_install",
+    "small_pv",
 )
 # Development-only scenarios (variant A): `label_lag_60` labels each PV customer 30–90 days after its
 # visible onset; `meter_spikes` adds a few isolated single-slot spikes of 20–50× the median slot value
@@ -39,7 +41,10 @@ SCENARIOS = (
 # `shared_weather` reuses the base customers too, but every customer sees one dataset-wide daily sunshine
 # series (PV output and AC load follow it) and the non-PV hard negatives become sun-driven AC or a
 # recurring summer weekday daytime absence, i.e. load patterns that mimic a PV midday dip or peak.
-A_ONLY_SCENARIOS = ("label_lag_60", "meter_spikes", "shared_weather")
+# `late_install` moves every PV installation into the last 8–16 weeks of its coverage (little post-install data);
+# `small_pv` draws residential PV of 0.8–2.0 kWp (a shallow midday dip). Both use the `aux` stream, so the other
+# draws of the base customers stay as they are.
+A_ONLY_SCENARIOS = ("label_lag_60", "meter_spikes", "shared_weather", "late_install", "small_pv")
 SHARED_WEATHER_KINDS = ("ac", "summer_absence")
 SPIKES_PER_YEAR = 3
 WEATHER_EPOCH = np.datetime64("2015-01-01", "D")
@@ -475,6 +480,10 @@ def _dataset_specs(
             else:
                 pv_date = draw_date()
             kwp = round(float(rng.uniform(15, 60) if commercial else rng.uniform(3, 15)), 1)
+            if scenario == "late_install":
+                pv_date = cend - pd.Timedelta(days=int(aux.integers(56, 113)))
+            if scenario == "small_pv" and not commercial:
+                kwp = round(float(aux.uniform(0.8, 2.0)), 1)
             if scenario == "east_west_heavy":
                 ew = (i // 2) % 2 == 0
             else:

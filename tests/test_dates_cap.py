@@ -294,7 +294,7 @@ def test_meter_spikes_scenario_and_variant_guard():
     assert (ts_b[["customer_id", "timestamp_epoch"]].to_numpy() == ts_s[["customer_id", "timestamp_epoch"]].to_numpy()).all()
     diff = ts_b["energy_consumption_kwh"].to_numpy() != ts_s["energy_consumption_kwh"].to_numpy()
     assert 0 < diff.sum() <= 4 * round(3 * 1461 / 365)
-    for sc in ("label_lag_60", "meter_spikes", "shared_weather"):
+    for sc in ("label_lag_60", "meter_spikes", "shared_weather", "late_install", "small_pv"):
         with pytest.raises(ValueError, match="variant A only"):
             generate_dataset(2, 3, variant="B", scenario=sc)
 
@@ -324,3 +324,27 @@ def test_holdout_default_scenarios_are_unchanged(monkeypatch, tmp_path):
         "pv_before_start",
     ]
     assert [seed for _, seed, _ in held] == [block + j for j in range(len(held))]
+
+
+def test_late_install_puts_every_installation_in_the_last_8_to_16_weeks():
+    ts, lab, _ = generate_dataset(12, 3, scenario="late_install")
+    last = ts.groupby("customer_id")["timestamp_local"].max().map(lambda x: pd.Timestamp(x[:10]))
+    pv = lab[lab["pv_installed"] == "TRUE"]
+    assert len(pv)
+    gap = last.loc[pv["customer_id"]].to_numpy() - pd.to_datetime(pv["pv_installation_date"]).to_numpy()
+    days = gap.astype("timedelta64[D]").astype(int)
+    assert ((days >= 55) & (days <= 113)).all()
+    base = generate_dataset(12, 3)[1]
+    assert (base["pv_installed"] == lab["pv_installed"]).all()
+    assert (base["pv_capacity_kwp"] == lab["pv_capacity_kwp"]).all()
+
+
+def test_small_pv_draws_small_residential_systems_only():
+    base = generate_dataset(24, 3)[1]
+    lab = generate_dataset(24, 3, scenario="small_pv")[1]
+    pv = lab["pv_installed"] == "TRUE"
+    kwp = lab.loc[pv, "pv_capacity_kwp"].astype(float)
+    big = base.loc[pv, "pv_capacity_kwp"].astype(float) > 15
+    assert (kwp[~big] <= 2.0).all() and (kwp[~big] >= 0.8).all()
+    assert (kwp[big] == base.loc[pv, "pv_capacity_kwp"].astype(float)[big]).all()
+    assert (lab["pv_installation_date"] == base["pv_installation_date"]).all()
