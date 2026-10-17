@@ -71,9 +71,9 @@ Date-error medians/hit fractions are conditional on an available date prediction
 
 Old four-entry persistence, in-sample threshold calibration, hardcoded cached-seed evaluation, training-overlapping synthetic evaluation, and hardcoded-threshold unlabelled scripts were removed. Historical result files were not overwritten. Physical load-profile inspection remains exploratory, not independent confirmation of tariffs or hardware.
 
-## Verification
+## Initial integration verification
 
-The integrated suite passes **139 tests** on Python 3.12 with Torch 2.14.1, including the actual three-arm CLI with supplied customer folds, hidden-target normalization invariants, projection isolation, model artifact checks, and rejection of fold-label permutations masquerading as new repetitions. Ten warnings concern the existing development encoder's disabled nested-tensor optimization, not failed assertions.
+The initial integrated suite passed **139 tests** on Python 3.12 with Torch 2.14.1, including the actual three-arm CLI with supplied customer folds, hidden-target normalization invariants, projection isolation, model artifact checks, and rejection of fold-label permutations masquerading as new repetitions. Ten warnings concern the existing development encoder's disabled nested-tensor optimization, not failed assertions.
 
 Additional actual CLI checks used entirely fabricated populations: 16 labelled customers, six separate unlabelled pretraining customers and two separate validation customers. A tiny smoke encoder (width 8, one layer, two heads) completed two epochs/eight optimizer updates. Uninterrupted, epoch-boundary interrupted/resumed, and completed-checkpoint-resumed runs produced exactly equal encoder tensors, training histories, validation histories, sampler counts and progress. This establishes resumability, not useful representations.
 
@@ -82,3 +82,9 @@ With no encoder, fitted baseline inference produced byte-identical prediction an
 The frozen default architecture contains 110,034 parameters, distinct from the deliberately tiny smoke model. Neither parameter count nor reconstruction loss establishes PV accuracy. No CUDA run, AIL data access, blind evaluation, real-data training, upload or cloud rental occurred. Real-data publication still requires the organizer/human approval described in the README.
 
 The hybrid nested CLI also completed two genuinely different two-fold outer customer partitions on the 16 artificial labelled customers. Its shared OOF file retained exactly 32 unique `(repeat, customer_id)` rows, every fold matched its supplied assignment, and the shared official scorer accepted the file. Automatic selection retained baseline on the final fit. These are artificial execution checks, not reportable AIL performance.
+
+## Upstream v3.3 integration verification
+
+Merged `origin/Jeffremm10/new-stack` at `9cb7bb0` into the hybrid branch. The merged suite passes **151 tests**, including final-threshold rescoring, submitted capacity bounds, and dependency-free baseline/hybrid export with unsafe/duplicate encoder-reference rejection. The stdlib export listing includes both encoder files, not just CatBoost artifacts.
+
+An actual forced-hybrid training CLI completed on the same 16 wholly artificial labelled customers. Network-blocked inference succeeded. A clean export of merge commit `efc90b8` using Python with site packages disabled passed the release audit; exported inference without a source-worktree `PYTHONPATH` reproduced both pre-export CSVs byte for byte with network connections blocked. These checks do not establish CUDA readiness or real-customer accuracy.
