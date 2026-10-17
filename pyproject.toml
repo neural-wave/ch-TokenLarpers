@@ -25,3 +25,7 @@ neuralwave-prepare = "neuralwave_data.prepare:main"
 
 [tool.setuptools.package-data]
 "neuralwave_experiment.vendor.patchtst" = ["LICENSE", "NOTICE", "README.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

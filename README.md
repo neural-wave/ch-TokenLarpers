@@ -1,6 +1,20 @@
 # NeuralWave data pipelines
 
-This branch combines canonical preprocessing, constrained synthetic PV generation, and offline numerical time-series embedding experiments. Raw organizer data and all data-derived artifacts remain private. Regression tests use independently fabricated inputs; authorized local evaluation can use AIL data.
+This branch combines canonical preprocessing, constrained synthetic PV generation, offline numerical time-series embedding experiments, and the Task 1 PatchTST window classifier. Raw organizer data and all data-derived artifacts remain private. Regression tests use independently fabricated inputs; authorized local evaluation can use AIL data.
+
+## Data hygiene
+
+The repository is open-sourced after the event, so nothing derived from the AIL data may enter git history: raw files and generated artifacts stay under private, git-ignored paths (`data_private/`, `artifacts_private/`), and reports such as [benchmarks.md](benchmarks.md) hold aggregate metrics only, never customer identifiers, per-customer readings, probabilities or label dates.
+
+Install the commit-time check once per clone:
+
+```bash
+sh scripts/install_hooks.sh
+```
+
+It copies `scripts/check_hygiene.py` into `.git/hooks/pre-commit` (a copy, so the hook also works on branches without the script; re-run after editing it). The hook checks the staged files and refuses the commit when any of them is a data or model dump (`.csv`, `.parquet`, `.cbm`, `.pt`, ...), lives under an artifacts directory, or contains a real customer identifier (the letters `POD` immediately followed by digits). Fabricated fixtures use identifiers such as `PODSYN001`, which start with `POD` as the organizer filter requires but are not matched. The check prints offending paths only, never their content. `python scripts/check_hygiene.py --all` audits the whole tracked tree and is meant for CI; `tests/test_hygiene.py` runs it too. The hand-in is an export of the frozen tree (`git archive <commit>`), never this history.
+
+Run the full regression suite with `python -m pytest -q`; `pyproject.toml` points pytest at `tests/` and puts `src/` on the path, so no install is needed for the tests.
 
 ## Install and run
 
@@ -66,3 +80,33 @@ python -m neuralwave_experiment.comparison \
 ```
 
 This runs both backends with identical folds and training budgets, writes per-backend predictions/checkpoints and `comparison.json`, and requires identical raw-feature baseline outputs. Set `encoder_backend` to `custom` or `official_patchtst` to run just one backend through the experiment CLI. The upstream source is pinned and distributed with Apache-2.0 license and modification notices; no source checkout or download is needed at runtime.
+
+## Task 1 window classifier on the shared comparison contract
+
+[benchmarks.md](benchmarks.md) reports the PatchTST window classifier (aggregate metrics only). Every pipeline in the team is scored on identical customer folds and writes the same out-of-fold prediction file, so results stay comparable across branches without a package merge:
+
+* **Split files.** `python -m neuralwave_data.prepare ... --folds 5 --seed S` writes `splits.parquet` (`customer_id`, `fold`). Seeds 0, 1 and 2 give three repeat files; a CSV with the same two columns is accepted too. Every labelled customer must appear in exactly one fold, otherwise the run stops with `split file ... does not cover labelled customers: N missing`. Extra customers are ignored.
+* **Out-of-fold file.** One semicolon CSV over all repeats with the columns `customer_id;repeat;fold;prob;pv_installed;pv_installation_date;pv_capacity_kwp`, using the submission formatting (`TRUE`/`FALSE`, `YYYY-MM-DD`, two-decimal capacities, empty date and capacity when `FALSE`). It carries no labels, features or regimes. A detection-only pipeline, which this classifier is, leaves date and capacity empty and therefore scores `D = P = 0`; compare its F1 separately.
+
+```bash
+python -m neuralwave_experiment.task1_detector \
+  --canonical-dir /private/artifacts/run \
+  --splits /private/splits_seed0.parquet,/private/splits_seed1.parquet,/private/splits_seed2.parquet \
+  --oof-out /private/oof_patchtst.csv \
+  --out-dir /private/task1_results --epochs 8
+python -m neuralwave_experiment.oof_contract --labels /private/artifacts/run/labels.parquet /private/oof_patchtst.csv [OTHER_OOF ...]
+```
+
+Each split file is one outer repeat; thresholds are tuned on the training customers of each fold only; checkpoints of the first repeat are written as `task1_model_fold_<k>.pt`. The scorer prints one aggregate line per file (`file=... repeats=k score=M±SD f1=... D=... P=...`) and a paired line for files that share repeats. Any design choice made from such a comparison is a Tier B decision and must be logged in the decision file of the main pipeline.
+
+Scoring unlabelled customers as a plausibility check (no ground truth, so no accuracy is claimed):
+
+```bash
+python -m neuralwave_experiment.wild_inference \
+  --unlabelled-csv /private/energy_consumption_unlabelled_dev.csv \
+  --weights /private/task1_results/task1_model_fold_0.pt \
+  --id-prefix POD --id-start 100 --id-count 20 \
+  --out /private/task1_results/wild_batch.json
+```
+
+The terminal shows decision counts and score ranges; the per-customer table goes only to the private `--out` JSON (`--show-customers` prints it locally, never commit it).
