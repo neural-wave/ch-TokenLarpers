@@ -70,3 +70,14 @@ def test_oof_file_matches_split_files_and_nested_scores(syn_small, tmp_path, mon
         block[PRED_HEADER].to_csv(tmp_path / f"pred{r}.csv", sep=";", index=False)
         score = main_score(load_labels(tmp_path / f"pred{r}.csv"), truth)["score"]
         assert score == pytest.approx(results[0].repeat_scores[r]["score"], abs=0.05)
+
+
+def test_relabelling_folds_does_not_create_a_new_outer_repeat(tmp_path):
+    from neuralwave_experiment.oof_contract import load_split_files
+    ids = ["PODSYN_A", "PODSYN_B", "PODSYN_C", "PODSYN_D"]
+    first = _write_split(tmp_path / "first.csv", ids, [0, 0, 1, 1])
+    relabelled = _write_split(tmp_path / "relabelled.csv", ids, [9, 9, 4, 4])
+    with pytest.raises(ValueError, match="genuinely different"):
+        load_split_files([first, relabelled], ids)
+    distinct = _write_split(tmp_path / "distinct.csv", ids, [0, 1, 0, 1])
+    assert load_split_files([first, distinct], ids)[1] == dict(zip(ids, [0, 1, 0, 1]))

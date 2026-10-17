@@ -13,7 +13,7 @@ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m neuralwave_experiment.evaluation \
   --data-kind development
 ```
 
-Run only where local data use is authorized. Data and derived artifacts must remain private. Output must be new/empty; populated directories are rejected. Canonical inputs require `measurements.parquet` and `labels.parquet`. Existing `splits.parquet` is intentionally not reused: every outer split is regenerated and persisted. Customer IDs are strings, never numeric features. A customer without eligible windows is an explicit error, not silently omitted.
+Run only where local data use is authorized. Data and derived artifacts must remain private. Output must be new/empty; populated directories are rejected. Canonical inputs require `measurements.parquet` and `labels.parquet`. By default outer splits are regenerated and persisted. To compare integrated pipelines, pass `--splits F0,F1,...`: each supplied CSV/Parquet file is an outer repetition, all labelled customers must be assigned, and partitions must genuinely differ. File hashes and actual fold labels are retained; supplied assignments are not misreported as generated split seeds. Customer IDs are strings, never numeric features. A customer without eligible windows is an explicit error, not silently omitted.
 
 `--data-kind artificial` explicitly marks smoke results. Development CV cannot be designated blind evaluation. The manifest states that no blind evaluation was performed. The organizer's 20 hidden cases/labels are not supplied to this evaluator; the 1148 unlabelled histories cannot establish accuracy.
 
@@ -22,6 +22,8 @@ Run only where local data use is authorized. Data and derived artifacts must rem
 1. `hourly_logistic`: 24 hourly means and 24 hourly standard deviations of normalized observed values; training-only feature standardization, logistic regression with fixed C=1 and inverse class prevalence weights.
 2. `patchtst_scratch`: official-backbone adapter initialized randomly.
 3. `patchtst_pretrained`: the same model initialization, preceded by masked reconstruction on that fit's training customers only.
+
+The separate `neuralwave_experiment.pretrain` CLI learns a frozen encoder from explicitly unlabelled, customer-disjoint training/validation sources. `train.py --embedding-checkpoint ... --feature-block auto` evaluates those features with the complete pvdetect date/capacity procedure. This is a different experiment from the three-arm comparison above. Do not present the development-training-only reconstruction arm as evidence about large unlabelled pretraining, or a baseline-versus-hybrid difference as an isolated pretraining ablation.
 
 All arms use seven-elapsed-day windows (672 quarter-hours), daily stride, uncapped temporal coverage, local median/MAD normalization, the same physical window labels, customer folds, persistence rule, and threshold grid. Non-PV windows and windows centered more than seven days before installation are negative; windows centered more than seven days after installation are positive; transition windows are excluded from supervised loss. Missing installation dates on positive customers retain the existing pre-existing-PV training convention; date diagnostics are censored.
 
@@ -62,6 +64,7 @@ Date-error medians/hit fractions are conditional on an available date prediction
 - `config.json`, `manifest.json`: complete settings, config/input hashes, package versions, budget and data designation, explicit no-blind-claim status.
 - `splits.csv`: every outer and inner training/validation membership.
 - `predictions.csv`: one customer prediction per arm/repetition plus temporal diagnostics.
+- `oof_ARM.csv`: shared presence-prediction contract for every repetition, preserving supplied fold labels; date/capacity deliberately blank for this standalone classifier. The shared scorer refuses paired differences when customer assignments differ.
 - `metrics.json`: pooled metrics per repetition and descriptive summaries, not a fabricated blind score.
 - `repeat_R/fold_F/ARM/inner_I/` and `outer/`: all window traces, model/scaler artifacts, histories, configuration, and training IDs/lineage.
 - `inner_oof.csv`, `calibration.json`: inner customer scores, every candidate's metrics, and the selected threshold.

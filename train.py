@@ -55,6 +55,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--report-dir")
     ap.add_argument("--folds", help="comma-separated split files (customer_id, fold); each file is one outer repeat")
     ap.add_argument("--oof-out", help="write the shared out-of-fold prediction file (requires --cv)")
+    ap.add_argument("--embedding-checkpoint", help="frozen encoder artifact directory")
+    ap.add_argument("--feature-block", choices=("auto", "baseline", "embedding"), default="auto")
+    ap.add_argument("--embedding-device", choices=("cpu", "cuda"), default="cpu")
     args = ap.parse_args(argv)
     if args.folds and not args.cv:
         ap.error("--folds requires --cv")
@@ -70,6 +73,11 @@ def main(argv: list[str] | None = None) -> int:
     ids = labels["customer_id"].tolist()
     fold_maps = [load_split_file(p, ids) for p in args.folds.split(",")] if args.folds else None
     table = build_feature_table(loaded)
+    encoder = None
+    if args.embedding_checkpoint:
+        from pvdetect.embedding import FrozenEncoder
+
+        encoder = FrozenEncoder.load(args.embedding_checkpoint, device=args.embedding_device)
     rep = loaded.report
     dl = rep["day_length_counts"]
     signed = sum(1 for c in ids if table.customers[c] is not None and table.customers[c].neg_frac >= 0.01)
@@ -90,7 +98,14 @@ def main(argv: list[str] | None = None) -> int:
                 print("cv skipped: fewer than 2 customers in a class")
                 splits = None
         if splits is not None:
-            res = nested_cv(fit, predict, table, labels, splits, ext_labels=ext_labels)
+            fit_fn = lambda t, l, train_ids: fit(
+                t,
+                l,
+                train_ids,
+                encoder=encoder,
+                feature_block=args.feature_block,
+            )
+            res = nested_cv(fit_fn, predict, table, labels, splits, ext_labels=ext_labels)
             k = count_decisions(REPO / "DECISIONS.md")
             biased = " selection-biased" if k > 0 else ""
             inner_scores = [x["inner_score"] for x in res.fit_infos if np.isfinite(x.get("inner_score", np.nan))]
@@ -135,7 +150,7 @@ def main(argv: list[str] | None = None) -> int:
                     Path(args.oof_out),
                 )
 
-    model = fit(table, labels, ids)
+    model = fit(table, labels, ids, encoder=encoder, feature_block=args.feature_block)
     save_model(model, args.out)
     sel = model["selection"]
     print(

@@ -80,7 +80,17 @@ def load_split_file(path: str | Path, labelled_ids: Iterable[str]) -> dict[str, 
 def load_split_files(paths: Sequence[str | Path], labelled_ids: Iterable[str]) -> list[dict[str, int]]:
     """One fold map per file; the position in the list is the repeat index."""
     ids = list(labelled_ids)
-    return [load_split_file(p, ids) for p in paths]
+    maps = [load_split_file(p, ids) for p in paths]
+    seen = set()
+    for assignments in maps:
+        partition = frozenset(
+            frozenset(cid for cid, assigned in assignments.items() if assigned == fold)
+            for fold in set(assignments.values())
+        )
+        if partition in seen:
+            raise ValueError("outer repeats must have genuinely different customer partitions")
+        seen.add(partition)
+    return maps
 
 
 @dataclass(frozen=True)
@@ -131,6 +141,11 @@ def read_oof_predictions(path: str | Path) -> pd.DataFrame:
     bad = ~flags.isin(["TRUE", "FALSE"])
     if bad.any():
         raise ValueError(f"out-of-fold file {path} has {int(bad.sum())} rows with pv_installed outside TRUE/FALSE")
+    for name in ("repeat", "fold"):
+        numbers = pd.to_numeric(frame[name], errors="coerce")
+        if numbers.isna().any() or not np.isfinite(numbers).all() or (numbers % 1 != 0).any():
+            raise ValueError(f"out-of-fold file {path} has non-integer {name} values")
+        frame[name] = numbers.astype("int64")
     out = pd.DataFrame({
         "customer_id": frame["customer_id"].str.strip(),
         "repeat": pd.to_numeric(frame["repeat"]).astype(int),
@@ -174,16 +189,19 @@ def score_oof_file(path: str | Path, labels: pd.DataFrame) -> dict[str, object]:
     labelled["customer_id"] = labelled["customer_id"].astype(str).str.strip()
     expected = set(labelled["customer_id"])
     per_repeat: list[dict[str, float | int]] = []
+    fold_maps = {}
     for repeat, block in predictions.groupby("repeat", sort=True):
         if set(block["customer_id"]) != expected or block["customer_id"].duplicated().any():
             raise ValueError(f"out-of-fold file {path} repeat {int(repeat)} does not cover the labelled customers exactly once")
         metrics = score_predictions(labelled, block.drop(columns=["repeat", "fold", "prob"]))
         per_repeat.append({"repeat": int(repeat), **metrics})
+        fold_maps[int(repeat)] = dict(zip(block["customer_id"], block["fold"].astype(int)))
     if not per_repeat:
         raise ValueError(f"out-of-fold file {path} is empty")
     scores = np.array([r["main_score"] for r in per_repeat], dtype=float)
     return {
         "file": str(path), "repeats": len(per_repeat), "per_repeat": per_repeat,
+        "fold_maps": fold_maps,
         "score_mean": float(scores.mean()), "score_sd": float(scores.std(ddof=1)) if len(scores) > 1 else 0.0,
         "f1_mean": float(np.mean([r["f1"] for r in per_repeat])),
         "D_mean": float(np.mean([r["D"] for r in per_repeat])),
@@ -198,12 +216,16 @@ def summary_line(result: dict[str, object]) -> str:
 
 
 def paired_line(a: dict[str, object], b: dict[str, object]) -> str | None:
-    """Paired comparison when both files share the same repeat indices."""
+    """Compare only matching repeats with identical customer-to-fold assignments."""
     ra = {r["repeat"]: r["main_score"] for r in a["per_repeat"]}  # type: ignore[index]
     rb = {r["repeat"]: r["main_score"] for r in b["per_repeat"]}  # type: ignore[index]
     shared = sorted(set(ra) & set(rb))
     if not shared:
         return None
+    name = f"{Path(str(a['file'])).name} vs {Path(str(b['file'])).name}"
+    for repeat in shared:
+        if a["fold_maps"][repeat] != b["fold_maps"][repeat]:
+            return f"paired: {name} skipped: fold assignments differ in repeat {repeat}"
     diffs = [ra[k] - rb[k] for k in shared]
     better = sum(d > 0 for d in diffs)
     return (f"paired: {Path(str(a['file'])).name} vs {Path(str(b['file'])).name} "

@@ -37,14 +37,36 @@ class CustomerData:
 
 @dataclass(frozen=True)
 class FeatureTable:
-    """Label-free per-customer data. `cache` holds label-free derived values only (§2 cache rule)."""
+    """Label-free per-customer data. `cache` holds label-free derived values only."""
 
     ids: list[str]
     customers: dict[str, CustomerData | None]
     cache: dict = field(default_factory=dict)
+    # Retain the parsed epoch rows for optional frozen-window inference.  This
+    # is the same frame produced by io.load_timeseries; no labels are present.
+    frame: pd.DataFrame | None = None
 
     def dailies(self) -> dict[str, pd.DataFrame]:
         return {c: d.daily for c, d in self.customers.items() if d is not None}
+
+
+def _embedding_features(table: FeatureTable, ids: list[str], embedding, projection: dict) -> pd.DataFrame:
+    from pvdetect.embedding import transform_projection
+
+    key = (
+        embedding.hashes.get("encoder.pt"),
+        embedding.hashes.get("encoder.json"),
+        tuple(sorted(embedding.window_config.items())),
+        id(table.frame),
+        len(table.frame) if table.frame is not None else 0,
+    )
+    raw_cache = table.cache.setdefault("raw_embeddings", {})
+    raw = raw_cache.get(key)
+    if raw is None:
+        raw = embedding.raw_customer_features(table, table.ids)
+        raw_cache[key] = raw
+    return transform_projection(raw, ids, projection)
+
 
 
 def build_feature_table(loaded: LoadedTimeseries) -> FeatureTable:
@@ -64,11 +86,18 @@ def build_feature_table(loaded: LoadedTimeseries) -> FeatureTable:
             first_date=first,
             n_valid=int(daily["valid"].sum()),
         )
-    return FeatureTable(ids=list(loaded.customer_ids), customers=customers)
+    return FeatureTable(ids=list(loaded.customer_ids), customers=customers, frame=loaded.frame.copy())
 
 
-def compute_features(table: FeatureTable, ids: list[str], clim: Climatology) -> tuple[pd.DataFrame, dict]:
-    """All features for `ids` under `clim`; only the label-free part is cached on the table."""
+def compute_features(
+    table: FeatureTable,
+    ids: list[str],
+    clim: Climatology,
+    *,
+    embedding=None,
+    projection: dict | None = None,
+) -> tuple[pd.DataFrame, dict]:
+    """Features for ``ids`` under ``clim``; embedding is opt-in and persisted."""
     lf_cache = table.cache.setdefault("label_free", {})
     rows, cps = {}, {}
     for cid in ids:
@@ -79,7 +108,12 @@ def compute_features(table: FeatureTable, ids: list[str], clim: Climatology) -> 
         fitted, cp = fitted_features(cd, clim, lf)
         rows[cid] = {**lf, **fitted}
         cps[cid] = cp
-    return pd.DataFrame.from_dict(rows, orient="index").reindex(ids), cps
+    F = pd.DataFrame.from_dict(rows, orient="index").reindex(ids)
+    if embedding is not None or projection is not None:
+        if embedding is None or projection is None:
+            raise ValueError("embedding and projection must be supplied together")
+        F = pd.concat([F, _embedding_features(table, ids, embedding, projection)], axis=1)
+    return F, cps
 
 
 def capacity_matrix(F: pd.DataFrame, names: list[str]) -> np.ndarray:
@@ -146,7 +180,9 @@ def predict(model: dict, table: FeatureTable, ids: list[str]) -> tuple[pd.DataFr
     """Predictions for `ids`. TRUE rows always carry a date and a positive capacity."""
     clim = Climatology.from_json(model["climatology"])
     objects = model.get("_objects", {})
-    F, cps = compute_features(table, ids, clim)
+    embedding = model.get("_embedding_encoder")
+    projection = (model.get("embedding") or {}).get("projection") if embedding is not None else None
+    F, cps = compute_features(table, ids, clim, embedding=embedding, projection=projection)
     clf = model["classifier"]
     prob = classifier_proba(clf, objects, F, model["feature_names"])
     cap = model["capacity"]

@@ -61,7 +61,6 @@ def test_saved_model_files_carry_no_training_customer_ids(tmp_path, monkeypatch)
     assert _model_leaked_ids(selected, ids) == []
 
     forced_sel = {"classifier": "catboost", "threshold": 0.5, "capacity": "catboost", "kappa": 1.0, "insufficient_rule": "weak_candidate"}
-    monkeypatch.setattr(procedure, "_inner_oof", lambda *args: None)
     monkeypatch.setattr(procedure, "_select", lambda oof: dict(forced_sel))
     forced = procedure.fit(table, labels, ids)
     assert forced["classifier"]["kind"] == "catboost" and forced["capacity"]["kind"] == "catboost"

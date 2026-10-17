@@ -1,6 +1,6 @@
 # AIL PV detection from consumption profiles
 
-Detects photovoltaic installations, their commissioning date and nominal capacity (kWp) from 15-minute grid-withdrawal time series (AIL NeuralWave challenge). The authoritative plan is `IMPLEMENTATION_HANDOFF.md`.
+Detects photovoltaic installations, commissioning dates and nominal capacity (kWp) from 15-minute grid-withdrawal time series (AIL NeuralWave challenge). `IMPLEMENTATION_HANDOFF.md` describes the original baseline; `goals/hybrid-pv-integration/plan.md` records the approved integration.
 
 ## Team
 
@@ -16,7 +16,7 @@ Detects photovoltaic installations, their commissioning date and nominal capacit
 
 ## Setup
 
-Python 3.10–3.12 (`requires-python >=3.10,<3.13`; developed on 3.12).
+Python 3.11–3.12 (`requires-python >=3.11,<3.13`; verified on 3.12).
 
 ```
 uv venv --python 3.12 .venv && source .venv/bin/activate
@@ -24,6 +24,14 @@ uv pip install -r requirements.txt -r requirements-dev.txt
 ```
 
 or plain `pip install -r requirements.txt`. `requirements.txt` is compiled from `requirements.in` with exact pins (`uv pip compile requirements.in -o requirements.txt --python-version 3.12`).
+
+For encoder pretraining and hybrid inference, install the optional PyTorch dependency:
+
+```
+pip install -e ".[experiment]"
+```
+
+The baseline does not import Torch. Install a CUDA-compatible PyTorch build on the GPU host using its official installation instructions; the local integration checks use CPU, not CUDA.
 
 ## Data hygiene
 
@@ -55,7 +63,7 @@ Dates come from one of three regimes: `event` (detected changepoint + learned of
 
 ### Shared-fold comparison
 
-Pipelines on different branches are compared through one split file set, one prediction contract and one scorer, not a package merge. `--folds F0,F1,...` replaces the internal repeated stratified folds: each split file (`splits.parquet` from `neuralwave_data.prepare`, or a `;`/`,` CSV with `customer_id,fold`) is one outer repeat, in the given order, and must assign every labelled customer to exactly one integer fold (extra IDs are ignored; errors report counts only). `--oof-out PATH` writes the shared out-of-fold file `customer_id;repeat;fold;prob;pv_installed;pv_installation_date;pv_capacity_kwp` (`repeat` = position of the split file, `fold` = its fold value), with no labels, features or regimes. The canonical comparison scorer is `python -m neuralwave_experiment.oof_contract` on the `time-series-embeddings` branch; `pvdetect.scoring` stays pvdetect's internal scorer.
+The integrated pipelines share split files, a prediction contract and one scorer. `--folds F0,F1,...` replaces pvdetect's internal repeated stratified folds: each file (`splits.parquet` or a `;`/`,` CSV with `customer_id,fold`) is one outer repeat and must assign every labelled customer to one integer fold. `--oof-out PATH` retains every repeat in `customer_id;repeat;fold;prob;pv_installed;pv_installation_date;pv_capacity_kwp`. Paired scoring checks each `(repeat, customer_id) → fold` assignment, not just repeat numbers. Use genuinely different customer partitions across repeats.
 
 Matched run (data holder, private directory only):
 
@@ -64,11 +72,45 @@ python -m neuralwave_data.prepare <manifest> --out <private>/prep_s{0,1,2} --fol
 python train.py --timeseries <dev energy> --labels <dev labels> --out <private>/pvdetect/model.json --cv \
   --folds <private>/prep_s0/splits.parquet,<private>/prep_s1/splits.parquet,<private>/prep_s2/splits.parquet \
   --oof-out <private>/pvdetect_oof.csv
-python -m neuralwave_experiment.task1_detector ... --splits <same three files> --oof-out <private>/patchtst_oof.csv
-python -m neuralwave_experiment.oof_contract --labels <dev labels> <private>/pvdetect_oof.csv <private>/patchtst_oof.csv
+python -m neuralwave_experiment.evaluation --canonical-dir <private>/canonical --out <private>/patchtst \
+  --data-kind development --splits <private>/prep_s0/splits.parquet,<private>/prep_s1/splits.parquet,<private>/prep_s2/splits.parquet
+python -m neuralwave_experiment.oof_contract --labels <dev labels> <private>/pvdetect_oof.csv <private>/patchtst/oof_patchtst_scratch.csv
 ```
 
 Only the printed aggregate lines leave the private directory. PatchTST writes empty date and capacity (D = P = 0), so compare F1 separately from the full score. The comparison is a Tier B decision and gets a `DECISIONS.md` line.
+
+### Unlabelled pretraining and optional hybrid features
+
+Pretraining learns masked-patch reconstruction without PV labels. Supervised customer-level fitting remains necessary: the frozen encoder is not itself a PV classifier, date estimator or capacity estimator.
+
+The pretraining manifest explicitly separates customer-disjoint training and validation populations:
+
+```json
+{"sources":[
+  {"role":"unlabelled_measurements","split":"train","path":"train.parquet"},
+  {"role":"unlabelled_measurements","split":"validation","paths":["validation.parquet"]}
+]}
+```
+
+These are canonical Parquet files with `customer_id`, `timestamp_epoch`, `energy_kwh` and `value_status`. Sources may contain interleaved customers across files. Labelled customers must be excluded from both populations; overlap is an error. The data holder prepares this manifest and runs real-data commands privately.
+
+```
+python -m neuralwave_experiment.pretrain --manifest <private>/manifest.json \
+  --exclude-labels <private>/labels.csv --config configs/pretraining_unlabelled.json \
+  --device cpu --out <private>/pretrain
+```
+
+Use `--device cuda` only on a verified CUDA host. `--max-steps N` pauses cleanly with `run.json` status `paused`; resume with the same configuration and inputs, `--resume <private>/pretrain/checkpoint_latest.pt`, and a new output directory. Private resumable checkpoints include optimizer, RNG, sampler and progress; only the compact `encoder/encoder.pt` and `encoder/encoder.json` pair is used for inference. Training uses fresh observed-patch masks and visible-only normalization; validation uses fixed masks on separate customers. Reconstruction loss is not evidence of PV accuracy.
+
+```
+python train.py --timeseries <private>/energy.csv --labels <private>/labels.csv \
+  --out <private>/hybrid/model.json --cv --folds <same split files> --oof-out <private>/hybrid_oof.csv \
+  --embedding-checkpoint <private>/pretrain/encoder --feature-block auto
+```
+
+The frozen encoder produces label-free customer summaries. Imputation, scaling and the four-component projection are fit only on the current training customers, including inside inner folds. Physical features, date detection and capacity estimation remain intact. `auto` compares baseline and embedding candidates on identical inner folds using complete predictions and the existing margin/bootstrap rule; outer results never choose the feature block. `--feature-block embedding` is a forced diagnostic, not an adoption decision. A selected baseline saves no encoder dependency; a selected hybrid saves the exact hash-checked `encoder/` pair with model schema v3.
+
+Before any scale increase, compare the same transformer trained from scratch and with masked pretraining, with matched windows, targets, aggregation, splits and tuning budgets. Evaluate calendar-time persistence/coverage, pre-installation alarms, onset error, late installations and non-PV alarms separately. Fresh blind customers are required for a final independent claim when available; more development seeds cannot replace them.
 
 ### Review plots (dev requirement: matplotlib)
 
@@ -139,4 +181,4 @@ Until answer 2 arrives we plan for the private channel. `inference.py` loads `ar
 
 ## Status
 
-Procedure: season-aware changepoint and confounder features, three date regimes, inner-CV selection of classifier, threshold, capacity model, κ and date rule, scored by nested CV; `outer_informed_decisions=1` (selection-biased). Synthetic-validated only; real-data nested CV pending (P3); extensions header-only; unlabelled data unused.
+The baseline and optional frozen-encoder pipeline are integrated. Local checks use wholly artificial data only; they establish execution and leakage-contract behavior, not competition accuracy. Real-data nested CV, blind-customer evaluation and CUDA validation remain data-holder tasks. Extensions remain header-only. No GPU rental, upload or real-data training is performed by the integration.

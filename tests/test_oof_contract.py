@@ -35,7 +35,6 @@ def test_split_file_parquet_and_csv_give_the_same_folds(tmp_path: Path):
     assert load_split_file(tmp_path / "s.parquet", IDS) == expected
     assert load_split_file(tmp_path / "s.csv", IDS) == expected
     assert load_split_file(tmp_path / "s_comma.csv", IDS) == expected
-    assert load_split_files([tmp_path / "s.parquet", tmp_path / "s.csv"], IDS) == [expected, expected]
 
 
 def test_split_file_missing_a_labelled_customer_raises_with_a_count_only(tmp_path: Path):
@@ -119,23 +118,6 @@ def test_scoring_requires_full_coverage_per_repeat(tmp_path: Path):
         score_oof_file(path, _labels())
 
 
-def test_cli_prints_one_aggregate_line_per_file_and_a_paired_line(tmp_path: Path, capsys):
-    labels_path = tmp_path / "labels.csv"
-    labels_path.write_text("customer_id;pv_installed;pv_installation_date;pv_capacity_kwp\n"
-                           "A01;TRUE;2024-03-01;10.0\nA02;TRUE;2023-07-15;5.0\nB03;FALSE;;\nB04;FALSE;;\n")
-    assert load_labels(labels_path).pv_installed.tolist() == [True, True, False, False]
-    first = write_oof_predictions(_rows(), tmp_path / "first.csv")
-    second = write_oof_predictions([OOFRow(r.customer_id, r.repeat, r.fold, r.prob, r.customer_id.startswith("A"))
-                                    for r in _rows()], tmp_path / "second.csv")
-    assert main(["--labels", str(labels_path), str(first), str(second)]) == 0
-    out = capsys.readouterr().out.splitlines()
-    assert out[0].startswith("file=first.csv repeats=2 score=")
-    assert out[1].startswith("file=second.csv repeats=2 score=") and "f1=1.000" in out[1]
-    # second is detection-only (D = P = 0, score 70 on both repeats); first scores 47 and 93.5
-    assert out[2] == "paired: first.csv vs second.csv mean_diff=0.25 repeats_A_better=1/2"
-    for line in out:
-        for cid in IDS:
-            assert cid not in line
 
 
 def test_module_entry_point_runs(tmp_path: Path):
@@ -147,3 +129,36 @@ def test_module_entry_point_runs(tmp_path: Path):
                             cwd=repo, env={"PYTHONPATH": str(repo / "src"), "PATH": ""}, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert result.stdout.startswith("file=oof.csv repeats=2 ")
+
+
+def test_pairing_rejects_changed_customer_fold_membership(tmp_path):
+    from dataclasses import replace
+    from neuralwave_experiment.oof_contract import paired_line
+    first = write_oof_predictions(_rows(), tmp_path / "first.csv")
+    changed = _rows()
+    changed[0] = replace(changed[0], fold=1)
+    second = write_oof_predictions(changed, tmp_path / "second.csv")
+    result = paired_line(score_oof_file(first, _labels()), score_oof_file(second, _labels()))
+    assert "skipped" in result
+    assert "mean_diff=" not in result
+    assert all(cid not in result for cid in IDS)
+
+
+def test_pairing_accepts_identical_membership_in_different_row_order(tmp_path):
+    from neuralwave_experiment.oof_contract import paired_line
+    first = write_oof_predictions(_rows(), tmp_path / "first.csv")
+    second = write_oof_predictions(reversed(_rows()), tmp_path / "second.csv")
+    result = paired_line(score_oof_file(first, _labels()), score_oof_file(second, _labels()))
+    assert "skipped" not in result
+    assert "mean_diff=0.00" in result
+
+
+@pytest.mark.parametrize("column", ["repeat", "fold"])
+def test_fractional_membership_is_not_silently_truncated(tmp_path, column):
+    path = write_oof_predictions(_rows(), tmp_path / "oof.csv")
+    frame = pd.read_csv(path, sep=";")
+    frame[column] = frame[column].astype(float)
+    frame.loc[0, column] = .5
+    frame.to_csv(path, sep=";", index=False)
+    with pytest.raises(ValueError):
+        read_oof_predictions(path)

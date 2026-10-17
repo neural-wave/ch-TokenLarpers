@@ -121,6 +121,9 @@ def _fit_components(
     cap_names: list[str],
     clf_kinds: tuple[str, ...],
     cap_kinds: tuple[str, ...],
+    *,
+    embedding=None,
+    projection: dict | None = None,
 ) -> Components:
     from catboost import CatBoostClassifier, CatBoostRegressor
 
@@ -129,7 +132,7 @@ def _fit_components(
     dates = {c: d.date() for c, d in sub.loc[y, "pv_installation_date"].items() if pd.notna(d)}
     nonpv = [c for c, on in zip(ids, y) if not on]
     clim = fit_climatology(table.dailies(), nonpv, dates)
-    F, cps = compute_features(table, ids, clim)
+    F, cps = compute_features(table, ids, clim, embedding=embedding, projection=projection)
     date_params = fit_date_params(table, lab, ids, F, cps)
     X = F[names].to_numpy(float)
     both = y.any() and not y.all()
@@ -160,11 +163,35 @@ def _fit_components(
     return Components(clim, F, cps, date_params, logreg, ridge, ridge_export, fallback, objects)
 
 
-def _inner_oof(table, labels, lab, train_ids, splits, names, cap_names) -> pd.DataFrame:
+def _inner_oof(
+    table,
+    labels,
+    lab,
+    train_ids,
+    splits,
+    names,
+    cap_names,
+    *,
+    embedding=None,
+    raw=None,
+) -> pd.DataFrame:
+    from pvdetect.embedding import fit_projection
+
     rows = []
     for tr, va in splits:
-        comp = _fit_components(table, lab, tr, names, cap_names, ("logreg", "catboost"), ("ridge", "catboost"))
-        Fva, cps_va = compute_features(table, va, comp.clim)
+        projection = fit_projection(raw, tr) if embedding is not None else None
+        comp = _fit_components(
+            table,
+            lab,
+            tr,
+            names,
+            cap_names,
+            ("logreg", "catboost"),
+            ("ridge", "catboost"),
+            embedding=embedding,
+            projection=projection,
+        )
+        Fva, cps_va = compute_features(table, va, comp.clim, embedding=embedding, projection=projection)
         p_lr = classifier_proba({"logreg": comp.logreg}, {}, Fva, names, "logreg")
         p_cb = (
             classifier_proba({}, comp.objects, Fva, names, "catboost") if "catboost_clf" in comp.objects else p_lr
@@ -260,18 +287,104 @@ def _select(oof: pd.DataFrame) -> dict:
         "kappa": kappa,
         "insufficient_rule": rule,
     }
+def _full_inner_predictions(oof: pd.DataFrame, sel: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
+    prob = oof["p_catboost"] if sel["classifier"] == "catboost" else oof["p_logreg"]
+    raw_kwp = oof[f"kwp_{sel['capacity']}"].to_numpy(float)
+    kwp = np.clip(float(sel.get("kappa", 1.0)) * raw_kwp, 0.5, 500.0)
+    regime = oof["regime"].to_numpy()
+    weak = oof["date_weak"].to_numpy()
+    first = oof["date_first"].to_numpy()
+    dates = weak.copy()
+    if sel.get("insufficient_rule") == "first_date":
+        dates[regime == "insufficient"] = first[regime == "insufficient"]
+    pred = pd.DataFrame(
+        {
+            "customer_id": oof.index.astype(str),
+            "pv_installed": prob.to_numpy(float) >= float(sel["threshold"]),
+            "pv_installation_date": dates,
+            "pv_capacity_kwp": kwp,
+        }
+    )
+    truth = pd.DataFrame(
+        {
+            "customer_id": oof.index.astype(str),
+            "pv_installed": oof["t_pv"].to_numpy(bool),
+            "pv_installation_date": oof["t_date"].to_numpy(),
+            "pv_capacity_kwp": oof["t_kwp"].to_numpy(float),
+        }
+    )
+    return pred, truth
 
 
-def fit(table: FeatureTable, labels: pd.DataFrame, train_ids: list[str], *, inner: bool = True) -> dict:
+def _full_inner_score(oof: pd.DataFrame, sel: dict) -> float:
+    from pvdetect.scoring import main_score
+
+    pred, truth = _full_inner_predictions(oof, sel)
+    return float(main_score(pred, truth)["score"])
+
+
+def _paired_bootstrap_stability(
+    base_oof: pd.DataFrame, base_sel: dict, emb_oof: pd.DataFrame, emb_sel: dict, B: int = 1000
+) -> float:
+    from pvdetect.scoring import main_score
+
+    bp, truth = _full_inner_predictions(base_oof, base_sel)
+    ep, _ = _full_inner_predictions(emb_oof, emb_sel)
+    rng = np.random.default_rng(0)
+    better = 0
+    for _ in range(B):
+        idx = rng.integers(0, len(truth), len(truth))
+        sb = main_score(bp.iloc[idx], truth.iloc[idx])["score"]
+        se = main_score(ep.iloc[idx], truth.iloc[idx])["score"]
+        better += se > sb
+    return better / B
+
+
+def fit(
+    table: FeatureTable,
+    labels: pd.DataFrame,
+    train_ids: list[str],
+    *,
+    inner: bool = True,
+    encoder=None,
+    feature_block: str = "auto",
+) -> dict:
+    """Fit baseline or the opt-in frozen-embedding candidate.
+
+    ``encoder`` may be a :class:`FrozenEncoder` or an artifact directory.  A
+    supplied bad artifact is intentionally allowed to raise; it never falls
+    back to baseline.
+    """
+    if feature_block not in {"auto", "baseline", "embedding"}:
+        raise ValueError("feature_block must be auto, baseline, or embedding")
+    if encoder is not None:
+        from pvdetect.embedding import FrozenEncoder
+
+        if not isinstance(encoder, FrozenEncoder):
+            encoder = FrozenEncoder.load(encoder)
+    if feature_block == "embedding" and encoder is None:
+        raise ValueError("feature_block=embedding requires an encoder checkpoint")
     lab = labels.set_index("customer_id")
     export = export_enabled_for(table, train_ids)
-    names = feature_names(export)
+    base_names = feature_names(export)
     cap_names = capacity_feature_names(export)
     splits = inner_splits(labels, train_ids) if inner else []
+    raw = None
+    embedding_projection = None
+    block = "baseline"
+    unavailable_reason = None
+    base_oof = None
+    emb_oof = None
+    base_score = float("nan")
+    emb_score = float("nan")
+    emb_bootstrap = float("nan")
     if splits:
-        sel = _select(_inner_oof(table, labels, lab, train_ids, splits, names, cap_names))
+        base_oof = _inner_oof(table, labels, lab, train_ids, splits, base_names, cap_names)
+        base_sel = _select(base_oof)
+        base_score = _full_inner_score(base_oof, base_sel)
+        base_sel["inner_score"] = base_score
     else:
-        sel = {
+        base_sel = {
             "classifier": "logreg",
             "threshold": 0.5,
             "capacity": "ridge",
@@ -279,20 +392,84 @@ def fit(table: FeatureTable, labels: pd.DataFrame, train_ids: list[str], *, inne
             "insufficient_rule": "weak_candidate",
             "inner_score": float("nan"),
         }
-    comp = _fit_components(table, lab, train_ids, names, cap_names, ("logreg", sel["classifier"]), (sel["capacity"],))
+    emb_sel = None
+    if encoder is not None and feature_block in {"auto", "embedding"}:
+        from pvdetect.embedding import EMBEDDING_FEATURES, ProjectionUnavailable, fit_projection
+
+        raw = encoder.raw_customer_features(table, table.ids)
+        emb_names = base_names + list(EMBEDDING_FEATURES)
+        try:
+            if splits:
+                emb_oof = _inner_oof(
+                    table,
+                    labels,
+                    lab,
+                    train_ids,
+                    splits,
+                    emb_names,
+                    cap_names,
+                    embedding=encoder,
+                    raw=raw,
+                )
+                emb_sel = _select(emb_oof)
+                emb_score = _full_inner_score(emb_oof, emb_sel)
+                emb_bootstrap = _paired_bootstrap_stability(base_oof, base_sel, emb_oof, emb_sel)
+            if not splits:
+                emb_sel = dict(base_sel)
+            # This is the outer fit projection, never a globally cached artifact.
+            embedding_projection = fit_projection(raw, train_ids)
+        except ProjectionUnavailable as exc:
+            unavailable_reason = str(exc)
+            if feature_block == "embedding":
+                raise ValueError(f"embedding candidate unavailable: {exc}") from exc
+            emb_sel = None
+        if emb_sel is not None and (
+            feature_block == "embedding"
+            or (
+                np.isfinite(base_sel.get("inner_score", np.nan))
+                and emb_sel.get("inner_score", -np.inf) - base_sel.get("inner_score", -np.inf) >= CLASSIFIER_MARGIN
+                and emb_bootstrap >= BOOTSTRAP_MIN
+            )
+        ):
+            block = "embedding"
+            sel = emb_sel
+            names = emb_names
+        else:
+            sel = base_sel
+            names = base_names
+    else:
+        sel = base_sel
+        names = base_names
+    if block != "embedding":
+        embedding_projection = None
+    comp = _fit_components(
+        table,
+        lab,
+        train_ids,
+        names,
+        cap_names,
+        ("logreg", sel["classifier"]),
+        (sel["capacity"],),
+        embedding=encoder if block == "embedding" else None,
+        projection=embedding_projection,
+    )
     if sel["classifier"] == "catboost" and "catboost_clf" not in comp.objects:
         sel["classifier"] = "logreg"
-        sel["inner_score"] = sel["inner_score_logreg"]
+        sel["inner_score"] = sel.get("inner_score_logreg", sel.get("inner_score", np.nan))
     if sel["capacity"] == "catboost" and "catboost_cap" not in comp.objects:
         sel["capacity"] = "ridge"
     date = {**comp.date_params, "insufficient_rule": sel["insufficient_rule"]}
     sel.update(offset_event=date["offset_event"], start_lag=date["start_lag"], contrast_cut=date["contrast_cut"])
+    sel["embedding_bootstrap_p"] = emb_bootstrap
+    sel["feature_block"] = block
+    if unavailable_reason is not None:
+        sel["embedding_unavailable_reason"] = unavailable_reason
     objects = {}
     if sel["classifier"] == "catboost":
         objects["catboost_clf"] = comp.objects["catboost_clf"]
     if sel["capacity"] == "catboost":
         objects["catboost_cap"] = comp.objects["catboost_cap"]
-    return {
+    model = {
         "version": CURRENT_VERSION,
         "feature_names": names,
         "capacity_feature_names": cap_names,
@@ -317,3 +494,14 @@ def fit(table: FeatureTable, labels: pd.DataFrame, train_ids: list[str], *, inne
         "extensions": {"enabled": False},
         "_objects": objects,
     }
+    if block == "embedding":
+        model["embedding"] = {
+            "feature_names": list(EMBEDDING_FEATURES),
+            "projection": embedding_projection,
+            "encoder_files": {"weights": "encoder/encoder.pt", "metadata": "encoder/encoder.json"},
+            "encoder_hashes": encoder.hashes,
+            "encoder_config": encoder.config,
+            "window_config": encoder.window_config,
+        }
+        model["_encoder_source"] = str(encoder.directory)
+    return model

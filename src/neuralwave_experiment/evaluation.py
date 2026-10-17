@@ -13,6 +13,7 @@ from sklearn.metrics import confusion_matrix, f1_score, precision_score, recall_
 from sklearn.model_selection import StratifiedKFold
 
 from .evaluation_models import ARMS, fit_predict
+from .oof_contract import OOFRow, load_split_files, write_oof_predictions
 from .task1_detector import extract_customer_windows
 from .temporal import summarize_trace, temporal_diagnostics
 from .windows import WindowConfig
@@ -110,7 +111,7 @@ def _temporal_summary(frame: pd.DataFrame) -> dict:
 
 
 def run_evaluation(canonical_dir: str | Path, out_dir: str | Path, *, data_kind: str,
-                   config: dict | None = None) -> dict:
+                   config: dict | None = None, split_files: list[str | Path] | None = None) -> dict:
     """Train real arms on nested folds and retain every inner/outer prediction."""
     if data_kind not in {"artificial", "development"}:
         raise ValueError("data_kind must explicitly be artificial or development; CV is not blind evaluation")
@@ -126,7 +127,7 @@ def run_evaluation(canonical_dir: str | Path, out_dir: str | Path, *, data_kind:
         if not isinstance(cfg[name], int) or cfg[name] < 2:
             raise ValueError(f"{name} must be an integer >=2")
     seeds = cfg["outer_seeds"]
-    if len(seeds) < 2 or len(set(seeds)) != len(seeds):
+    if not split_files and (len(seeds) < 2 or len(set(seeds)) != len(seeds)):
         raise ValueError("use at least two distinct outer split seeds")
     if not cfg["thresholds"] or any(not np.isfinite(t) or not 0 < t < 1 for t in cfg["thresholds"]):
         raise ValueError("threshold candidates must be finite and strictly between zero and one")
@@ -141,7 +142,19 @@ def run_evaluation(canonical_dir: str | Path, out_dir: str | Path, *, data_kind:
     labels["customer_id"] = labels.customer_id.astype(str)
     labels = labels.sort_values("customer_id").reset_index(drop=True)
     label_lookup = labels.set_index("customer_id")
-    outer = [_split(labels, cfg["outer_folds"], seed) for seed in seeds]
+    if split_files:
+        maps = load_split_files(split_files, labels.customer_id)
+        fold_labels = [sorted(set(mapping.values())) for mapping in maps]
+        if any(len(values) < 2 for values in fold_labels):
+            raise ValueError("each supplied split file requires at least two customer folds")
+        ids = labels.customer_id.tolist()
+        outer = [[([c for c in ids if mapping[c] != f],
+                   [c for c in ids if mapping[c] == f]) for f in values]
+                 for mapping, values in zip(maps, fold_labels)]
+        seeds = [cfg["model_seed"] + 1000 * r for r in range(len(outer))]
+    else:
+        outer = [_split(labels, cfg["outer_folds"], seed) for seed in seeds]
+        fold_labels = [list(range(len(assignments))) for assignments in outer]
     # Preflight every nested split before fitting anything.
     signatures = []
     nested = {}
@@ -150,7 +163,8 @@ def run_evaluation(canonical_dir: str | Path, out_dir: str | Path, *, data_kind:
         if signature in signatures:
             raise ValueError("outer seeds produced identical customer partitions; choose genuinely different seeds")
         signatures.append(signature)
-        for fold, (train, _) in enumerate(assignments):
+        for index, (train, _) in enumerate(assignments):
+            fold = fold_labels[repeat][index]
             nested[repeat, fold] = _split(labels[labels.customer_id.isin(train)], cfg["inner_folds"], seeds[repeat] + fold + 10000)
     windows = extract_customer_windows(source, labels.customer_id.tolist(), WindowConfig(
         context_length=cfg["context_length"], stride=cfg["stride"], min_observed_fraction=cfg["min_observed_fraction"]))
@@ -164,6 +178,7 @@ def run_evaluation(canonical_dir: str | Path, out_dir: str | Path, *, data_kind:
           evidence_status="artificial_smoke_only" if data_kind == "artificial" else "development_only",
           blind_evaluation=dict(performed=False, reason="No fresh blinded labelled evaluation supplied; organizer test labels remain hidden."),
           inputs={name: _hash(source / name) for name in ("labels.parquet", "measurements.parquet")},
+          supplied_splits=[dict(path=str(p), sha256=_hash(Path(p))) for p in split_files or []],
           config_sha256=_hash(out / "config.json"),
           versions=dict(python=platform.python_version(), numpy=np.__version__, pandas=pd.__version__, sklearn=sklearn.__version__, torch=torch.__version__),
           arms=list(ARMS), capacity_evaluated=False,
@@ -172,16 +187,18 @@ def run_evaluation(canonical_dir: str | Path, out_dir: str | Path, *, data_kind:
     split_rows = []
     per_repeat = []
     for repeat, assignments in enumerate(outer):
+        split_seed = None if split_files else seeds[repeat]
         repeat_rows = []
-        for fold, (train_ids, val_ids) in enumerate(assignments):
+        for index, (train_ids, val_ids) in enumerate(assignments):
+            fold = fold_labels[repeat][index]
             train_labels = labels[labels.customer_id.isin(train_ids)].copy()
             train_windows = {c: windows[c] for c in train_ids}
             val_windows = {c: windows[c] for c in val_ids}
-            split_rows.extend(dict(repeat=repeat, split_seed=seeds[repeat], outer_fold=fold, inner_fold=None,
+            split_rows.extend(dict(repeat=repeat, split_seed=split_seed, outer_fold=fold, inner_fold=None,
                                    customer_id=c, role="train" if c in train_ids else "validation") for c in labels.customer_id)
             inner = nested[repeat, fold]
             for inner_fold, (it, iv) in enumerate(inner):
-                split_rows.extend(dict(repeat=repeat, split_seed=seeds[repeat], outer_fold=fold, inner_fold=inner_fold,
+                split_rows.extend(dict(repeat=repeat, split_seed=split_seed, outer_fold=fold, inner_fold=inner_fold,
                                        customer_id=c, role="train" if c in it else "validation") for c in train_ids)
             for arm in ARMS:
                 directory = out / f"repeat_{repeat}" / f"fold_{fold}" / arm
@@ -214,7 +231,7 @@ def run_evaluation(canonical_dir: str | Path, out_dir: str | Path, *, data_kind:
                     result = summarize_trace(windows[cid], probability[cid], threshold, cfg)
                     label = label_lookup.loc[cid].to_dict()
                     diagnostics = temporal_diagnostics(windows[cid], probability[cid], label, threshold, cfg)
-                    row = dict(repeat=repeat, split_seed=seeds[repeat], outer_fold=fold, arm=arm, customer_id=cid,
+                    row = dict(repeat=repeat, split_seed=split_seed, outer_fold=fold, arm=arm, customer_id=cid,
                                threshold=threshold, pv_installed_true=bool(label["pv_installed"]),
                                pv_installed_pred=bool(result["score"] >= threshold), **result, **diagnostics)
                     repeat_rows.append(row)
@@ -224,9 +241,16 @@ def run_evaluation(canonical_dir: str | Path, out_dir: str | Path, *, data_kind:
             part = frame[frame.arm == arm]
             if part.customer_id.duplicated().any() or set(part.customer_id) != set(labels.customer_id):
                 raise ValueError("outer OOF predictions must cover each customer exactly once per arm/repeat")
-            per_repeat.append(dict(repeat=repeat, split_seed=seeds[repeat], arm=arm,
+            per_repeat.append(dict(repeat=repeat, split_seed=split_seed, arm=arm,
                 **classification_metrics(part.pv_installed_true.tolist(), part.pv_installed_pred.tolist()),
                 temporal=_temporal_summary(part)))
+            all_for_arm = [r for r in all_rows + repeat_rows if r["arm"] == arm]
+            write_oof_predictions([
+                OOFRow(customer_id=r["customer_id"], repeat=r["repeat"],
+                       fold=r["outer_fold"], prob=r["score"],
+                       pv_installed=r["pv_installed_pred"])
+                for r in all_for_arm
+            ], out / f"oof_{arm}.csv")
         all_rows.extend(repeat_rows)
         pd.DataFrame(all_rows).to_csv(out / "predictions.csv", sep=";", index=False)
         pd.DataFrame(split_rows).to_csv(out / "splits.csv", sep=";", index=False)
@@ -244,9 +268,12 @@ def main() -> None:
     parser.add_argument("--out", required=True)
     parser.add_argument("--config")
     parser.add_argument("--data-kind", required=True, choices=["artificial", "development"])
+    parser.add_argument("--splits", help="comma-separated shared customer split files; one file per repeat")
     args = parser.parse_args()
     config = json.loads(Path(args.config).read_text()) if args.config else None
-    result = run_evaluation(args.canonical_dir, args.out, data_kind=args.data_kind, config=config)
+    splits = [p.strip() for p in args.splits.split(",")] if args.splits else None
+    result = run_evaluation(args.canonical_dir, args.out, data_kind=args.data_kind,
+                            config=config, split_files=splits)
     print(json.dumps(result["descriptive_across_repeats"], indent=2))
 
 

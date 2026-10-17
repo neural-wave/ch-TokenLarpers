@@ -9,11 +9,8 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
-from neuralwave_experiment.encoder import EncoderConfig
 from neuralwave_experiment.windows import WindowConfig, WindowBatch, build_windows
 
-# The configuration every Task 1 checkpoint is trained and loaded with.
-TASK1_ENCODER_CONFIG = EncoderConfig(context_length=672, patch_length=16, d_model=64, n_heads=4, n_layers=2, dropout=0.2)
 
 
 class WindowClassifier(nn.Module):
