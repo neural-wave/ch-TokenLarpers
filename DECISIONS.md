@@ -1,2 +1,3 @@
 # Outer-informed decisions (Tier B)
 - 2026-10-17 | PatchTST customer aggregation changed to rolling 4-window median (commit 0e5b0ce) | pooled out-of-fold recall on the 40 consulted
+- 2026-10-17 | Schedule trial targeting detection: rerun the split-seed-0 nested CV with `--schedule` added to the inner option pool (inner CV still decides per fit) and compare against the split-seed-0 baseline with `pvdetect.compare`; keep `schedule` in the pool only if verdict=improvement and the pooled FP/TP thresholds the team fixed before the run both hold | baseline out-of-fold false alarms reviewed in the GUI; baseline pooled TP/FP counts used to set the thresholds
