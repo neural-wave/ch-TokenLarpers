@@ -97,10 +97,13 @@ def capacity_matrix(F: pd.DataFrame, names: list[str]) -> np.ndarray:
 
 
 def classifier_proba(clf: dict, objects: dict, F: pd.DataFrame, names: list[str], kind: str | None = None) -> np.ndarray:
+    """P(PV); `avg` (E2) is the mean of the logreg and CatBoost probabilities."""
     kind = kind or clf["kind"]
     X = F[names].to_numpy(float)
     if kind == "logreg":
         return sigmoid(linear_score(clf["logreg"], X))
+    if kind == "avg":
+        return (sigmoid(linear_score(clf["logreg"], X)) + objects["catboost_clf"].predict_proba(X)[:, 1]) / 2
     return objects["catboost_clf"].predict_proba(X)[:, 1]
 
 
