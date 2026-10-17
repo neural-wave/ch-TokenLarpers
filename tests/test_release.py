@@ -195,3 +195,78 @@ def test_export_runs_without_site_packages(tmp_path: Path, hybrid):
     if hybrid:
         expected.update({"encoder/encoder.pt", "encoder/encoder.json"})
     assert {p.relative_to(dest / "artifacts").as_posix() for p in (dest / "artifacts").rglob("*") if p.is_file()} == expected
+
+
+# ---------------------------------------------------------------------------
+# Model-directory checks (item 4)
+# ---------------------------------------------------------------------------
+
+def _model_dir_check(model_dir, extra_args=()):
+    args = [sys.executable, str(RELEASE_SCRIPT), "--model-dir", str(model_dir)] + list(extra_args)
+    return subprocess.run(args, capture_output=True, text=True)
+
+
+def _synthetic_model_dir(tmp_path):
+    table, labels = _model_relabelled_data()
+    ids = labels["customer_id"].tolist()
+    model = procedure.fit(table, labels, ids)
+    save_model(model, tmp_path / "model.json")
+    return tmp_path
+
+
+def test_model_dir_good_synthetic_model_passes(tmp_path):
+    """A freshly saved synthetic model passes check_release --model-dir."""
+    result = _model_dir_check(_synthetic_model_dir(tmp_path))
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_model_dir_unsupported_version_fails(tmp_path):
+    (tmp_path / "model.json").write_text('{"version": 999}', encoding="utf-8")
+    result = _model_dir_check(tmp_path)
+    assert result.returncode == 1
+    assert "unsupported" in result.stdout
+
+
+def test_model_dir_missing_referenced_file_fails(tmp_path):
+    model = {"version": 3, "classifier": {"catboost_file": "catboost_clf.cbm"}, "capacity": {"catboost_file": None}}
+    (tmp_path / "model.json").write_text(json.dumps(model), encoding="utf-8")
+    result = _model_dir_check(tmp_path)
+    assert result.returncode == 1
+    assert "catboost_clf.cbm" in result.stdout
+
+
+def test_model_dir_identifier_in_model_json_fails(tmp_path):
+    identifier = "POD" + "99"
+    model = {"version": 3, "ids": [identifier]}
+    (tmp_path / "model.json").write_text(json.dumps(model), encoding="utf-8")
+    result = _model_dir_check(tmp_path)
+    assert result.returncode == 1
+    assert "customer identifier" in result.stdout
+
+
+def test_model_dir_ids_file_match_fails(tmp_path):
+    (tmp_path / "model.json").write_text('{"version": 3, "note": "customer_abc"}', encoding="utf-8")
+    ids_file = tmp_path / "ids.txt"
+    ids_file.write_text("customer_abc\n", encoding="utf-8")
+    result = _model_dir_check(tmp_path, ["--ids-file", str(ids_file)])
+    assert result.returncode == 1
+    assert "customer identifier" in result.stdout
+
+
+def test_model_dir_nonfinite_fallback_fails(tmp_path):
+    model = {"version": 3, "capacity": {"fallback_kwp": float("inf")}}
+    (tmp_path / "model.json").write_text(json.dumps(model), encoding="utf-8")
+    result = _model_dir_check(tmp_path)
+    assert result.returncode == 1
+    assert "non-finite" in result.stdout
+
+
+def test_model_dir_nonfinite_impute_vector_fails(tmp_path):
+    model = {
+        "version": 3,
+        "classifier": {"logreg": {"impute": [1.0, float("nan"), 2.0], "mean": [0.0], "scale": [1.0]}},
+    }
+    (tmp_path / "model.json").write_text(json.dumps(model), encoding="utf-8")
+    result = _model_dir_check(tmp_path)
+    assert result.returncode == 1
+    assert "non-finite" in result.stdout
