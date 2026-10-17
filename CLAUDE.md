@@ -7,6 +7,7 @@ Read `IMPLEMENTATION_HANDOFF.md` first. It is the authoritative implementation p
 - Agent work, tests and fixtures use synthetic data from `pvdetect/synthetic.py` only. Real-data commands in `IMPLEMENTATION_HANDOFF.md` (P3, P7) are run by the user.
 - No LLM may be in the inference/training pipeline; no external weather, irradiation or geographical data. All inference must run offline, without network calls. Use timestamp-derived calendar features only.
 - Synthetic PV augmentation in competitive training only after organizer approval (Step 19 gate).
+- The hygiene hook must be installed (`sh scripts/install_hooks.sh`) and `python scripts/check_hygiene.py --all` must pass before every commit: no data or model dumps, nothing under artifacts directories, no real customer identifiers (`POD` followed by digits) in any file, message or report.
 
 ## Selection and evidence
 

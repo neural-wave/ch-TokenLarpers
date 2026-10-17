@@ -19,6 +19,18 @@ uv pip install -r requirements.txt -r requirements-dev.txt
 
 or plain `pip install -r requirements.txt`. `requirements.txt` is compiled from `requirements.in` with exact pins (`uv pip compile requirements.in -o requirements.txt --python-version 3.12`).
 
+## Data hygiene
+
+The repository is open-sourced after the event, so nothing derived from the AIL data may enter git history: raw files and every data-derived artifact stay in private, git-ignored paths, and reports hold aggregate metrics only (no customer identifiers, per-customer values, probabilities or label dates).
+
+Install the commit-time check once per clone:
+
+```
+sh scripts/install_hooks.sh
+```
+
+It copies `scripts/check_hygiene.py` into `.git/hooks/pre-commit` (a copy, so the hook also works on branches without the script; re-run after editing it). The hook checks the staged files and refuses the commit when any of them is a data or model dump (`.csv`, `.parquet`, `.cbm`, `.pt`, ...), lives under an artifacts directory, or contains a real customer identifier (the letters `POD` immediately followed by digits). Fabricated fixtures use identifiers such as `PODSYN001`, which are not matched. The check prints offending paths only, never their content. `python scripts/check_hygiene.py --all` audits the whole tracked tree (for CI); `tests/test_hygiene.py` runs it too. The hand-in is an export of the frozen tree (`git archive <commit>`), never this history.
+
 ## Train
 
 ```

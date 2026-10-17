@@ -588,7 +588,7 @@ Rules for P2.5: `pytest -q` stays green after every step; each step is its own c
 - **Hand-in:** the NW_26 repo receives an export of the final tree (`git archive` of the frozen commit), never this history, so scrubbed content in old commits is not published.
 - **Organizers (user):** ask whether semi-synthetic augmentation of the provided series is allowed (unblocks Step 19).
 - **Acceptance:**
-  - `tests/test_hygiene.py` stages, in a temp git repo, a file containing `POD12` → exit 1; a `.csv` file → exit 1; a clean `.py` file → exit 0.
+  - `tests/test_hygiene.py` stages, in a temp git repo, a file containing an identifier of the real form (`POD` followed by digits, assembled at runtime so the test file passes the check itself) → exit 1; a `.csv` file → exit 1; a clean `.py` file → exit 0.
   - `README.md` documents `scripts/install_hooks.sh`.
 
 ### Step 2.5-B — Three fixes from the review (now)
