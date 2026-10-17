@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import socket
 
-import pandas as pd
 import pytest
 
 import inference
 import train
 from pvdetect.io import load_labels
 from pvdetect.scoring import main_score
+from pvdetect.synthetic import generate_dataset, write_dataset
 
 
 @pytest.fixture(scope="module")
@@ -56,3 +56,21 @@ def test_missing_model_is_reported(tmp_path, monkeypatch, syn_test):
     monkeypatch.setattr(inference, "MODEL_PATH", tmp_path / "nope.json")
     with pytest.raises(FileNotFoundError, match="model artifact not found"):
         inference.main([str(syn_test / "energy.csv")])
+
+
+def test_run_inference_makes_no_network_calls(tmp_path_factory, monkeypatch):
+    """inference.run_inference must never open a socket (proves no network at inference)."""
+    data_dir = tmp_path_factory.mktemp("offline_data")
+    write_dataset(data_dir, *generate_dataset(6, seed=77))
+    model_path = tmp_path_factory.mktemp("offline_model") / "model.json"
+    assert train.main(["--timeseries", str(data_dir / "energy.csv"), "--labels", str(data_dir / "labels.csv"), "--out", str(model_path)]) == 0
+
+    out_dir = tmp_path_factory.mktemp("offline_out")
+    monkeypatch.setattr(socket, "socket", _block_network)
+    result = inference.run_inference(data_dir / "energy.csv", model_path, out_dir)
+    pred = result.pred
+    assert len(pred) == 6
+    assert set(pred.columns) >= {"customer_id", "pv_installed", "pv_installation_date", "pv_capacity_kwp"}
+    on = pred["pv_installed"]
+    assert pred.loc[on, "pv_installation_date"].notna().all()
+    assert (pred.loc[on, "pv_capacity_kwp"] > 0).all()
