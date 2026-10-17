@@ -35,6 +35,9 @@ CLASSIFIER_MARGIN = 2.0
 BOOTSTRAP_MIN = 0.8
 CAPACITY_MARGIN = 0.03
 NO_CUT = -1e9  # contrast_cut when the present_at_start regime is disabled
+# Labelled commissioning dates may lag the visible onset by months.
+OFFSET_ERROR_WINDOW = 180
+OFFSET_CAP = 120
 
 CB_PARAMS = dict(
     iterations=300,
@@ -99,12 +102,12 @@ def fit_date_params(table: FeatureTable, lab: pd.DataFrame, ids: list[str], F: p
         cd = table.customers.get(c)
         if cp is not None and cp.found:
             e = (true_dates[c] - pd.Timestamp(cp.date)).days
-            if abs(e) <= 60:
+            if abs(e) <= OFFSET_ERROR_WINDOW:
                 errs.append(e)
         if cd is not None and true_dates[c] < pd.Timestamp(cd.first_date):
             gaps.append((pd.Timestamp(cd.first_date) - true_dates[c]).days)
     return {
-        "offset_event": shrunk_median(errs, -21, 21),
+        "offset_event": shrunk_median(errs, -OFFSET_CAP, OFFSET_CAP),
         "start_lag": shrunk_median(gaps, 0, 365) if len(gaps) >= 3 else 0,
         "contrast_cut": cut,
     }
