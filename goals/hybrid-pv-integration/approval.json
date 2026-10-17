@@ -1,0 +1,6 @@
+{
+  "status": "approved",
+  "source": "user_message",
+  "statement": "i accepted the plannotator plans",
+  "note": "User approval is authoritative. No Plannotator result payload was returned to this session; this records the user statement, not a fabricated tool response."
+}

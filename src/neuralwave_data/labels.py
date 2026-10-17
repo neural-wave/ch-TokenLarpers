@@ -106,6 +106,7 @@ def parse_extensions(source: dict[str, Any], labels: pd.DataFrame | None = None)
     date_col = _find(frame, ("extension_date", "date", "pv_extension_date"), "extension_date")
     cap_col = _find(frame, ("pv_capacity_after_extension_kwp", "capacity_after_extension_kwp", "extension_capacity_kwp", "capacity_kwp"), "pv_capacity_after_extension_kwp")
     rows = []
+    seen: set[tuple[str, date]] = set()
     installed_dates = {} if labels is None else dict(zip(labels["customer_id"], labels["pv_installation_date"]))
     known_labels = {} if labels is None else dict(zip(labels["customer_id"], labels["pv_installed"]))
     for values in frame.itertuples(index=False, name=None):

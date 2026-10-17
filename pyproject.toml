@@ -6,16 +6,32 @@ build-backend = "setuptools.build_meta"
 name = "neuralwave-data"
 version = "0.1.0"
 description = "Privacy-safe NeuralWave preprocessing and canonical data contract"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.13"
 dependencies = [
   "numpy>=1.24,<2",
   "pandas>=2.0,<3",
   "pyarrow>=12,<18",
   "scikit-learn>=1.2,<2",
+  "scipy>=1.11,<2",
+  "ruptures>=1.1.9,<2",
+  "tzdata>=2024.1",
+  "catboost>=1.2.7,<2",
 ]
 
+[project.optional-dependencies]
+experiment = ["torch>=2.4,<3"]
+
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["neuralwave_data*", "neuralwave_experiment*", "pvdetect*"]
 
 [project.scripts]
 neuralwave-prepare = "neuralwave_data.prepare:main"
+
+[tool.setuptools.package-data]
+"neuralwave_experiment.vendor.patchtst" = ["LICENSE", "NOTICE", "README.txt"]
+"pvdetect" = ["gui_assets/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

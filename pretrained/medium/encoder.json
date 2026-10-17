@@ -1,0 +1,23 @@
+{
+  "backend": "official_patchtst",
+  "encoder_config": {
+    "context_length": 672,
+    "d_model": 128,
+    "dropout": 0.2,
+    "n_heads": 4,
+    "n_layers": 3,
+    "patch_length": 16
+  },
+  "schema_version": 1,
+  "source": {
+    "labels_used": false,
+    "population": "unlabelled_only"
+  },
+  "weights_sha256": "e8bbcc4273ad7f3af72ccdd93093a8560a23729a8e86af0a7d8745ae266b2857",
+  "window_config": {
+    "context_length": 672,
+    "max_windows_per_customer": null,
+    "min_observed_fraction": 0.75,
+    "stride": 96
+  }
+}
