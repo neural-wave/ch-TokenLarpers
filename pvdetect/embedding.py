@@ -106,6 +106,16 @@ def raw_customer_features(table, ids: list[str], *, encoder: FrozenEncoder | Non
     allowed = {"context_length", "stride", "min_observed_fraction", "max_windows_per_customer"}
     config = WindowConfig(**{k: wcfg[k] for k in allowed if k in wcfg})
     wanted = [str(c) for c in ids]
+    cache = getattr(table, "_embedding_cache", None)
+    if cache is None:
+        cache = {}
+        try:
+            setattr(table, "_embedding_cache", cache)
+        except AttributeError:
+            pass
+    cache_key = (encoder.hashes.get("encoder.pt", ""), tuple(wanted))
+    if cache is not None and cache_key in cache:
+        return cache[cache_key].copy()
     out = np.full((len(wanted), 3 * dim), np.nan, dtype=float)
     for row, cid in enumerate(wanted):
         one = frame[frame["customer_id"].astype(str) == cid]
@@ -145,7 +155,10 @@ def raw_customer_features(table, ids: list[str], *, encoder: FrozenEncoder | Non
         out[row, :dim] = mean
         out[row, dim : 2 * dim] = std
         out[row, 2 * dim :] = last - first
-    return pd.DataFrame(out, index=wanted)
+    result = pd.DataFrame(out, index=wanted)
+    if cache is not None:
+        cache[cache_key] = result
+    return result
 
 
 def fit_projection(raw, train_ids: list[str], n_components: int = 4) -> dict:
