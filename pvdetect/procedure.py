@@ -515,4 +515,5 @@ def fit(
             "window_config": encoder.window_config,
         }
         model["_encoder_source"] = str(encoder.directory)
+        model["_embedding_encoder"] = encoder
     return model
