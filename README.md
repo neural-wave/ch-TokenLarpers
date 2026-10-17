@@ -32,13 +32,15 @@ uv pip install -r requirements.txt -r requirements-dev.txt
 
 or plain `pip install -r requirements.txt`. `requirements.txt` is compiled from `requirements.in` with exact pins (`uv pip compile requirements.in -o requirements.txt --python-version 3.12`).
 
-For encoder pretraining and hybrid inference, install the optional PyTorch dependency:
+PyTorch is included in the standard requirements for selected CNN inference.
+The `experiment` extra remains accepted by existing editable-install commands.
+The physical-only path still avoids importing Torch.
 
-```
-pip install -e ".[experiment]"
-```
-
-The baseline does not import Torch. Install a CUDA-compatible PyTorch build on the GPU host using its official installation instructions; the local integration checks use CPU, not CUDA.
+The CNN-presence handoff corrects the KDE branch to use normalized hourly
+profiles, matching the CNN branch instead of evaluating raw kWh against a
+residential-scale grid. Refit CNN weights before evaluating this correction.
+Date and capacity estimators are unchanged. Fabricated-data checks establish
+software behavior, not real-world accuracy or absence of overfitting.
 
 ## Data hygiene
 

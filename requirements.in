@@ -6,3 +6,4 @@ ruptures==1.1.10
 tzdata>=2024.1,<2027
 catboost==1.2.10
 pyarrow==16.1.0
+torch==2.4.1

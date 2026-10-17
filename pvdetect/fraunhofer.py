@@ -51,12 +51,16 @@ def extract_customer_windows(
     n_weeks = n_days // 7
     windows = []
     
-    # Scale in the same hourly-energy units used by the weekly profiles.
+    # Normalize each customer's hourly profile once; both branches consume
+    # this same scale-free signal.  A fixed additive offset would make the
+    # representation depend on the customer's absolute consumption.
     quarters = M.reshape(n_days, 24, 4)
     daily_hourly = np.sum(quarters, axis=-1)
     valid_hourly = daily_hourly[np.isfinite(daily_hourly)]
-    cust_median = float(np.median(valid_hourly)) if len(valid_hourly) > 0 else 0.5
-    scale = abs(cust_median) + 0.05
+    cust_median = float(np.median(valid_hourly)) if len(valid_hourly) > 0 else 0.0
+    scale = abs(cust_median)
+    if scale < 1e-6:
+        scale = 1.0
 
     # An undated positive has unknown window labels, not negative windows.
     if pv_installed and pd.isna(install_date):
@@ -99,7 +103,6 @@ def extract_customer_windows(
         windows.append({
             "customer_id": str(customer_id),
             "week_start": start_date,
-            "raw_hourly": hourly.astype(np.float32),
             "norm_hourly": norm_hourly,
             "label": label,
         })
@@ -142,8 +145,8 @@ def build_window_dataset(
         )
 
     norm_series = np.stack([w["norm_hourly"] for w in all_windows])  # (N, 168)
-    raw_series = np.stack([w["raw_hourly"] for w in all_windows])  # (N, 168)
-    kdes = fast_kde_batch(raw_series, KDE_GRID, KDE_H)  # (N, 100)
+    # KDE and CNN must see identical per-customer-normalized hourly inputs.
+    kdes = fast_kde_batch(norm_series, KDE_GRID, KDE_H)  # (N, 100)
 
     return WindowDataset(
         customer_ids=np.array([w["customer_id"] for w in all_windows]),

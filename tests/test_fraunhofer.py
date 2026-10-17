@@ -1,6 +1,6 @@
 """CNN contracts on fabricated customers; no accuracy claims."""
 from functools import partial
-
+from dataclasses import replace
 import numpy as np
 import pandas as pd
 import pytest
@@ -55,6 +55,40 @@ def test_install_week_is_dropped_and_other_windows_have_correct_labels(cnn_data)
     assert np.datetime64("2024-01-15") not in starts
     np.testing.assert_array_equal(ds.labels, (starts >= np.datetime64("2024-01-17")).astype(float))
     assert ds.labels.tolist() == [0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+
+def test_kde_and_cnn_inputs_are_scale_invariant_for_commercial_load():
+    spec = CustomerSpec("900000", "2024-01-01", "2024-03-01",
+                        profile="commercial", missing=False,
+                        pv=PVSpec("2024-01-15", 30.0))
+    commercial = generate_customer(spec, seed=901)
+    commercial_table = build_feature_table(as_loaded(commercial))
+    cid = spec.customer_id
+    original = fh.build_window_dataset(commercial_table.customers, pd.DataFrame({
+        "customer_id": [cid],
+        "pv_installed": [True],
+        "pv_installation_date": [pd.Timestamp("2024-01-15")],
+    }), ids=[cid])
+    scaled_customer = replace(
+        commercial_table.customers[cid],
+        M=commercial_table.customers[cid].M * 37.0,
+    )
+    scaled_table = replace(
+        commercial_table,
+        customers={cid: scaled_customer},
+    )
+    scaled = fh.build_window_dataset(scaled_table.customers, pd.DataFrame({
+        "customer_id": [cid],
+        "pv_installed": [True],
+        "pv_installation_date": [pd.Timestamp("2024-01-15")],
+    }), ids=[cid])
+    np.testing.assert_allclose(scaled.series, original.series, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(scaled.kdes, original.kdes, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(
+        original.kdes,
+        fh.fast_kde_batch(original.series[:, 0, :]),
+        rtol=1e-6,
+        atol=1e-6,
+    )
 
 
 def test_inner_fold_scores_do_not_use_validation_labels(cnn_data, monkeypatch):

@@ -16,10 +16,11 @@ dependencies = [
   "ruptures>=1.1.9,<2",
   "tzdata>=2024.1",
   "catboost>=1.2.7,<2",
+  "torch>=2.4,<3",
 ]
 
 [project.optional-dependencies]
-experiment = ["torch>=2.4,<3"]
+experiment = []
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
