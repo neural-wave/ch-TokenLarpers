@@ -173,3 +173,43 @@ The probability trace $\mathbf{p} = [p_1, \dots, p_T]$ produced by PatchTST form
 
 * **Task 2 (Commissioning Date):** For customers classified as `TRUE`, we perform change-point detection on $p(t)$ to find the exact week where probability transitions permanently from baseline ($\approx 0.0$) to active ($\ge 0.70$), then refine to the exact day using daily midday energy differentials.
 * **Task 3 (Nominal Capacity in kWp):** Using the commissioning date from Task 2, we select the first post-commissioning summer season, extract the PatchTST embedding $\mathbf{z}$ and physical kW deficit features, and feed them into a calibrated regressor to predict nameplate capacity.
+
+---
+
+## 8. Validity Interpretation, Statistical Bounds & Edge Case Analysis
+
+### A. Exact Meaning of the 93.3% F1 Metric
+Across the 40 real development customers evaluated out-of-fold:
+* **True Positives:** 21 / 22 PV customers correctly detected.
+* **True Negatives:** 16 / 18 non-PV customers correctly rejected.
+* **False Alarms:** 2 customers (`POD52`, `POD59`).
+* **Missed PV:** 1 customer (`POD37`).
+* **Overall Accuracy:** $37 / 40 = \mathbf{92.5\%}$.
+* **Exact F1 Formula:** $\frac{2 \times 21}{2 \times 21 + 2 + 1} = \frac{42}{45} = \mathbf{0.9333}$.
+
+### B. Statistical Reality Check: The Sample Size ($N=40$) Catch
+While $0.9333$ is mathematically exact on the development labels, $N=40$ is a small statistical sample:
+* **High Sensitivity:** Every single misclassified customer shifts the accuracy by $2.5\%$ and the $F1$ score by $\approx 2.2\%$.
+* **Confidence Interval:** A score of $93.3\%$ on 40 samples corresponds to a **95% confidence interval of roughly $[81\%, 97\%]$**.
+* **Realistic Expectation:** On the 20 hidden test customers, performance should not be assumed to remain at $93.3\%$. An engineer should expect an out-of-distribution performance in the **$82\%$ to $90\%$ range**.
+
+### C. Methodological Soundness (Why the Metric Is Not Leaked or Overfitted)
+The validity of the score rests on three leak-prevention mechanisms:
+1. **Zero Household Leakage:** Evaluated via strict `GroupKFold` across 5 folds. At no point were windows from a validation customer present in the training set.
+2. **Zero Scale Leakage:** Every 7-day window was normalized independently by its own median and MAD. The model never saw total household consumption volume.
+3. **Blind Thresholding:** The aggregation threshold $\theta = 0.50$ was calibrated strictly within the 32 training customers of each fold and applied without modification to the 8 held-out validation customers.
+4. **Small Generalization Gap:** The training $F1$ average ($0.976$) versus validation $F1$ average ($0.933$) reveals a generalization gap of only **$0.043$ ($4.3\%$)**, confirming that the Transformer learned generalized diurnal geometry rather than memorizing identities.
+
+### D. Three Physical Failure Modes on the Hidden Test Set
+On the 20 hidden test cases, three physical edge cases could cause detection errors:
+1. **Late Autumn/Winter Commissioning (Observed in `POD37`):**
+   * If a system is commissioned in November 2025 and the dataset ends in December 2025, Swiss winter overcast skies produce negligible solar generation. The daytime depression is too faint to overcome normal household heating/lighting variations.
+2. **100% Daytime Self-Consumption (Behind-the-Meter Saturation):**
+   * If a customer installs a small PV array (e.g. 2 kWp) but operates continuous heavy daytime loads (e.g. industrial refrigeration, heat pumps, EV chargers), all solar energy is consumed locally. The grid import profile never exhibits a net midday dip, making PV mathematically unidentifiable from grid import alone.
+3. **Battery Energy Storage Systems (BESS):**
+   * If a customer pairs PV with a home battery that absorbs solar surplus at noon and discharges in the evening, the diurnal duck curve is flattened.
+
+### E. Strategic Impact on Hackathon Scoring
+Under the competition formula:
+$$\text{Main Score} = \mathbf{F1} \times (70 + 15D + 15P)$$
+Because $F1$ acts as a global multiplier over the entire 100-point formula, maintaining $F1 \ge 0.85$ secures a base floor of **$60$ to $65+$ points out of 70**, preventing score collapse and providing the necessary foundation for Tasks 2 (Date) and 3 (Capacity).
