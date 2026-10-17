@@ -52,6 +52,20 @@ def test_duplicate_row_counted_and_dropped(tmp_path):
     assert len(loaded.frame) == len(df) - 1
 
 
+@pytest.mark.parametrize("sep", [",", ";"])
+def test_rows_without_customer_id_are_dropped_and_counted(tmp_path, clean, sep):
+    df = clean.copy()
+    df["customer_id"] = df["customer_id"].astype(str)
+    df.loc[df.index[:3], "customer_id"] = ""
+    df.loc[df.index[3:5], "customer_id"] = "  "
+    path = tmp_path / "e.csv"
+    df.to_csv(path, index=False, sep=sep)
+    loaded = load_timeseries(path)
+    assert loaded.customer_ids == ["000123"]
+    assert loaded.report["rows_bad_id"] == 5
+    assert len(loaded.frame) == len(df) - 5 and (loaded.frame["customer_id"] == "000123").all()
+
+
 def test_missing_required_column_raises(tmp_path, clean):
     path = tmp_path / "e.csv"
     clean.drop(columns=["timestamp_local"]).to_csv(path, index=False)

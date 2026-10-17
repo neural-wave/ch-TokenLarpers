@@ -151,8 +151,13 @@ def local_dates(epoch_s: np.ndarray) -> np.ndarray:
 def load_timeseries(path: str | Path) -> LoadedTimeseries:
     raw = _read(path).rename(columns=lambda c: c.strip())
     rows_total = len(raw)
-    customer_ids = sorted(set(raw["customer_id"].astype(str).str.strip()))
+    # A row with an empty customer id belongs to no customer (pandas 3 keeps it as NaN, which cannot be sorted).
+    raw["customer_id"] = raw["customer_id"].fillna("").astype(str).str.strip()
+    no_id = (raw["customer_id"] == "").to_numpy()
+    raw = raw[~no_id]
+    customer_ids = sorted(set(raw["customer_id"]))
     frame, counts = _parse_frame(raw)
+    counts["rows_bad_id"] = int(no_id.sum())
     n_before = len(frame)
     frame = frame.drop_duplicates(["customer_id", "epoch_s"], keep="first")
     rows_duplicate = n_before - len(frame)

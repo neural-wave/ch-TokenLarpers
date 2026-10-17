@@ -34,7 +34,7 @@ def pick_threshold(scores: np.ndarray) -> tuple[float, float]:
     """Max score; ties -> smallest |t - 0.5|, then the higher t."""
     best = scores.max()
     tied = [t for t, s in zip(THRESHOLDS, scores) if s >= best - 1e-9]
-    t = min(tied, key=lambda x: (abs(x - 0.5), -x))
+    t = min(tied, key=lambda x: (round(abs(x - 0.5), 6), -x))  # rounded: 0.5-0.45 < 0.55-0.5 in floating point
     return float(t), float(best)
 
 
