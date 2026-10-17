@@ -34,6 +34,9 @@ SCENARIOS = (
     "shared_weather",
     "late_install",
     "small_pv",
+    "winter_install",
+    "cap_outlier",
+    "label_lead_60",
 )
 # Development-only scenarios (variant A): `label_lag_60` labels each PV customer 30–90 days after its
 # visible onset; `meter_spikes` adds a few isolated single-slot spikes of 20–50× the median slot value
@@ -44,7 +47,22 @@ SCENARIOS = (
 # `late_install` moves every PV installation into the last 8–16 weeks of its coverage (little post-install data);
 # `small_pv` draws residential PV of 0.8–2.0 kWp (a shallow midday dip). Both use the `aux` stream, so the other
 # draws of the base customers stay as they are.
-A_ONLY_SCENARIOS = ("label_lag_60", "meter_spikes", "shared_weather", "late_install", "small_pv")
+# `winter_install` moves every in-window PV install to 15 Nov–31 Jan of the nearest winter, so the step is
+# weak until the spring ramp-up; `cap_outlier` multiplies the load of every twentieth customer by 60–120
+# (outlier consumption scale, labelled kWp unchanged): features with a tiny training spread give such a
+# customer an extreme z-score and the log-space capacity regression lands at a clip. Both reuse the base
+# customers' draws. `label_lead_60` mirrors `label_lag_60`: the labelled date is 30–90 days before the visible
+# onset (e.g. production starts after a grid-connection delay), so dates predicted from the onset run late.
+A_ONLY_SCENARIOS = (
+    "label_lag_60",
+    "meter_spikes",
+    "shared_weather",
+    "late_install",
+    "small_pv",
+    "winter_install",
+    "cap_outlier",
+    "label_lead_60",
+)
 SHARED_WEATHER_KINDS = ("ac", "summer_absence")
 SPIKES_PER_YEAR = 3
 WEATHER_EPOCH = np.datetime64("2015-01-01", "D")
@@ -82,6 +100,7 @@ class CustomerSpec:
     missing_rate: float = 0.005
     spikes_per_year: int = 0  # isolated single-slot meter spikes (`meter_spikes`)
     weather_seed: int | None = None  # dataset-wide daily sunshine series (`shared_weather`)
+    load_scale: float = 1.0  # multiplies the household load (`cap_outlier`)
 
 
 @dataclass
@@ -382,7 +401,7 @@ def generate_customer(spec: CustomerSpec, seed: int, variant: Literal["A", "B"] 
     if spec.weather_seed is not None:  # shared sunshine with a little local (per-customer) variation
         local = np.random.default_rng([seed, 3]).lognormal(0.0, 0.1, g.n_days)[g.std_day]
         sun = np.clip(_shared_sun(spec.weather_seed, g) * local, 0.1, 1.0)
-    load = (_load_a if variant == "A" else _load_b)(g, spec.profile, rng)
+    load = (_load_a if variant == "A" else _load_b)(g, spec.profile, rng) * spec.load_scale
     for ev in spec.events:
         load = _apply_event(g, load, ev, rng, sun)
     net = load
@@ -432,6 +451,14 @@ def _day(ts: pd.Timestamp) -> str:
     return ts.strftime("%Y-%m-%d")
 
 
+def _winter(d: pd.Timestamp, lo: pd.Timestamp, hi: pd.Timestamp, aux: np.random.Generator) -> pd.Timestamp:
+    """A day in 15 Nov–31 Jan of the winter nearest to `d` that lies in [lo, hi]; `d` if none does."""
+    offset = pd.Timedelta(days=int(aux.integers(0, 78)))
+    starts = [pd.Timestamp(year=y, month=11, day=15) + offset for y in (d.year - 1, d.year)]
+    inside = [w for w in starts if lo <= w <= hi]
+    return min(inside, key=lambda w: abs((w - d).days)) if inside else d
+
+
 def _dataset_specs(
     n: int,
     seed: int,
@@ -479,6 +506,8 @@ def _dataset_specs(
                 pv_date = cstart - pd.Timedelta(days=int(rng.integers(30, 401)))
             else:
                 pv_date = draw_date()
+                if scenario == "winter_install":
+                    pv_date = _winter(pv_date, lo, hi, aux)
             kwp = round(float(rng.uniform(15, 60) if commercial else rng.uniform(3, 15)), 1)
             if scenario == "late_install":
                 pv_date = cend - pd.Timedelta(days=int(aux.integers(56, 113)))
@@ -501,7 +530,11 @@ def _dataset_specs(
                 export=i % 8 == 0,
                 battery_kwh=battery,
                 extensions=exts,
-                label_lag_days=int(aux.integers(30, 91)) if scenario == "label_lag_60" else 0,
+                label_lag_days=(
+                    int(aux.integers(30, 91)) * {"label_lag_60": 1, "label_lead_60": -1}[scenario]
+                    if scenario in ("label_lag_60", "label_lead_60")
+                    else 0
+                ),
             )
             if hard_negatives and i % 6 == 2:
                 events.append(Event(kinds[(i // 2) % len(kinds)], _day(draw_date())))
@@ -523,6 +556,7 @@ def _dataset_specs(
                 missing_rate=missing_rate,
                 spikes_per_year=SPIKES_PER_YEAR if scenario == "meter_spikes" else 0,
                 weather_seed=seed if scenario == "shared_weather" else None,
+                load_scale=float(aux.uniform(60, 120)) if scenario == "cap_outlier" and i % 20 == 4 else 1.0,
             )
         )
     return specs
