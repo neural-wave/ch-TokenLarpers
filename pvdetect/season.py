@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
@@ -14,18 +14,107 @@ from pvdetect.daily import EPS, WINTER
 N_WEEKS = 52
 LOG_COLUMNS = ("mid", "night", "eve", "total")
 SIGNALS = ("s",) + tuple(f"log_{c}" for c in LOG_COLUMNS)
+# Sunshine index (option `sun`): rolling-median windows (window, min days) per day type, contributors per date
+# and the days after the labelled installation date before a PV customer contributes. Each date's value is the
+# mean after dropping the lowest and highest contributor, so a saved value always mixes ≥3 customers.
+SUN_WINDOWS = {False: ("15D", 5), True: ("29D", 4)}  # weekday, weekend
+SUN_MIN_CONTRIB = 5
+SUN_POST_DAYS = 14
+
+
+def sun_residual(daily: pd.DataFrame) -> pd.Series:
+    """Label-free daily midday anomaly over valid days: `mid` minus its centred rolling median within the same
+    day type (weekday/weekend), divided by 1.4826·MAD. Seasonal and schedule changes slower than about two
+    weeks cancel; day-to-day weather stays. Empty with fewer than 30 valid days or zero spread."""
+    valid = daily["valid"].to_numpy(bool)
+    if valid.sum() < 30:
+        return pd.Series(dtype=float)
+    v = daily.loc[valid, "mid"].astype(float)
+    weekend = daily.loc[valid, "weekend"].to_numpy(bool)
+    parts = []
+    for day_type, (window, min_days) in SUN_WINDOWS.items():
+        s = v[weekend == day_type]
+        parts.append(s - s.rolling(window, center=True, min_periods=min_days).median())
+    r = pd.concat(parts).sort_index().dropna()
+    if r.empty:
+        return r
+    mad = 1.4826 * float(np.median(np.abs(r - np.median(r))))
+    return r / mad if np.isfinite(mad) and mad > 0 else pd.Series(dtype=float)
+
+
+@dataclass(frozen=True)
+class SunIndex:
+    """Daily sunshine index of one fit: per date, the trimmed mean (lowest and highest dropped) of the
+    `sun_residual` of that fit's labelled PV customers from 14 days after their installation date on (≥5 of
+    them, else NaN). PV output lowers the midday load on sunny days, so the index is low on sunny days. `loo[c]`
+    is the index without contributor c, used for c's own training feature; it exists only inside the fit and is
+    never serialized."""
+
+    start: pd.Timestamp
+    values: np.ndarray
+    loo: dict = field(default_factory=dict, compare=False, repr=False)
+
+    def series(self, cid: str | None = None) -> pd.Series:
+        vals = self.loo.get(cid, self.values)
+        return pd.Series(vals, index=pd.date_range(self.start, periods=len(vals), freq="D"))
+
+    def to_json(self) -> dict:
+        return {
+            "start": self.start.strftime("%Y-%m-%d"),
+            "values": [float(x) if np.isfinite(x) else None for x in self.values],
+        }
+
+    @classmethod
+    def from_json(cls, d: dict) -> SunIndex:
+        return cls(pd.Timestamp(d["start"]), np.array([np.nan if x is None else x for x in d["values"]], float))
+
+
+def _trimmed_rows(a: np.ndarray) -> np.ndarray:
+    """Per row: mean of the finite values without the lowest and the highest; NaN below SUN_MIN_CONTRIB."""
+    n = np.isfinite(a).sum(axis=1)
+    out = np.full(a.shape[0], np.nan)
+    ok = n >= SUN_MIN_CONTRIB
+    if ok.any():
+        b = a[ok]
+        out[ok] = (np.nansum(b, axis=1) - np.nanmin(b, axis=1) - np.nanmax(b, axis=1)) / (n[ok] - 2)
+    return out
+
+
+def fit_sun_index(residuals: dict[str, pd.Series], pv_dates: dict[str, dt.date]) -> SunIndex | None:
+    """`SunIndex` from the `sun_residual` of the labelled PV customers in `pv_dates`; None when no date has
+    `SUN_MIN_CONTRIB` contributors."""
+    cols = {}
+    for cid, date in pv_dates.items():
+        z = residuals.get(cid)
+        if z is None or z.empty:
+            continue
+        z = z[z.index >= pd.Timestamp(date) + pd.Timedelta(days=SUN_POST_DAYS)]
+        if len(z):
+            cols[cid] = z
+    if len(cols) < SUN_MIN_CONTRIB:
+        return None
+    Z = pd.DataFrame(cols)
+    Z = Z.reindex(pd.date_range(Z.index.min(), Z.index.max(), freq="D"))
+    A = Z.to_numpy(float)
+    values = _trimmed_rows(A)
+    if not np.isfinite(values).any():
+        return None
+    loo = {c: _trimmed_rows(np.delete(A, j, axis=1)) for j, c in enumerate(Z.columns)}
+    return SunIndex(Z.index[0], values, loo)
 
 
 @dataclass(frozen=True)
 class Climatology:
     """`curves[name][woy-1]` is the typical customer-centred value of signal `name` (s, log_mid, ...).
 
-    `evidence_scale[woy-1]` (optional) divides change-point step/recur/evidence at that week."""
+    `evidence_scale[woy-1]` (optional) divides change-point step/recur/evidence at that week; `sun` (optional,
+    option `sun`) is the fit's daily sunshine index."""
 
     curves: dict[str, np.ndarray]
     yield_shape: np.ndarray
     source: str = "labelled_nonpv"
     evidence_scale: np.ndarray | None = None
+    sun: SunIndex | None = None
 
     @property
     def s(self) -> np.ndarray:
@@ -42,6 +131,8 @@ class Climatology:
         }
         if self.evidence_scale is not None:
             out["evidence_scale"] = np.asarray(self.evidence_scale).tolist()
+        if self.sun is not None:
+            out["sun"] = self.sun.to_json()
         return out
 
     @classmethod
@@ -52,6 +143,7 @@ class Climatology:
             np.asarray(d["yield_shape"]),
             d["source"],
             None if scale is None else np.asarray(scale, float),
+            SunIndex.from_json(d["sun"]) if "sun" in d else None,
         )
 
 

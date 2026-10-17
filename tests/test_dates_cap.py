@@ -294,7 +294,7 @@ def test_meter_spikes_scenario_and_variant_guard():
     assert (ts_b[["customer_id", "timestamp_epoch"]].to_numpy() == ts_s[["customer_id", "timestamp_epoch"]].to_numpy()).all()
     diff = ts_b["energy_consumption_kwh"].to_numpy() != ts_s["energy_consumption_kwh"].to_numpy()
     assert 0 < diff.sum() <= 4 * round(3 * 1461 / 365)
-    for sc in ("label_lag_60", "meter_spikes"):
+    for sc in ("label_lag_60", "meter_spikes", "shared_weather"):
         with pytest.raises(ValueError, match="variant A only"):
             generate_dataset(2, 3, variant="B", scenario=sc)
 
@@ -313,5 +313,14 @@ def test_holdout_default_scenarios_are_unchanged(monkeypatch, tmp_path):
     assert benchmark.main(["--suite", "holdout", "--log", str(tmp_path / "log.md"), "--n", "12", "--repeats", "1"]) == 0
     block = int((benchmark.REPO / "benchmarks" / "HOLDOUT_SEED_BLOCK").read_text().strip())
     held = [r for r in ran if r[2] == "B"]
-    assert [s for s, _, _ in held] == [s for s in benchmark.SCENARIOS if s not in ("label_lag_60", "meter_spikes")]
+    assert [s for s, _, _ in held] == [
+        "base",
+        "confounders_x2",
+        "east_west_heavy",
+        "battery_heavy",
+        "short_coverage",
+        "missing_5pct",
+        "commercial_heavy",
+        "pv_before_start",
+    ]
     assert [seed for _, seed, _ in held] == [block + j for j in range(len(held))]

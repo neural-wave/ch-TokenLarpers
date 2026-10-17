@@ -31,12 +31,19 @@ SCENARIOS = (
     "pv_before_start",
     "label_lag_60",
     "meter_spikes",
+    "shared_weather",
 )
 # Development-only scenarios (variant A): `label_lag_60` labels each PV customer 30–90 days after its
 # visible onset; `meter_spikes` adds a few isolated single-slot spikes of 20–50× the median slot value
 # per customer-year. Both reuse the `base` customers, so the base series and labels stay as they are.
-A_ONLY_SCENARIOS = ("label_lag_60", "meter_spikes")
+# `shared_weather` reuses the base customers too, but every customer sees one dataset-wide daily sunshine
+# series (PV output and AC load follow it) and the non-PV hard negatives become sun-driven AC or a
+# recurring summer weekday daytime absence, i.e. load patterns that mimic a PV midday dip or peak.
+A_ONLY_SCENARIOS = ("label_lag_60", "meter_spikes", "shared_weather")
+SHARED_WEATHER_KINDS = ("ac", "summer_absence")
 SPIKES_PER_YEAR = 3
+WEATHER_EPOCH = np.datetime64("2015-01-01", "D")
+WEATHER_DAYS = 6000  # 2015-01-01 .. 2031-06
 
 
 @dataclass(frozen=True)
@@ -69,6 +76,7 @@ class CustomerSpec:
     missing: bool = True
     missing_rate: float = 0.005
     spikes_per_year: int = 0  # isolated single-slot meter spikes (`meter_spikes`)
+    weather_seed: int | None = None  # dataset-wide daily sunshine series (`shared_weather`)
 
 
 @dataclass
@@ -211,7 +219,9 @@ def _active(g: _Grid, ev: Event) -> np.ndarray:
     return (g.local_day >= start) & (g.local_day < end)
 
 
-def _apply_event(g: _Grid, load: np.ndarray, ev: Event, rng: np.random.Generator) -> np.ndarray:
+def _apply_event(
+    g: _Grid, load: np.ndarray, ev: Event, rng: np.random.Generator, sun: np.ndarray | None = None
+) -> np.ndarray:
     act = _active(g, ev)
     h, doy, wd = g.h, g.doy, g.weekday
     out = load.copy()
@@ -253,7 +263,11 @@ def _apply_event(g: _Grid, load: np.ndarray, ev: Event, rng: np.random.Generator
         out = np.where(act, out * 0.4, out)
     elif ev.kind == "ac":
         sel = act & (doy >= 152) & (doy <= 243) & (h >= 12) & (h < 18)
-        out = out + np.where(sel, ev.size * 0.25 * np.maximum(0, _seasonal(doy, 200)), 0.0)
+        hot = 1.0 if sun is None else sun / 0.6  # shared weather: more cooling on sunny days
+        out = out + np.where(sel, ev.size * 0.25 * np.maximum(0, _seasonal(doy, 200)) * hot, 0.0)
+    elif ev.kind == "summer_absence":  # recurring every year: mid-June to August weekdays, 08–17 h
+        sel = act & (doy >= 166) & (doy <= 243) & (wd < 5) & (h >= 8) & (h < 17)
+        out = np.where(sel, out * 0.5, out)
     elif ev.kind == "daytime_absence":
         sel = act & (wd < 5) & (h >= 8) & (h < 17)
         out = np.where(sel, out * 0.5, out)
@@ -284,7 +298,20 @@ def _kwp_series(g: _Grid, pv: PVSpec) -> np.ndarray:
     return kwp
 
 
-def _pv_a(g: _Grid, pv: PVSpec, rng: np.random.Generator) -> np.ndarray:
+def _shared_sun(weather_seed: int, g: _Grid) -> np.ndarray:
+    """Per-row daily sunshine fraction in [0.2, 1], identical for every customer on the same absolute
+    UTC+1 day: one AR(1) series drawn from `weather_seed` alone."""
+    rng = np.random.default_rng([weather_seed, 7])
+    eps = rng.normal(0.0, 0.25, WEATHER_DAYS)
+    k = np.empty(WEATHER_DAYS)
+    k[0] = 0.6
+    for d in range(1, WEATHER_DAYS):
+        k[d] = 0.6 + 0.5 * (k[d - 1] - 0.6) + eps[d]
+    first = (WEATHER_EPOCH - np.datetime64("1970-01-01", "D")).astype(np.int64)
+    return np.clip(k, 0.2, 1.0)[(g.epoch + 3600) // 86400 - first]
+
+
+def _pv_a(g: _Grid, pv: PVSpec, rng: np.random.Generator, sun: np.ndarray | None = None) -> np.ndarray:
     c = _seasonal(g.doy, 172)
     hw = 4.0 + 2.5 * c
     amp = 0.55 + 0.25 * c
@@ -293,7 +320,9 @@ def _pv_a(g: _Grid, pv: PVSpec, rng: np.random.Generator) -> np.ndarray:
         amp = amp * 0.85
     x = (g.hs - 12.5) / hw
     shape = np.where(np.abs(x) < 1, np.cos(np.pi / 2 * np.clip(x, -1, 1)) ** 1.5, 0.0)
-    cloud = rng.uniform(0.2, 1.0, g.n_days)[g.std_day]
+    cloud = rng.uniform(0.2, 1.0, g.n_days)[g.std_day]  # drawn in every case: keeps the base stream
+    if sun is not None:
+        cloud = sun
     return _kwp_series(g, pv) * 0.25 * amp * shape * cloud
 
 
@@ -344,12 +373,16 @@ def _battery(g: _Grid, net: np.ndarray, cap: float) -> np.ndarray:
 def generate_customer(spec: CustomerSpec, seed: int, variant: Literal["A", "B"] = "A") -> pd.DataFrame:
     rng = np.random.default_rng(seed)
     g = _grid(spec.start, spec.end)
+    sun = None
+    if spec.weather_seed is not None:  # shared sunshine with a little local (per-customer) variation
+        local = np.random.default_rng([seed, 3]).lognormal(0.0, 0.1, g.n_days)[g.std_day]
+        sun = np.clip(_shared_sun(spec.weather_seed, g) * local, 0.1, 1.0)
     load = (_load_a if variant == "A" else _load_b)(g, spec.profile, rng)
     for ev in spec.events:
-        load = _apply_event(g, load, ev, rng)
+        load = _apply_event(g, load, ev, rng, sun)
     net = load
     if spec.pv is not None:
-        prod = (_pv_a if variant == "A" else _pv_b)(g, spec.pv, rng)
+        prod = _pv_a(g, spec.pv, rng, sun) if variant == "A" else _pv_b(g, spec.pv, rng)
         net = load - prod
         if spec.pv.battery_kwh > 0:
             net = _battery(g, net, spec.pv.battery_kwh)
@@ -464,7 +497,10 @@ def _dataset_specs(
             if hard_negatives and i % 6 == 2:
                 events.append(Event(kinds[(i // 2) % len(kinds)], _day(draw_date())))
         elif hard_negatives:
-            events.append(Event(kinds[(i // 2) % len(kinds)], _day(draw_date())))
+            kind = kinds[(i // 2) % len(kinds)]
+            if scenario == "shared_weather":
+                kind = SHARED_WEATHER_KINDS[(i // 2) % 2]
+            events.append(Event(kind, _day(draw_date())))
             if scenario == "confounders_x2":
                 events.append(Event(kinds[(i // 2 + 3) % len(kinds)], _day(draw_date())))
         specs.append(
@@ -477,6 +513,7 @@ def _dataset_specs(
                 events=tuple(events),
                 missing_rate=missing_rate,
                 spikes_per_year=SPIKES_PER_YEAR if scenario == "meter_spikes" else 0,
+                weather_seed=seed if scenario == "shared_weather" else None,
             )
         )
     return specs

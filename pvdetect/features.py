@@ -49,6 +49,10 @@ SCHEDULE_FEATURES = ("solar_shape_consistency",)
 SCHEDULE_MONTHS = (6, 7, 8)
 SCHEDULE_GAP_DAYS = 14  # post window starts this many days after the cut
 SCHEDULE_MIN_DAYS = 20  # valid days per stratum (weekday / weekend) on each side of the cut
+# Sun feature block (option `sun`): computed when the fit's climatology carries a sunshine index, used by the
+# classifier only when inner CV picks it.
+SUN_FEATURES = ("sun_coupling",)
+SUN_MIN_DAYS = 40  # shared April–September days with a finite index
 CAPACITY_FEATURES = ("dip_kw", "log_kwp_phys", "zero_window_h", "night_kw", "log_mean_daily_kwh")
 EXPORT_CAPACITY_FEATURES = ("export_kw", "night_kw")
 LOG1P_CAPACITY = ("dip_kw", "zero_window_h", "night_kw", "export_kw")
@@ -71,6 +75,24 @@ def last365(v: pd.DataFrame) -> pd.DataFrame:
     if v.empty:
         return v
     return v[v.index > v.index[-1] - pd.Timedelta(days=365)]
+
+
+def sun_coupling(z: pd.Series, sun: pd.Series) -> float:
+    """Spearman correlation between a customer's `sun_residual` and the fit's sunshine index over the
+    April–September days of its last 365 days. PV lowers midday load on sunny days like the index customers:
+    clearly positive. Weather-independent load changes: near 0. Sun-driven loads (cooling): negative.
+    NaN with fewer than `SUN_MIN_DAYS` shared days."""
+    if z.empty:
+        return np.nan
+    z = z[(z.index > z.index[-1] - pd.Timedelta(days=365)) & z.index.month.isin(SUMMER)]
+    s = sun.reindex(z.index)
+    ok = np.isfinite(z.to_numpy(float)) & np.isfinite(s.to_numpy(float))
+    if ok.sum() < SUN_MIN_DAYS:
+        return np.nan
+    a, b = z[ok].rank().to_numpy(float), s[ok].rank().to_numpy(float)
+    if a.std() == 0 or b.std() == 0:
+        return np.nan
+    return float(np.corrcoef(a, b)[0, 1])
 
 
 def first365(v: pd.DataFrame) -> pd.DataFrame:
@@ -238,7 +260,7 @@ def fitted_features(
 ) -> tuple[dict[str, float], Commissioning | None]:
     """Climatology-dependent features (computed inside every fit/predict with that fit's climatology);
     `recur_strict` is the fit's short-series detection option (`detect_commissioning`)."""
-    out = dict.fromkeys(FITTED + PERSISTENCE_FEATURES + SCHEDULE_FEATURES, np.nan)
+    out = dict.fromkeys(FITTED + PERSISTENCE_FEATURES + SCHEDULE_FEATURES + SUN_FEATURES, np.nan)
     if cd is None or cd.n_valid == 0:
         return out, None
     daily = cd.daily

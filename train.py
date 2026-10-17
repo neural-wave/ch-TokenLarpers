@@ -60,9 +60,10 @@ def _selection_line(infos: list[dict]) -> str:
     block = Counter(i.get("feature_block") for i in infos if i.get("feature_block"))
     if block:
         parts.append(f"features base={block.get('base', 0)}/{n} persistence={block.get('persistence', 0)}/{n}")
-    sched = Counter(i.get("schedule_block") for i in infos if i.get("schedule_block"))
-    if sched:
-        parts.append(f"schedule off={sched.get('off', 0)}/{n} on={sched.get('on', 0)}/{n}")
+    for key in ("schedule", "sun"):
+        got = Counter(i.get(f"{key}_block") for i in infos if i.get(f"{key}_block"))
+        if got:
+            parts.append(f"{key} off={got.get('off', 0)}/{n} on={got.get('on', 0)}/{n}")
     pseudo = Counter(i.get("pseudo") for i in infos if i.get("pseudo"))
     if pseudo:
         parts.append(f"pseudo off={pseudo.get('off', 0)}/{n} on={pseudo.get('on', 0)}/{n}")
@@ -123,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-offset-tri", action="store_true", help="keep the shrunk-median date offsets (no inner-CV choice)")
     ap.add_argument("--no-recur-strict", action="store_true", help="drop the strict short-series detection option")
     ap.add_argument("--schedule", action="store_true", help="add the schedule-robust feature-block option")
+    ap.add_argument("--sun", action="store_true", help="add the sunshine-coupling feature-block option")
     ap.add_argument(
         "--pseudo-pool",
         type=int,
@@ -145,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
         | ({"offset_tri"} if args.no_offset_tri else set())
         | ({"recur_strict"} if args.no_recur_strict else set())
     )
-    options = DEFAULT_OPTIONS - dropped | ({"schedule"} if args.schedule else set())
+    options = DEFAULT_OPTIONS - dropped | {o for o in ("schedule", "sun") if getattr(args, o)}
     if args.oof_out and not args.cv:
         ap.error("--oof-out requires --cv")
 

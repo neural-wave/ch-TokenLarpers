@@ -913,7 +913,7 @@ Every item is a Tier A option inside `Procedure.fit`. Inner CV chooses per fit w
 3. **Human review of the exact model files** (user, before any copy leaves the private dir). In `model.json`:
    - `capacity.fallback_kwp` is the median of the real training capacities (with an even count, the mean of two real labels);
    - the `impute` vectors are medians over 40 customers;
-   - `climatology` holds aggregate weekly curves;
+   - `climatology` holds aggregate weekly curves and, only when the `sun` option was adopted, `climatology.sun`: one value per date, each the trimmed mean of ≥5 training PV customers' midday anomalies (lowest and highest dropped);
    - `selection` holds inner scores.
    - `.cbm` files may hold split thresholds near individual customers' values.
    - Decide to publish or to deliver privately, per the organizer answer.
