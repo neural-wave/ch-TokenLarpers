@@ -29,7 +29,9 @@ Install the commit-time check once per clone:
 sh scripts/install_hooks.sh
 ```
 
-It copies `scripts/check_hygiene.py` into `.git/hooks/pre-commit` (a copy, so the hook also works on branches without the script; re-run after editing it). The hook checks the staged files and refuses the commit when any of them is a data or model dump (`.csv`, `.parquet`, `.cbm`, `.pt`, ...), lives under an artifacts directory, or contains a real customer identifier (the letters `POD` immediately followed by digits). Fabricated fixtures use identifiers such as `PODSYN001`, which are not matched. The check prints offending paths only, never their content. `python scripts/check_hygiene.py --all` audits the whole tracked tree (for CI); `tests/test_hygiene.py` runs it too. The hand-in is an export of the frozen tree (`git archive <commit>`), never this history.
+It copies `scripts/check_hygiene.py` into `.git/hooks/pre-commit` (a copy, so the hook also works on branches without the script; re-run after editing it). The hook checks the staged files and refuses the commit when any of them is a data or model dump (`.csv`, `.parquet`, `.cbm`, `.pt`, ...), lives under an artifacts directory, or contains a real customer identifier (the letters `POD` in any case, starting a word and immediately followed by digits, even when letters or `_` follow the digits). Fabricated fixtures use identifiers such as `PODSYN001`, which are not matched. The check prints offending paths only, never their content. `python scripts/check_hygiene.py --all` audits the whole tracked tree (for CI); `tests/test_hygiene.py` runs it too. The hand-in is an export of the frozen tree (`git archive <commit>`), never this history.
+
+History and visibility: commits `e303f6d`, `1f875b6`, `a65b552` and `086eda8` on the `time-series-embeddings` branch contain real customer identifiers. Until the team decides how to remove them (delete that branch once its content is carried over, or a coordinated `git filter-repo` rewrite), `ch-TokenLarpers` stays private, and a repo admin confirms the visibility setting. The NW_26 hand-in is always a clean export (Step 2.5-G) that does not carry this history.
 
 ## Train
 
