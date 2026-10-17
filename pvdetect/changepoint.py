@@ -26,6 +26,13 @@ MIN_PERSIST = 0.5
 # not checked against the seasonal pattern, so `found` needs a stronger persistence.
 MIN_PERSIST_SHORT = 0.75
 DATE_SCORE_DAYS = 30  # the official date score: max(0, 1 − |error| / 30)
+# `onset_first` option: among qualifying candidates choose the earliest whose evidence is at least this
+# fraction of the best candidate's evidence (fixed constant, not tuned on real data).
+ONSET_FIRST_FRAC = 0.3
+# `tail_guard` option: a candidate's position τ must have at least this many valid days after it, and
+# _persist must observe at least TAIL_GUARD_MIN_MONTHS post months (fewer → NaN → filtered by MIN_PERSIST).
+TAIL_GUARD_MIN_VALID = 45
+TAIL_GUARD_MIN_MONTHS = 2
 
 
 @dataclass(frozen=True)
@@ -85,7 +92,7 @@ def _step(ds: np.ndarray, tau: int, min_n: int, inside: bool = False) -> float:
     return pre - post
 
 
-def _persist(ds: np.ndarray, months: np.ndarray, tau: int) -> float:
+def _persist(ds: np.ndarray, months: np.ndarray, tau: int, min_months: int = 1) -> float:
     pre = _med(_window(ds, tau - 180, tau), 10)
     if not np.isfinite(pre):
         return np.nan
@@ -97,7 +104,7 @@ def _persist(ds: np.ndarray, months: np.ndarray, tau: int) -> float:
         if np.isfinite(med):
             total += 1
             hits += med < pre - 0.05
-    return hits / total if total else np.nan
+    return hits / total if total >= min_months else np.nan
 
 
 def _candidates(ds: np.ndarray, first: int, last: int) -> list[int]:
@@ -116,7 +123,14 @@ def _candidates(ds: np.ndarray, first: int, last: int) -> list[int]:
     return [int(starts[b]) for b in bkps]
 
 
-def detect_commissioning(daily: pd.DataFrame, clim: Climatology, *, recur_strict: bool = False) -> Commissioning | None:
+def detect_commissioning(
+    daily: pd.DataFrame,
+    clim: Climatology,
+    *,
+    recur_strict: bool = False,
+    onset_first: bool = False,
+    tail_guard: bool = False,
+) -> Commissioning | None:
     valid = daily["valid"].to_numpy(bool)
     if valid.sum() < MIN_VALID_DAYS:
         return None
@@ -128,15 +142,29 @@ def detect_commissioning(daily: pd.DataFrame, clim: Climatology, *, recur_strict
     vidx = np.flatnonzero(valid)
     first, last = int(vidx[0]), int(vidx[-1])
 
+    min_months = TAIL_GUARD_MIN_MONTHS if tail_guard else 1
     stats = []
     for tau in _candidates(ds, first, last):
         step = _step(ds, tau, 10)
         if not np.isfinite(step):
             continue
-        persist = _persist(ds, months, tau)
-        recurs = [_step(ds, tau + 364 * k, 20, inside=True) for k in (-3, -2, -1, 1, 2, 3)]
-        recurs = [r for r in recurs if np.isfinite(r)]
-        recur = max(recurs) if recurs else np.nan
+        if tail_guard and int(valid[tau:].sum()) < TAIL_GUARD_MIN_VALID:
+            continue
+        persist = _persist(ds, months, tau, min_months)
+        if onset_first:
+            # Use only earlier years (k < 0); fall back to all k when none are finite.
+            neg_recurs = [_step(ds, tau + 364 * k, 20, inside=True) for k in (-3, -2, -1)]
+            neg_recurs = [r for r in neg_recurs if np.isfinite(r)]
+            if neg_recurs:
+                recur = max(neg_recurs)
+            else:
+                pos_recurs = [_step(ds, tau + 364 * k, 20, inside=True) for k in (1, 2, 3)]
+                pos_recurs = [r for r in pos_recurs if np.isfinite(r)]
+                recur = max(pos_recurs) if pos_recurs else np.nan
+        else:
+            recurs = [_step(ds, tau + 364 * k, 20, inside=True) for k in (-3, -2, -1, 1, 2, 3)]
+            recurs = [r for r in recurs if np.isfinite(r)]
+            recur = max(recurs) if recurs else np.nan
         evidence = step - max(0.0, recur) if np.isfinite(recur) else step
         if clim.evidence_scale is not None:
             sc = float(clim.evidence_scale[woy[tau] - 1])
@@ -144,7 +172,17 @@ def detect_commissioning(daily: pd.DataFrame, clim: Climatology, *, recur_strict
         stats.append((tau, step, persist, recur, evidence))
 
     persistent = [c for c in stats if np.isfinite(c[2]) and c[2] >= MIN_PERSIST]
-    best = max(persistent, key=lambda c: c[4]) if persistent else None
+    if onset_first and persistent:
+        # Among qualifying candidates choose the earliest whose evidence ≥ ONSET_FIRST_FRAC × best.
+        qualifying = [c for c in persistent if c[4] >= max(FOUND_EVIDENCE, FOUND_SHARE * c[1])]
+        if qualifying:
+            best_ev = max(c[4] for c in qualifying)
+            reachable = [c for c in qualifying if c[4] >= ONSET_FIRST_FRAC * best_ev]
+            best = min(reachable, key=lambda c: c[0]) if reachable else max(qualifying, key=lambda c: c[4])
+        else:
+            best = None
+    else:
+        best = max(persistent, key=lambda c: c[4]) if persistent else None
     found = best is not None and best[4] >= max(FOUND_EVIDENCE, FOUND_SHARE * best[1])
     if found and recur_strict and not np.isfinite(best[3]):
         found = best[2] >= MIN_PERSIST_SHORT

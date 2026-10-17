@@ -58,20 +58,28 @@ START_LAG_MIN_N = 3  # fewer present-at-start gaps: 0 (today) or, with `offset_t
 # score-matched date offsets (`offset_tri`), the strict short-series detection rule (`recur_strict`) and
 # the sunshine-coupling feature block (`sun`), the residual date-bias correction (`date_debias`) and the
 # learned capacity band (`cap_ceiling`).
-# Without e1/e2/weekly/ctune/offset_tri/recur_strict/date_debias/cap_ceiling the procedure is exactly the
-# pre-E1/E2 one (`train.py --no-e1e2 --no-weekly --no-ctune --no-offset-tri --no-recur-strict
-# --no-date-debias --no-cap-ceiling`, plus `--no-recent --no-smallpv`); schedule and sun are opt-in.
+# `onset_first`: among qualifying candidates choose the earliest with evidence ≥ ONSET_FIRST_FRAC × best,
+# and use only earlier-year recurrence (k < 0) to avoid post-install PV seasonality penalising the onset.
+# `tail_guard`: require ≥ 45 valid days after τ and ≥ 2 post months for _persist (suppresses end-of-series
+# holiday-shutdown artifacts).
+# Without e1/e2/weekly/ctune/offset_tri/recur_strict/date_debias/cap_ceiling/onset_first/tail_guard the
+# procedure is exactly the pre-E1/E2 one (`train.py --no-e1e2 --no-weekly --no-ctune --no-offset-tri
+# --no-recur-strict --no-date-debias --no-cap-ceiling --no-onset-first --no-tail-guard`, plus
+# `--no-recent --no-smallpv`); schedule and sun are opt-in.
 # Recall-targeted feature blocks (missed PV): `recent` (tail evidence against the same weeks of earlier years and
 # the customer's own earlier level) and `smallpv` (scale-free midday deficit against night/evening load).
 # Both are in the default pool; `train.py --no-recent --no-smallpv` removes them.
 ALL_OPTIONS = frozenset(
     {
         "e1", "e2", "schedule", "weekly", "ctune", "offset_tri", "recur_strict", "sun", "recent", "smallpv",
-        "date_debias", "cap_ceiling",
+        "date_debias", "cap_ceiling", "onset_first", "tail_guard",
     }
 )
 DEFAULT_OPTIONS = frozenset(
-    {"e1", "e2", "weekly", "ctune", "offset_tri", "recur_strict", "recent", "smallpv", "date_debias", "cap_ceiling"}
+    {
+        "e1", "e2", "weekly", "ctune", "offset_tri", "recur_strict", "recent", "smallpv",
+        "date_debias", "cap_ceiling", "onset_first", "tail_guard",
+    }
 )
 REGIMES = ("event", "present_at_start", "insufficient")
 DEBIAS_MIN_N = 3  # inner OOF true positives of a regime needed for its bias; fewer: no shift
@@ -122,6 +130,8 @@ class Components:
     logreg_C: float = LOGREG_C
     recur_strict: bool = False
     cap_band: dict | None = None
+    onset_first: bool = False
+    tail_guard: bool = False
 
 
 def _last_valid(table: FeatureTable, cid: str) -> pd.Timestamp | None:
@@ -234,6 +244,8 @@ def _fit_components(
     projection: dict | None = None,
     offset_tri: bool = False,
     recur_strict: bool = False,
+    onset_first: bool = False,
+    tail_guard: bool = False,
 ) -> Components:
     from catboost import CatBoostRegressor
 
@@ -242,7 +254,11 @@ def _fit_components(
     dates = {c: d.date() for c, d in sub.loc[y, "pv_installation_date"].items() if pd.notna(d)}
     nonpv = [c for c, on in zip(ids, y) if not on]
     clim = _climatology(table, nonpv, dates, setting, sun="sun_coupling" in names)
-    F, cps = compute_features(table, ids, clim, recur_strict=recur_strict, embedding=embedding, projection=projection)
+    F, cps = compute_features(
+        table, ids, clim,
+        recur_strict=recur_strict, onset_first=onset_first, tail_guard=tail_guard,
+        embedding=embedding, projection=projection,
+    )
     date_params = fit_date_params(table, lab, ids, F, cps, tri=offset_tri)
     logreg, objects = _fit_classifiers(F[names].to_numpy(float), y, clf_kinds, C=C)
     kwp = sub["pv_capacity_kwp"].to_numpy(float)
@@ -262,7 +278,7 @@ def _fit_components(
         reg.fit(F.loc[pos, cb_names].to_numpy(float), np.log(kwp[pos]))
         objects["catboost_cap"] = reg
     band = fit_cap_band(kwp[pos])
-    return Components(clim, F, cps, date_params, logreg, ridge, ridge_export, fallback, objects, C, recur_strict, band)
+    return Components(clim, F, cps, date_params, logreg, ridge, ridge_export, fallback, objects, C, recur_strict, band, onset_first, tail_guard)
 
 
 def _climatology(
@@ -299,6 +315,8 @@ def _inner_oof(
     weekly=False,
     offset_tri=False,
     recur_strict=False,
+    onset_first=False,
+    tail_guard=False,
     tri_columns=False,
     embedding=None,
     raw=None,
@@ -331,11 +349,15 @@ def _inner_oof(
             projection=projection,
             offset_tri=offset_tri,
             recur_strict=recur_strict,
+            onset_first=onset_first,
+            tail_guard=tail_guard,
         )
         if refit is not None:
             comp = refit(comp, tr)
         Fva, cps_va = compute_features(
-            table, va, comp.clim, recur_strict=recur_strict, embedding=embedding, projection=projection
+            table, va, comp.clim,
+            recur_strict=recur_strict, onset_first=onset_first, tail_guard=tail_guard,
+            embedding=embedding, projection=projection,
         )
         p_lr = classifier_proba({"logreg": comp.logreg}, {}, Fva, names, "logreg")
         p_cb = (
@@ -826,6 +848,40 @@ def _choose_block(
     return (cand_names, *cand, info) if adopt else (names, oof, sel, info)
 
 
+def _choose_onset_first(
+    table, labels, lab, train_ids, splits, names, cap_names, oof, sel, avg=True, C=LOGREG_C, weekly=False, dkw=None
+):
+    """`onset_first` (earliest-qualifying-candidate date rule + earlier-year-only recurrence) on the same
+    inner splits, adopted by the Step 11 rule."""
+    c_oof = _inner_oof(
+        table, labels, lab, train_ids, splits, names, cap_names, C=C, weekly=weekly, **(dkw or {}), onset_first=True
+    )
+    cand = (c_oof, _select(c_oof, avg))
+    adopt, boot = _adopt((oof, sel), cand)
+    info = {
+        "onset_first": "on" if adopt else "off",
+        "onset_first_options": {"off": sel["inner_score"], "on": cand[1]["inner_score"], "bootstrap_p": boot},
+    }
+    return (*cand, info) if adopt else (oof, sel, info)
+
+
+def _choose_tail_guard(
+    table, labels, lab, train_ids, splits, names, cap_names, oof, sel, avg=True, C=LOGREG_C, weekly=False, dkw=None
+):
+    """`tail_guard` (≥ 45 valid days after τ, ≥ 2 post months for _persist) on the same inner splits,
+    adopted by the Step 11 rule."""
+    c_oof = _inner_oof(
+        table, labels, lab, train_ids, splits, names, cap_names, C=C, weekly=weekly, **(dkw or {}), tail_guard=True
+    )
+    cand = (c_oof, _select(c_oof, avg))
+    adopt, boot = _adopt((oof, sel), cand)
+    info = {
+        "tail_guard": "on" if adopt else "off",
+        "tail_guard_options": {"off": sel["inner_score"], "on": cand[1]["inner_score"], "bootstrap_p": boot},
+    }
+    return (*cand, info) if adopt else (oof, sel, info)
+
+
 def _final_outputs(oof: pd.DataFrame, sel: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return _select_outputs(oof, sel)
 
@@ -869,6 +925,8 @@ def fit(
     pseudo_info = {"pseudo": "off"} if table.unlabelled_pool else {}
     tri_info = {"offset_tri": "off"} if "offset_tri" in options else {}
     strict_info = {"recur_strict": "off"} if "recur_strict" in options else {}
+    onset_first_info = {"onset_first": "off"} if "onset_first" in options else {}
+    tail_guard_info = {"tail_guard": "off"} if "tail_guard" in options else {}
     dkw: dict = {}  # adopted date options, passed to every later inner OOF and the final fit
     base_oof = None
     base_sel = None
@@ -895,6 +953,20 @@ def fit(
             sel["inner_score"] = _full_inner_score(oof, sel)
             if strict_info["recur_strict"] == "on":
                 dkw["recur_strict"] = True
+        if "onset_first" in options:
+            oof, sel, onset_first_info = _choose_onset_first(
+                table, labels, lab, train_ids, splits, names, cap_names, oof, sel, avg, C, weekly, dkw
+            )
+            sel["inner_score"] = _full_inner_score(oof, sel)
+            if onset_first_info["onset_first"] == "on":
+                dkw["onset_first"] = True
+        if "tail_guard" in options:
+            oof, sel, tail_guard_info = _choose_tail_guard(
+                table, labels, lab, train_ids, splits, names, cap_names, oof, sel, avg, C, weekly, dkw
+            )
+            sel["inner_score"] = _full_inner_score(oof, sel)
+            if tail_guard_info["tail_guard"] == "on":
+                dkw["tail_guard"] = True
         if table.unlabelled is not None:
             setting, oof, sel, unl_info = _choose_unlabelled(
                 table, labels, lab, train_ids, splits, names, cap_names, oof, sel, avg, C, weekly, dkw
@@ -1062,7 +1134,7 @@ def fit(
         C,
         embedding=encoder if block == "embedding" else None,
         projection=embedding_projection,
-        **dkw,
+        **dkw,  # includes onset_first=True / tail_guard=True when adopted
     )
     if labeller:
         from pvdetect.pseudolabel import final_pseudo
@@ -1076,12 +1148,18 @@ def fit(
     date = {**comp.date_params, "insufficient_rule": sel["insufficient_rule"]}
     if "recur_strict" in options:  # inference detects with the same rule as this fit
         date["recur_strict"] = comp.recur_strict
+    if "onset_first" in options:
+        date["onset_first"] = comp.onset_first
+    if "tail_guard" in options:
+        date["tail_guard"] = comp.tail_guard
     sel.update(offset_event=date["offset_event"], start_lag=date["start_lag"], contrast_cut=date["contrast_cut"])
     if date_bias is not None:  # inference shifts each regime's date by the fit's inner OOF bias
         date["date_bias"] = date_bias
     sel.update(c_info)
     sel.update(tri_info)
     sel.update(strict_info)
+    sel.update(onset_first_info)
+    sel.update(tail_guard_info)
     sel.update(debias_info)
     sel.update(band_info)
     sel["embedding_bootstrap_p"] = emb_bootstrap
