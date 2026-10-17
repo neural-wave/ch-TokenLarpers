@@ -20,6 +20,7 @@ import pandas as pd
 
 from pvdetect.diagnose import _fmt, _outside_repo, error_table, summarize
 from pvdetect.io import _read_str_table, _to_date, _to_float, load_labels, parse_bool
+from pvdetect.scoring import bootstrap_weights, weighted_scores
 
 BOOTSTRAP_B = 2000
 BOOTSTRAP_SEED = 0
@@ -82,27 +83,18 @@ def _components(tab: pd.DataFrame) -> np.ndarray:
     ).astype(float)
 
 
-def _weighted_scores(W: np.ndarray, comp: np.ndarray) -> np.ndarray:
-    """Official score of resampled customer sets (W: draws × n multiplicities); F1·(70+15D+15P) in closed form."""
-    tp, fp, fn, sd, sp = (W @ comp).T
-    denom = 2 * tp + fp + fn
-    with np.errstate(divide="ignore", invalid="ignore"):
-        return np.where(tp > 0, 2 * (70 * tp + 15 * sd + 15 * sp) / denom, 0.0)
-
-
 def paired_bootstrap(pairs: list[tuple[pd.DataFrame, pd.DataFrame]], B: int = BOOTSTRAP_B, seed: int = BOOTSTRAP_SEED):
     """Score difference (candidate − base) averaged over repeats; customers resampled once per draw and
     the same resample applied to every repeat. Returns (point estimate, lo, hi) of the 90% interval."""
     ids = pairs[0][0].index
     n = len(ids)
-    rng = np.random.default_rng(seed)
-    W = np.stack([np.bincount(rng.integers(0, n, n), minlength=n) for _ in range(B)]).astype(float)
+    W = bootstrap_weights(n, B, seed)
     point, draws = [], np.zeros(B)
     for tb, tc in pairs:
         cb, cc = _components(tb.loc[ids]), _components(tc.loc[ids])
         one = np.ones((1, n))
-        point.append(float(_weighted_scores(one, cc)[0] - _weighted_scores(one, cb)[0]))
-        draws += _weighted_scores(W, cc) - _weighted_scores(W, cb)
+        point.append(float(weighted_scores(one, cc)[0] - weighted_scores(one, cb)[0]))
+        draws += weighted_scores(W, cc) - weighted_scores(W, cb)
     draws /= len(pairs)
     a = (1 - CI_LEVEL) / 2
     return float(np.mean(point)), float(np.quantile(draws, a)), float(np.quantile(draws, 1 - a))

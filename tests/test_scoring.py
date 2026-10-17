@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -39,6 +40,29 @@ def test_missing_date_counts_as_zero_and_stays_in_mean():
 def test_no_true_positive_scores_zero():
     pred = _frame([("a", False, None, None), ("b", False, None, None), ("c", True, "2023-01-01", 5.0)])
     assert main_score(pred, TRUTH)["score"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [("a", True, "2023-01-16", 12.5), ("b", True, "2023-05-17", 3.0), ("c", True, "2023-01-01", 5.0)],
+        [("a", True, None, 10.0), ("b", True, "2023-06-01", -1.0), ("c", False, None, None)],
+        [("a", False, None, None), ("b", False, None, None), ("c", True, "2023-01-01", 5.0)],
+    ],
+)
+def test_weighted_scores_match_main_score_on_resamples(rows):
+    from pvdetect.scoring import bootstrap_weights, score_components, weighted_scores
+
+    pred = _frame(rows)
+    comp = score_components(pred, TRUTH)
+    assert weighted_scores(np.ones((1, 3)), comp)[0] == pytest.approx(main_score(pred, TRUTH)["score"])
+    W = bootstrap_weights(3, 20, seed=1)
+    for w, s in zip(W, weighted_scores(W, comp)):
+        idx = np.repeat(np.arange(3), w.astype(int))
+        ids = [f"r{i}" for i in range(len(idx))]
+        expect = main_score(pred.iloc[idx].assign(customer_id=ids), TRUTH.iloc[idx].assign(customer_id=ids))["score"]
+        assert s == pytest.approx(expect)
+
 
 
 def _ext(rows):

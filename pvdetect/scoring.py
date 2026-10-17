@@ -44,6 +44,38 @@ def main_score(pred: pd.DataFrame, truth: pd.DataFrame) -> dict:
     return {"f1": f1, "D": D, "P": P, "score": f1 * (70 + 15 * D + 15 * P), "tp": tp, "fp": fp, "fn": fn}
 
 
+def score_components(pred: pd.DataFrame, truth: pd.DataFrame) -> np.ndarray:
+    """Per truth customer (truth order), the parts of `main_score` (n × 5): TP, FP, FN indicators and the
+    date and capacity rewards D_i, P_i (0 unless TP). `weighted_scores` turns them into scores."""
+    t = _norm_main(truth)
+    p = _norm_main(pred).reindex(t.index)
+    t_pv = t["pv_installed"].to_numpy(bool)
+    p_pv = p["pv_installed"].fillna(False).astype(bool).to_numpy()
+    tp = t_pv & p_pv
+    days = (p["pv_installation_date"] - t["pv_installation_date"]).dt.days.to_numpy(float)
+    d_i = np.where(np.isfinite(days), np.maximum(0.0, 1 - np.abs(days) / 30), 0.0)
+    pc, tc = p["pv_capacity_kwp"].to_numpy(float), t["pv_capacity_kwp"].to_numpy(float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ape = np.abs(pc - tc) / tc
+        ok = np.isfinite(ape) & (pc > 0) & (tc > 0)
+    p_i = np.where(ok, np.maximum(0.0, 1 - ape / 0.5), 0.0)
+    return np.column_stack([tp, ~t_pv & p_pv, t_pv & ~p_pv, np.where(tp, d_i, 0.0), np.where(tp, p_i, 0.0)]).astype(float)
+
+
+def weighted_scores(W: np.ndarray, comp: np.ndarray) -> np.ndarray:
+    """Main score of resampled customer sets (W: draws × n multiplicities); F1·(70+15D+15P) in closed form."""
+    tp, fp, fn, sd, sp = (W @ comp).T
+    denom = 2 * tp + fp + fn
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(tp > 0, 2 * (70 * tp + 15 * sd + 15 * sp) / denom, 0.0)
+
+
+def bootstrap_weights(n: int, B: int, seed: int) -> np.ndarray:
+    """B customer resamples of size n as multiplicities (draws × n), `default_rng(seed)`."""
+    rng = np.random.default_rng(seed)
+    return np.stack([np.bincount(rng.integers(0, n, n), minlength=n) for _ in range(B)]).astype(float)
+
+
 def extension_bonus(pred_ext: pd.DataFrame, truth_ext: pd.DataFrame) -> dict:
     """F1_ext × (7 + 1.5·D_ext + 1.5·P_ext) with one-to-one ±30-day matching per customer."""
     pe = pred_ext.assign(

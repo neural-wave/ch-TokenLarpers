@@ -207,10 +207,10 @@ def report_lines(s: dict) -> list[str]:
     return lines
 
 
-def _outside_repo(path: Path) -> Path:
+def _outside_repo(path: Path, flag: str = "--out-dir") -> Path:
     p = path.expanduser().resolve()
     if p == REPO or REPO in p.parents:
-        raise SystemExit("refusing: --out-dir is inside the repository; choose a private folder outside it")
+        raise SystemExit(f"refusing: {flag} is inside the repository; choose a private folder outside it")
     return p
 
 

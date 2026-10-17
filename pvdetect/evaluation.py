@@ -77,6 +77,21 @@ def splits_from_fold_map(fold_map: dict[str, int], ids: list[str]) -> list[tuple
     ]
 
 
+def stratified_fold_map(labels: pd.DataFrame, folds: int, seed: int) -> dict[str, int]:
+    """Seeded stratified customer folds for a split file, as `neuralwave_data.labels.make_splits` builds them:
+    customers sorted by id, `StratifiedKFold(min(folds, smallest class), shuffle=True, random_state=seed)`."""
+    from sklearn.model_selection import StratifiedKFold
+
+    ordered = labels.assign(customer_id=labels["customer_id"].astype(str)).sort_values("customer_id", kind="mergesort")
+    y = ordered["pv_installed"].to_numpy(bool)
+    mc = _min_class(y)
+    if folds < 2 or mc < 2:
+        raise ValueError("customer folds need at least two folds and two customers in each class")
+    ids = ordered["customer_id"].to_numpy()
+    skf = StratifiedKFold(n_splits=min(folds, mc), shuffle=True, random_state=int(seed))
+    return {c: f for f, (_, te) in enumerate(skf.split(ids, y)) for c in ids[te].tolist()}
+
+
 def inner_splits(labels: pd.DataFrame, train_ids: list[str], groups: list[str] | None = None) -> list[tuple[list[str], list[str]]]:
     """Common customer folds for every Tier A option of one fit (grouped by source customer)."""
     from sklearn.model_selection import StratifiedGroupKFold
