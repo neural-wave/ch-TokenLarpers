@@ -8,6 +8,7 @@
 #   PYTHON       interpreter (default: .venv/bin/python if present, else python3)
 #   CV=0         skip nested CV (faster; only the final model is fitted)
 #   NO_GUI=1     train only, do not start the GUI
+#   PORT=8766    GUI port (default 8765)
 #
 # Run by the data holder only. The CV lines are AIL-derived: keep them with the team, never in an agent session.
 set -eu
@@ -50,6 +51,7 @@ rm -f "$PRIVATE_DIR/model.json" "$PRIVATE_DIR/oof.csv"
 PYTHONUNBUFFERED=1 "$PYTHON" train.py "$@" --out "$PRIVATE_DIR/model.json" | tee "$PRIVATE_DIR/train_log.txt"
 [ -f "$PRIVATE_DIR/model.json" ] || { echo "training failed; see the messages above" >&2; exit 1; }
 
+rm -f "$PRIVATE_DIR/diagnosis.json"
 if [ -f "$PRIVATE_DIR/oof.csv" ]; then
   echo
   echo "error analysis on out-of-fold predictions (each customer predicted by a model that never saw it):"
@@ -57,4 +59,4 @@ if [ -f "$PRIVATE_DIR/oof.csv" ]; then
 fi
 
 [ "${NO_GUI:-0}" = "1" ] && exit 0
-exec "$PYTHON" gui.py --model "$PRIVATE_DIR/model.json"
+exec "$PYTHON" gui.py --model "$PRIVATE_DIR/model.json" ${PORT:+--port "$PORT"}

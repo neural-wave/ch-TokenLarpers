@@ -280,6 +280,25 @@ def model_status(path: Path) -> tuple[bool, str | None]:
     return True, None
 
 
+def saved_evaluation(model_path: Path) -> dict | None:
+    """Aggregate error analysis (`pvdetect.diagnose --out-dir`) saved next to the configured model, if any.
+
+    Only the aggregate summary is read; the per-customer `errors.csv` is never served."""
+    from pvdetect.diagnose import DIAGNOSIS_FILE, DIAGNOSIS_SCHEMA
+
+    path = model_path.parent / DIAGNOSIS_FILE
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        stale = path.stat().st_mtime < model_path.stat().st_mtime - 1
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or doc.get("schema") != DIAGNOSIS_SCHEMA:
+        return None
+    keep = ("source", "out_of_fold", "missing_predictions", "failure_modes", "counts", "precision", "recall", "f1",
+            "D", "P", "score", "lost", "largest", "dates", "capacity", "by_size", "by_season", "by_year")
+    return {**{k: doc.get(k) for k in keep}, "stale": stale}
+
+
 def _display_name(raw: str | None) -> str | None:
     """Display-only file name: percent-decoded, no path parts or control characters, at most 120 characters."""
     if not raw:
@@ -473,6 +492,7 @@ class GuiServer:
                 "source": self.model_source,
                 "reason": reason,
             },
+            "evaluation": saved_evaluation(self.model_path) if available else None,
             "input": dict(INPUT_FORMAT),
             "outputs": list(OUTPUT_FILES),
             "job": job,

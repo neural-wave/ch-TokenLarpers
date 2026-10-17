@@ -11,6 +11,7 @@ The output is AIL-derived when run on real data: keep it with the team, never in
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +21,8 @@ from pvdetect.io import _read_str_table, _to_date, _to_float, load_labels, parse
 from pvdetect.selection import ape_array
 
 REPO = Path(__file__).resolve().parents[1]
+DIAGNOSIS_FILE = "diagnosis.json"
+DIAGNOSIS_SCHEMA = 1
 SIZE_EDGES = (0.0, 10.0, 30.0, 100.0, 300.0, np.inf)
 SIZE_LABELS = ("<10", "10-30", "30-100", "100-300", ">=300")
 SEASONS = {12: "winter", 1: "winter", 2: "winter", 3: "spring", 4: "spring", 5: "spring",
@@ -223,19 +226,43 @@ def main(argv: list[str] | None = None) -> int:
     truth = load_labels(args.truth)
     missing = int((~truth["customer_id"].isin(pred["customer_id"])).sum())
     tab = error_table(pred, truth)
+    source = f"out-of-fold, repeat {args.repeat} of {n_rep}" if n_rep > 1 else "predictions file"
     if n_rep > 1:
         print(f"source: out-of-fold file, repeat {args.repeat} of {n_rep}")
     else:
         print("source: predictions file (if the model was trained on these customers, every number is optimistic)")
     if missing:
         print(f"warning: {missing} labelled customers have no prediction (counted as not PV)")
-    for line in report_lines(summarize(tab)):
+    summary = summarize(tab)
+    for line in report_lines(summary):
         print(line)
     if out_dir is not None:
         out_dir.mkdir(parents=True, exist_ok=True)
         tab.to_csv(out_dir / "errors.csv", sep=";", index_label="customer_id", float_format="%.4f")
-        print("per-customer table written to the private --out-dir (errors.csv)")
+        doc = {
+            "schema": DIAGNOSIS_SCHEMA,
+            "source": source,
+            "out_of_fold": n_rep > 1,
+            "missing_predictions": missing,
+            "failure_modes": failure_modes(summary),
+            **summary,
+        }
+        (out_dir / DIAGNOSIS_FILE).write_text(json.dumps(_json_safe(doc), indent=2), encoding="utf-8")
+        print(f"per-customer table (errors.csv) and {DIAGNOSIS_FILE} written to the private --out-dir")
     return 0
+
+
+def _json_safe(x):
+    """Aggregates only; NaN/inf become null so the GUI can read the file as strict JSON."""
+    if isinstance(x, dict):
+        return {str(k): _json_safe(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [_json_safe(v) for v in x]
+    if isinstance(x, (float, np.floating)):
+        return float(x) if np.isfinite(x) else None
+    if isinstance(x, np.integer):
+        return int(x)
+    return x
 
 
 if __name__ == "__main__":

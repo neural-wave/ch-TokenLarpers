@@ -455,6 +455,75 @@
     return h("div", { className: `fig ${right ? "right" : ""}` }, h("span", { className: `fig-val num ${color}` }, value, unit ? h("small", { text: unit }) : null), h("span", { className: "fig-cap", text: cap }));
   }
 
+  // Aggregate error analysis saved by `pvdetect.diagnose` next to the configured model (out-of-fold when
+  // produced by scripts/train_and_launch.sh). Shown before any run: it describes the model, not an input.
+  function evaluationCards(ev) {
+    const n = (v, d = 3) => (v === null || v === undefined ? "–" : Number(v).toFixed(d));
+    const pct = (v) => (v === null || v === undefined ? "–" : `${Math.round(v * 100)}%`);
+    const c = ev.counts || {};
+    const lost = ev.lost || {};
+    const dt = ev.dates || {};
+    const cap = ev.capacity || {};
+    const label = ev.out_of_fold ? "Cross-validated (out-of-fold)" : "In-sample (optimistic)";
+    const lostRow = h(
+      "p",
+      { className: "metric-line num" },
+      "Points lost · detection ",
+      h("b", { text: n(lost.detection, 1) }),
+      " · dates ",
+      h("b", { text: n(lost.dates, 1) }),
+      " · capacity ",
+      h("b", { text: n(lost.capacity, 1) }),
+    );
+    const sizes = Object.entries(ev.by_size || {});
+    return [
+      h("hr"),
+      h(
+        "div",
+        { className: "wcard" },
+        h("div", { className: "wcard-top" }, info(`${label} evaluation of this model on its labelled customers, saved by pvdetect.diagnose (${ev.source}). Each customer is scored by a model that never saw it when out-of-fold.`), h("span", { className: "wcard-label" }, icon("flask", 30), "Model score")),
+        h("div", { className: "wcard-row" }, fig(n(ev.score, 1), "score / 100", "c-mint"), fig(n(ev.f1), "F1", "c-mint", true)),
+        lostRow,
+        h("span", { className: `tag-demo ${ev.stale ? "c-orange" : ""}`, text: ev.stale ? "Stale: model is newer than this evaluation" : label }),
+      ),
+      h("hr"),
+      wcard("Detection", icon("solar", 32), fig(n(ev.precision, 2), `precision · ${c.FP ?? "–"} false alarms`, "c-yellow"), fig(n(ev.recall, 2), `recall · ${c.FN ?? "–"} missed`, "c-yellow", true)),
+      h("hr"),
+      wcard(
+        "Dates",
+        icon("calendar", 30),
+        fig(n(ev.D, 2), `D · median ${n(dt.median_abs, 0)} d off`, "c-blue"),
+        fig(pct(dt.within && dt.within["15"]), "within 15 days", "c-blue", true),
+        h("p", { className: "metric-line num" }, `Median signed error ${n(dt.median_signed, 0)} d · late share ${pct(dt.late_share)}`),
+      ),
+      h("hr"),
+      wcard(
+        "Capacity",
+        icon("power", 32),
+        fig(n(ev.P, 2), `P · median ${pct(cap.median_ape)} off`, "c-yellow-100"),
+        fig(n(cap.median_ratio, 2), "predicted / true", "c-yellow-100", true),
+        h("p", { className: "metric-line num" }, `Within 25%: ${pct(cap.within && cap.within["25"])} · underestimated: ${pct(cap.under_share)} · at 500 kWp clip: ${cap.at_ceiling ?? "–"}`),
+      ),
+      h(
+        "details",
+        { className: "fold", open: true },
+        h("summary", null, "Where it fails", h("span", { className: "fold-meta c-orange", text: ev.largest ? `fix ${ev.largest}` : "" })),
+        h(
+          "div",
+          { className: "fold-body" },
+          (ev.failure_modes || []).map((m) => h("div", { className: "check" }, mark("bad"), h("div", { text: m }))),
+          sizes.length
+            ? h(
+                "dl",
+                { className: "kv num" },
+                sizes.map(([bin, v]) => [h("dt", { text: `${bin} kWp · n ${v.n}` }), h("dd", { text: `missed ${v.missed} · D ${n(v.D, 2)} · P ${n(v.P, 2)}` })]),
+              )
+            : null,
+        ),
+      ),
+    ];
+  }
+
   function renderSide() {
     const side = $("side");
     const job = state.job;
@@ -471,6 +540,8 @@
         h("div", { className: "tl right" }, h("span", { className: "tl-tag", text: "Model inference" }), h("span", { className: "tl-val num" }, icon("clock", 16), r ? fmtElapsed(r.summary.inference_s) : "-.--")),
       ),
     ];
+    const ev = state.session && state.session.evaluation;
+    if (ev) nodes.push(...evaluationCards(ev));
 
     const pv = r ? r.customers.filter((c) => c.pv_installed) : [];
     const caps = pv.map((c) => c.capacity_kwp).filter((v) => v !== null).sort((a, b) => a - b);
