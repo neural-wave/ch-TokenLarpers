@@ -31,6 +31,19 @@ def test_staged_customer_identifier_is_refused_without_echoing_it(tmp_path: Path
     assert "looked odd" not in result.stdout + result.stderr
 
 
+def test_identifier_followed_by_word_characters_is_refused(tmp_path: Path):
+    identifier = "POD" + "12"
+    result = _stage_and_check(tmp_path, "notes.md", f"see {identifier}_x for details\n")
+    assert result.returncode == 1
+    assert identifier not in result.stdout + result.stderr
+
+
+def test_lowercase_identifier_is_refused(tmp_path: Path):
+    identifier = "pod" + "12"
+    result = _stage_and_check(tmp_path, "notes.md", f"see {identifier} for details\n")
+    assert result.returncode == 1
+    assert identifier not in result.stdout + result.stderr
+
 def test_staged_csv_is_refused(tmp_path: Path):
     result = _stage_and_check(tmp_path, "sample.csv", "customer_id;energy\nA;1\n")
     assert result.returncode == 1

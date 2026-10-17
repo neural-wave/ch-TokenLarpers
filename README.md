@@ -1,112 +1,142 @@
-# NeuralWave data pipelines
+# AIL PV detection from consumption profiles
 
-This branch combines canonical preprocessing, constrained synthetic PV generation, offline numerical time-series embedding experiments, and the Task 1 PatchTST window classifier. Raw organizer data and all data-derived artifacts remain private. Regression tests use independently fabricated inputs; authorized local evaluation can use AIL data.
+Detects photovoltaic installations, their commissioning date and nominal capacity (kWp) from 15-minute grid-withdrawal time series (AIL NeuralWave challenge). The authoritative plan is `IMPLEMENTATION_HANDOFF.md`.
+
+## Team
+
+- Alessandro Tognoni — data hygiene (check, scrubbing, commit hook), shared-fold comparability contract across branches, project overview and plan review.
+- Jeffre Daniel Martinez Marroquin — the `pvdetect` pipeline (loading, scoring, season-aware detection, date regimes, inner-CV selection, nested CV, synthetic generator, benchmarks) and the implementation plan.
+- Tarun Deepak — canonical preprocessing pipeline, synthetic PV data pipeline, time-series embeddings and the PatchTST window classifier, hackathon guidelines.
+
+## Rules
+
+- No LLM in the training or inference pipeline; no weather, irradiation or location data; calendar features from the timestamps only.
+- Inference runs fully offline.
+- Agents develop against synthetic data (`pvdetect/synthetic.py`); real-data commands are run by the user.
+
+## Setup
+
+Python 3.10–3.12 (`requires-python >=3.10,<3.13`; developed on 3.12).
+
+```
+uv venv --python 3.12 .venv && source .venv/bin/activate
+uv pip install -r requirements.txt -r requirements-dev.txt
+```
+
+or plain `pip install -r requirements.txt`. `requirements.txt` is compiled from `requirements.in` with exact pins (`uv pip compile requirements.in -o requirements.txt --python-version 3.12`).
 
 ## Data hygiene
 
-The repository is open-sourced after the event, so nothing derived from the AIL data may enter git history: raw files and generated artifacts stay under private, git-ignored paths (`data_private/`, `artifacts_private/`), and reports such as [benchmarks.md](benchmarks.md) hold aggregate metrics only, never customer identifiers, per-customer readings, probabilities or label dates.
+The repository is open-sourced after the event, so nothing derived from the AIL data may enter git history: raw files and every data-derived artifact stay in private, git-ignored paths, and reports hold aggregate metrics only (no customer identifiers, per-customer values, probabilities or label dates).
 
 Install the commit-time check once per clone:
 
-```bash
+```
 sh scripts/install_hooks.sh
 ```
 
-It copies `scripts/check_hygiene.py` into `.git/hooks/pre-commit` (a copy, so the hook also works on branches without the script; re-run after editing it). The hook checks the staged files and refuses the commit when any of them is a data or model dump (`.csv`, `.parquet`, `.cbm`, `.pt`, ...), lives under an artifacts directory, or contains a real customer identifier (the letters `POD` immediately followed by digits). Fabricated fixtures use identifiers such as `PODSYN001`, which start with `POD` as the organizer filter requires but are not matched. The check prints offending paths only, never their content. `python scripts/check_hygiene.py --all` audits the whole tracked tree and is meant for CI; `tests/test_hygiene.py` runs it too. The hand-in is an export of the frozen tree (`git archive <commit>`), never this history.
+It copies `scripts/check_hygiene.py` into `.git/hooks/pre-commit` (a copy, so the hook also works on branches without the script; re-run after editing it). The hook checks the staged files and refuses the commit when any of them is a data or model dump (`.csv`, `.parquet`, `.cbm`, `.pt`, ...), lives under an artifacts directory, or contains a real customer identifier (the letters `POD` in any case, starting a word and immediately followed by digits, even when letters or `_` follow the digits). Fabricated fixtures use identifiers such as `PODSYN001`, which are not matched. The check prints offending paths only, never their content. `python scripts/check_hygiene.py --all` audits the whole tracked tree (for CI); `tests/test_hygiene.py` runs it too. The hand-in is an export of the frozen tree (`git archive <commit>`), never this history.
 
-Run the full regression suite with `python -m pytest -q`; `pyproject.toml` points pytest at `tests/` and puts `src/` on the path, so no install is needed for the tests.
+History and visibility: commits `e303f6d`, `1f875b6`, `a65b552` and `086eda8` on the `time-series-embeddings` branch contain real customer identifiers. Until the team decides how to remove them (delete that branch once its content is carried over, or a coordinated `git filter-repo` rewrite), `ch-TokenLarpers` stays private, and a repo admin confirms the visibility setting. The NW_26 hand-in is always a clean export (Step 2.5-G) that does not carry this history.
 
-## Install and run
+## Train
 
-```bash
-python -m pip install -e .
-python -m neuralwave_data.prepare \
-  --manifest /private/manifest.json \
-  --out /private/artifacts/run \
-  --config config.preprocess.json \
-  --folds 5 --seed 17
+```
+python train.py --timeseries energy.csv --labels labels.csv --out <private>/model.json [--cv] [--outer-repeats 4] [--report-dir DIR] [--folds F0,F1,...] [--oof-out PATH]
 ```
 
-A manifest is JSON with a `sources` list. Every source has an explicit `role`, `path`, `delimiter`, `decimal`, and `encoding`; paths are relative to the manifest. Measurement roles are `development_measurements`, `unlabelled_measurements`, and `inference_measurements`. Label roles are `development_labels` and `extension_labels`. Defaults are UTF-8, semicolon, and `.` when fields are omitted. Timestamps must be whole Unix seconds on a 15-minute grid or timezone-aware timestamp strings; a naive `timestamp_local` is accepted only alongside epoch seconds and is checked as a Europe/Zurich wall clock.
-The output directory is never overwritten when populated. It contains `measurements.parquet`, `daily_features.parquet`, `run_manifest.json`, and `qa_report.json`; labels, extensions, and splits are written when supplied/requested. `measurements.parquet` preserves null energy and distinguishes `observed`, `missing_input`, and reindexed `absent_interval` records. Daily features use the exact observed-sum field name `energy_observed_kwh`. IDs remain strings, including leading zeroes. Raw inputs and all generated artifacts must stay under private paths.
-Unlabelled rows are filtered before parsing: only non-null, case-sensitive literal IDs beginning with `POD` remain. Null and non-POD exclusions are counted separately in the private `qa_report.json`. This filter is not applied to labelled or inference roles.
+`--cv` runs nested customer-level cross-validation of the whole training procedure and prints aggregate lines only: `data:` (including whether readings are signed, which switches export features on), `nested:` (score ± SD over repeats, bootstrap 90% interval, F1/D/P, `inner=`/`gap=` for the inner-vs-outer score gap, and `outer_informed_decisions=k`), `dates:` (date accuracy per regime), `regime_confusion:`, `selection:` (how often each inner-CV choice was made). The final model is always fit on all labelled customers. `--report-dir` writes the repeat-0 out-of-fold table (`oof_repeat0.csv`) and selection records. A model trained on real data goes to a private path outside this repository; it reaches the NW_26 repository only through the export below (`## Submission export`).
 
+Inside each fit, inner CV on the training customers chooses: logistic regression vs CatBoost (CatBoost needs ≥2.0 points and a stable bootstrap), the decision threshold, ridge vs CatBoost capacity, a capacity factor κ, and the date rule for weak-evidence customers. The week-of-year climatology (from labelled non-PV training customers) deseasonalizes the changepoint signal; candidates whose step recurs at the same time in other years are rejected.
 
-Run the regression suite with `python -m pytest -q tests/test_preprocessing.py` after installing dependencies. The tests construct only temporary artificial CSV/JSON data and exercise the actual module CLI.
+`inner=` is the mean inner-CV score of the selected classifier over the outer fits, and `gap=` is `inner` minus the nested score. The gap is a warning signal, not a measure of overfitting: inner and outer scores come from different customer sets and training sizes. A gap above about 5 points calls for a look at selection stability (the `selection:` line); it proves nothing alone.
 
-## Synthetic data
+Dates come from one of three regimes: `event` (detected changepoint + learned offset), `present_at_start` (PV already present when data starts: first date − learned lag), `insufficient` (weak candidate or first date, chosen by inner CV).
 
-See [the synthesis usage guide](docs/synthetic_data.md). Use only confirmed non-PV training backgrounds and explicitly choose the meter mode. Synthetic capacity targets are deliberately invalid.
+### Shared-fold comparison
 
-## Frozen matched evaluation
+Pipelines on different branches are compared through one split file set, one prediction contract and one scorer, not a package merge. `--folds F0,F1,...` replaces the internal repeated stratified folds: each split file (`splits.parquet` from `neuralwave_data.prepare`, or a `;`/`,` CSV with `customer_id,fold`) is one outer repeat, in the given order, and must assign every labelled customer to exactly one integer fold (extra IDs are ignored; errors report counts only). `--oof-out PATH` writes the shared out-of-fold file `customer_id;repeat;fold;prob;pv_installed;pv_installation_date;pv_capacity_kwp` (`repeat` = position of the split file, `fold` = its fold value), with no labels, features or regimes. The canonical comparison scorer is `python -m neuralwave_experiment.oof_contract` on the `time-series-embeddings` branch; `pvdetect.scoring` stays pvdetect's internal scorer.
 
-Use the [evaluation protocol](docs/evaluation_protocol.md) for the current matched comparison. Architecture settings are fixed; the arms are hourly-profile logistic regression, PatchTST from scratch, and the same PatchTST with masked pretraining. Thresholds use inner customer-OOF predictions; outer customer assignments genuinely change across repetitions. Persistence uses timestamps and observed coverage, not positions in subsampled arrays.
+Matched run (data holder, private directory only):
 
-```bash
-OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m neuralwave_experiment.evaluation \
-  --canonical-dir data_private/patchtst_comparison_canonical \
-  --out artifacts_private/evaluation_v1 \
-  --config configs/evaluation.json \
-  --data-kind development
+```
+python -m neuralwave_data.prepare <manifest> --out <private>/prep_s{0,1,2} --folds 5 --seed {0,1,2}
+python train.py --timeseries <dev energy> --labels <dev labels> --out <private>/pvdetect/model.json --cv \
+  --folds <private>/prep_s0/splits.parquet,<private>/prep_s1/splits.parquet,<private>/prep_s2/splits.parquet \
+  --oof-out <private>/pvdetect_oof.csv
+python -m neuralwave_experiment.task1_detector ... --splits <same three files> --oof-out <private>/patchtst_oof.csv
+python -m neuralwave_experiment.oof_contract --labels <dev labels> <private>/pvdetect_oof.csv <private>/patchtst_oof.csv
 ```
 
-Install the `experiment` extra first. This retains all split assignments, inner/outer predictions, calibration candidates, models, histories, and input/config identities. It reports presence and temporal diagnostics, not a capacity or blind-test score. The [benchmark status](benchmarks.md) distinguishes historical development numbers from the new protocol. Verification so far is an artificial-data smoke, not a new AIL benchmark.
+Only the printed aggregate lines leave the private directory. PatchTST writes empty date and capacity (D = P = 0), so compare F1 separately from the full score. The comparison is a Tier B decision and gets a `DECISIONS.md` line.
 
-## Numerical embedding experiment
+### Review plots (dev requirement: matplotlib)
 
-The [implementation plan](docs/time_series_experiment_plan.md) was written before parallel implementation. See [the experiment guide](docs/embedding_experiment.md) for the three-arm customer-held-out comparison and [encoder details](docs/representation_encoder.md).
-
-```bash
-python -m pip install -e '.[experiment]'
-python -m neuralwave_experiment.experiment \
-  --canonical-dir /private/artifacts/run \
-  --out /private/artifacts/embedding-experiment \
-  --config configs/embedding_experiment.json \
-  --seed 17 --device cpu
+```
+python -m pvdetect.review REPORT_DIR/oof_repeat0.csv --timeseries energy.csv --out-dir PLOTS_DIR
 ```
 
-The experiment compares raw-feature baseline, frozen numerical embeddings, and limited supervised fine-tuning. It does not download pretrained weights or use a language model. Optional synthetic inputs must be organized by held-out fold.
+## Inference
 
-## Official PatchTST versus custom encoder
-
-The [comparison guide](docs/official_patchtst_comparison.md) explains the attributed official-source adapter, its missingness/calendar adaptations, and matched evaluation.
-
-```bash
-python -m neuralwave_experiment.comparison \
-  --canonical-dir /private/artifacts/run \
-  --out /private/artifacts/patchtst-comparison \
-  --config configs/embedding_experiment.json \
-  --seed 17 --device cpu
+```
+python inference.py path/to/test.csv
 ```
 
-This runs both backends with identical folds and training budgets, writes per-backend predictions/checkpoints and `comparison.json`, and requires identical raw-feature baseline outputs. Set `encoder_backend` to `custom` or `official_patchtst` to run just one backend through the experiment CLI. The upstream source is pinned and distributed with Apache-2.0 license and modification notices; no source checkout or download is needed at runtime.
+Loads `artifacts/model.json` (plus sibling files) automatically and writes to the current directory:
 
-## Task 1 window classifier on the shared comparison contract
+- `predictions.csv`: `customer_id;pv_installed;pv_installation_date;pv_capacity_kwp`, one row per customer in the input, UTF-8, `;` separator, decimal point, `TRUE`/`FALSE`, `YYYY-MM-DD`, empty date/capacity when FALSE. Every TRUE row has a date and a positive capacity.
+- `pv_extensions_predictions.csv`: `customer_id;extension_date;pv_capacity_after_extension_kwp` (header only until extensions are implemented).
 
-[benchmarks.md](benchmarks.md) reports the PatchTST window classifier (aggregate metrics only). Every pipeline in the team is scored on identical customer folds and writes the same out-of-fold prediction file, so results stay comparable across branches without a package merge:
+The loader sniffs `;`/`,` separators and comma decimals, accepts epoch seconds or milliseconds, drops duplicate timestamps, and maps every reading to fixed UTC+1 so DST days (92/100 rows) become ordinary 96-slot days.
 
-* **Split files.** `python -m neuralwave_data.prepare ... --folds 5 --seed S` writes `splits.parquet` (`customer_id`, `fold`). Seeds 0, 1 and 2 give three repeat files; a CSV with the same two columns is accepted too. Every labelled customer must appear in exactly one fold, otherwise the run stops with `split file ... does not cover labelled customers: N missing`. Extra customers are ignored.
-* **Out-of-fold file.** One semicolon CSV over all repeats with the columns `customer_id;repeat;fold;prob;pv_installed;pv_installation_date;pv_capacity_kwp`, using the submission formatting (`TRUE`/`FALSE`, `YYYY-MM-DD`, two-decimal capacities, empty date and capacity when `FALSE`). It carries no labels, features or regimes. A detection-only pipeline, which this classifier is, leaves date and capacity empty and therefore scores `D = P = 0`; compare its F1 separately.
+## Submission export
 
-```bash
-python -m neuralwave_experiment.task1_detector \
-  --canonical-dir /private/artifacts/run \
-  --splits /private/splits_seed0.parquet,/private/splits_seed1.parquet,/private/splits_seed2.parquet \
-  --oof-out /private/oof_patchtst.csv \
-  --out-dir /private/task1_results --epochs 8
-python -m neuralwave_experiment.oof_contract --labels /private/artifacts/run/labels.parquet /private/oof_patchtst.csv [OTHER_OOF ...]
+The trained model never enters this repository's history: the hygiene hook blocks `artifacts/` and every `.cbm`. It reaches the NW_26 repository only through the export script below or through the organizer-approved private channel (files placed into `artifacts/` next to `inference.py`, which loads them automatically).
+
+```
+PYTHON=python sh scripts/export_submission.sh COMMIT DEST [MODEL_DIR]
+python scripts/check_release.py DEST --allow artifacts/model.json [--allow artifacts/catboost_clf.cbm ...]
 ```
 
-Each split file is one outer repeat; thresholds are tuned on the training customers of each fold only; checkpoints of the first repeat are written as `task1_model_fold_<k>.pt`. The scorer prints one aggregate line per file (`file=... repeats=k score=M±SD f1=... D=... P=...`) and a paired line for files that share repeats. Any design choice made from such a comparison is a Tier B decision and must be logged in the decision file of the main pipeline.
+`export_submission.sh` extracts `git archive COMMIT` into `DEST` (clean tree, no history). With `MODEL_DIR` it copies `MODEL_DIR/model.json` and exactly the files that model references (`pvdetect.model.referenced_files`) into `DEST/artifacts/`; without it (private-channel route) no model file is copied. It then runs `check_release.py` with an allow list generated from `model.json`, never a wildcard, and aborts non-zero on any failure; an aborted `DEST` must not be committed.
 
-Scoring unlabelled customers as a plausibility check (no ground truth, so no accuracy is claimed):
+`check_release.py` walks every file under `DEST` on the filesystem (the NW_26 repository has no hook; `.git` directories are skipped) and exits 1 when a file not on the allow list is a data or model dump, when an allowed path is missing, or when any file, allowed model files included, contains a real customer identifier. It prints paths and reasons only. Passing it is necessary, not sufficient: the export also needs human review and organizer approval (Step 2.5-G).
 
-```bash
-python -m neuralwave_experiment.wild_inference \
-  --unlabelled-csv /private/energy_consumption_unlabelled_dev.csv \
-  --weights /private/task1_results/task1_model_fold_0.pt \
-  --id-prefix POD --id-start 100 --id-count 20 \
-  --out /private/task1_results/wild_batch.json
+## Synthetic smoke run
+
+```
+python -m pvdetect.synthetic /tmp/pvsyn_train --n 24 --seed 1
+python -m pvdetect.synthetic /tmp/pvsyn_test --n 12 --seed 2 --sep ";"
+python train.py --timeseries /tmp/pvsyn_train/energy.csv --labels /tmp/pvsyn_train/labels.csv --out artifacts/model.json --cv
+cd /tmp/pvsyn_test && python <repo>/inference.py energy.csv && PYTHONPATH=<repo> python -m pvdetect.scoring predictions.csv labels.csv
 ```
 
-The terminal shows decision counts and score ranges; the per-customer table goes only to the private `--out` JSON (`--show-customers` prints it locally, never commit it).
+Remove `artifacts/` afterwards so no synthetic model is left where the real one goes.
+
+## Validation policy
+
+All data-driven choices happen inside the training procedure and are chosen by inner CV; outer CV estimates the whole procedure. Decisions taken after looking at outer results are logged in `DECISIONS.md` and the estimate is then labelled `selection-biased`. Evidence tiers: unit tests, synthetic regression tests (dev seeds), a held-out synthetic benchmark run only at phase gates, and real-data nested CV (primary evidence).
+
+### Synthetic benchmarks
+
+```
+python -m pvdetect.benchmark --pilot                         # times a small run, projects the full one
+python -m pvdetect.benchmark --suite dev [--scenarios a,b] [--n 40] [--repeats 2]
+python -m pvdetect.benchmark --suite holdout --log benchmarks/LOG.md   # phase gates only
+```
+
+Every full run starts with the pilot and is refused if the projection exceeds `--budget-min` (default 30) or memory looks too high, unless `--force`. The holdout suite uses generator variant B (different PV, cloud and load models plus confounders absent from the dev generator) and seeds from `benchmarks/HOLDOUT_SEED_BLOCK`; a code change made in response to a holdout result burns the block.
+
+## Organizer clarifications
+
+Questions for the organizers (Step 2.5-H, sent by the team); answers get recorded here.
+
+1. May semi-synthetic augmentation of the provided series be used in the competitive model? *Awaiting answer.*
+2. May the trained model files (JSON parameters with aggregate statistics over the 40 development customers, and CatBoost model files) be published in the open-sourced NW_26 repo? *Awaiting answer.*
+3. If not, which private channel should deliver them (e.g. direct upload or Swisstransfer), with the organizers placing them into `artifacts/` next to `inference.py`? *Awaiting answer.*
+
+Until answer 2 arrives we plan for the private channel. `inference.py` loads `artifacts/model.json` automatically, so that route needs no code change.
+
+## Status
+
+Procedure: season-aware changepoint and confounder features, three date regimes, inner-CV selection of classifier, threshold, capacity model, κ and date rule, scored by nested CV; `outer_informed_decisions=1` (selection-biased). Synthetic-validated only; real-data nested CV pending (P3); extensions header-only; unlabelled data unused.

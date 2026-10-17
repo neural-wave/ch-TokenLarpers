@@ -9,8 +9,9 @@ paths, and exits 1 when any of them
 
 * is a data or model dump (``.csv``, ``.parquet``, ``.cbm``, ``.pt`` and
   similar) or lives under an artifacts/data directory, or
-* contains a real customer identifier: the letters ``POD`` immediately
-  followed by digits.  Synthetic fixtures use a different scheme, for example
+* contains a real customer identifier: the letters ``POD`` in any case,
+  starting a word and immediately followed by digits, whatever comes after
+  the digits.  Synthetic fixtures use a different scheme, for example
   ``PODSYN001``, which starts with ``POD`` but is not matched.
 
 Only the offending paths are printed, never the matching content.
@@ -25,7 +26,7 @@ import subprocess
 import sys
 from pathlib import PurePosixPath
 
-ID_PATTERN = re.compile(rb"\bPOD\d+\b")
+ID_PATTERN = re.compile(rb"(?i)\bPOD\d+")
 DATA_SUFFIXES = frozenset({
     ".csv", ".parquet", ".cbm", ".pt", ".pth", ".ckpt", ".npy", ".npz", ".pkl", ".pickle",
 })
