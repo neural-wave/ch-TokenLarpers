@@ -37,6 +37,8 @@ SCENARIOS = (
     "winter_install",
     "cap_outlier",
     "label_lead_60",
+    "winter_install_ramp",
+    "holiday_tail",
 )
 # Development-only scenarios (variant A): `label_lag_60` labels each PV customer 30–90 days after its
 # visible onset; `meter_spikes` adds a few isolated single-slot spikes of 20–50× the median slot value
@@ -53,6 +55,10 @@ SCENARIOS = (
 # customer an extreme z-score and the log-space capacity regression lands at a clip. Both reuse the base
 # customers' draws. `label_lead_60` mirrors `label_lag_60`: the labelled date is 30–90 days before the visible
 # onset (e.g. production starts after a grid-connection delay), so dates predicted from the onset run late.
+# `winter_install_ramp` moves every in-window PV install to 1 Oct–28 Feb, ensuring a full spring follows the
+# install; the spring ramp creates a later, larger step that can outrank the true winter onset.
+# `holiday_tail` adds a commercial-style December vacation shutdown in the last 30–45 days of every
+# customer's series (PV and non-PV alike), creating an end-of-series artifact that can masquerade as an onset.
 A_ONLY_SCENARIOS = (
     "label_lag_60",
     "meter_spikes",
@@ -62,6 +68,8 @@ A_ONLY_SCENARIOS = (
     "winter_install",
     "cap_outlier",
     "label_lead_60",
+    "winter_install_ramp",
+    "holiday_tail",
 )
 SHARED_WEATHER_KINDS = ("ac", "summer_absence")
 SPIKES_PER_YEAR = 3
@@ -459,6 +467,18 @@ def _winter(d: pd.Timestamp, lo: pd.Timestamp, hi: pd.Timestamp, aux: np.random.
     return min(inside, key=lambda w: abs((w - d).days)) if inside else d
 
 
+def _winter_ramp(d: pd.Timestamp, lo: pd.Timestamp, hi: pd.Timestamp, aux: np.random.Generator) -> pd.Timestamp:
+    """A day in 1 Oct–28 Feb of the window nearest to `d` that lies in [lo, hi]; `d` if none does.
+
+    The 151-day window (Oct 1 – Feb 28) ensures a spring follows the install, so the spring ramp
+    creates a later, larger changepoint step that can outrank the true winter onset.
+    """
+    offset = pd.Timedelta(days=int(aux.integers(0, 151)))
+    starts = [pd.Timestamp(year=y, month=10, day=1) + offset for y in (d.year - 1, d.year, d.year + 1)]
+    inside = [w for w in starts if lo <= w <= hi]
+    return min(inside, key=lambda w: abs((w - d).days)) if inside else d
+
+
 def _dataset_specs(
     n: int,
     seed: int,
@@ -508,6 +528,8 @@ def _dataset_specs(
                 pv_date = draw_date()
                 if scenario == "winter_install":
                     pv_date = _winter(pv_date, lo, hi, aux)
+                if scenario == "winter_install_ramp":
+                    pv_date = _winter_ramp(pv_date, lo, hi, aux)
             kwp = round(float(rng.uniform(15, 60) if commercial else rng.uniform(3, 15)), 1)
             if scenario == "late_install":
                 pv_date = cend - pd.Timedelta(days=int(aux.integers(56, 113)))
@@ -545,6 +567,18 @@ def _dataset_specs(
             events.append(Event(kind, _day(draw_date())))
             if scenario == "confounders_x2":
                 events.append(Event(kinds[(i // 2 + 3) % len(kinds)], _day(draw_date())))
+        if scenario == "holiday_tail":
+            # Commercial-style December vacation in the last 30–45 days of the series.
+            # PV and non-PV alike; creates an end-of-series step that can masquerade as an onset.
+            tail_days = int(aux.integers(30, 46))
+            tail_end = cend - pd.Timedelta(days=1)
+            tail_start = tail_end - pd.Timedelta(days=tail_days)
+            # Keep the shutdown in December of the relevant year.
+            if tail_start.month != 12:
+                tail_start = pd.Timestamp(year=tail_start.year, month=12, day=1)
+            if tail_end < tail_start + pd.Timedelta(days=7):
+                tail_end = tail_start + pd.Timedelta(days=7)
+            events.append(Event("vacation", _day(tail_start), _day(tail_end), size=1.0))
         specs.append(
             CustomerSpec(
                 customer_id=f"{i:06d}",

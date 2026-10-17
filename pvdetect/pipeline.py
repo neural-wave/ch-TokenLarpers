@@ -116,12 +116,14 @@ def compute_features(
     clim: Climatology,
     *,
     recur_strict: bool = False,
+    onset_first: bool = False,
+    tail_guard: bool = False,
     embedding=None,
     projection: dict | None = None,
 ) -> tuple[pd.DataFrame, dict]:
-    """Features for ``ids`` under ``clim`` (and the fit's ``recur_strict`` detection option); only the
-    label-free part is cached on the table. With a sunshine index, a contributor's ``sun_coupling`` uses the
-    index without itself. The embedding block is opt-in and persisted."""
+    """Features for ``ids`` under ``clim`` (and the fit's detection options); only the label-free part is
+    cached on the table. With a sunshine index, a contributor's ``sun_coupling`` uses the index without itself.
+    The embedding block is opt-in and persisted."""
     lf_cache = table.cache.setdefault("label_free", {})
     rows, cps = {}, {}
     for cid in ids:
@@ -129,7 +131,7 @@ def compute_features(
         if cid not in lf_cache:
             lf_cache[cid] = label_free_features(cd)
         lf = lf_cache[cid]
-        fitted, cp = fitted_features(cd, clim, lf, recur_strict=recur_strict)
+        fitted, cp = fitted_features(cd, clim, lf, recur_strict=recur_strict, onset_first=onset_first, tail_guard=tail_guard)
         if clim.sun is not None:
             fitted["sun_coupling"] = sun_coupling(sun_anomaly(table, cid), clim.sun.series(cid))
         rows[cid] = {**lf, **fitted}
@@ -236,6 +238,8 @@ def predict(model: dict, table: FeatureTable, ids: list[str]) -> tuple[pd.DataFr
         ids,
         clim,
         recur_strict=model["date"].get("recur_strict", False),
+        onset_first=model["date"].get("onset_first", False),
+        tail_guard=model["date"].get("tail_guard", False),
         embedding=embedding,
         projection=projection,
     )
