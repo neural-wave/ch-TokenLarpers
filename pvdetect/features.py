@@ -324,12 +324,20 @@ def fitted_features(
     tail_guard: bool = False,
 ) -> tuple[dict[str, float], Commissioning | None]:
     """Climatology-dependent features (computed inside every fit/predict with that fit's climatology);
-    `recur_strict`, `onset_first` and `tail_guard` are the fit's detection options."""
+    `recur_strict` and `tail_guard` are the fit's detection options. `onset_first` is a dating option only:
+    the features use the default candidate choice, and only the returned `Commissioning` (date and regime)
+    uses the earliest-qualifying rule, so adopting it never changes the detection features."""
     out = dict.fromkeys(FITTED + PERSISTENCE_FEATURES + SCHEDULE_FEATURES + SUN_FEATURES, np.nan)
     if cd is None or cd.n_valid == 0:
         return out, None
     daily = cd.daily
-    cp = detect_commissioning(daily, clim, recur_strict=recur_strict, onset_first=onset_first, tail_guard=tail_guard)
+    feat_cp = detect_commissioning(daily, clim, recur_strict=recur_strict, tail_guard=tail_guard)
+    date_cp = (
+        detect_commissioning(daily, clim, recur_strict=recur_strict, onset_first=True, tail_guard=tail_guard)
+        if onset_first
+        else feat_cp
+    )
+    cp = feat_cp
     v = daily[daily["valid"]]
     if cp is not None:
         has = cp.tau is not None
@@ -377,4 +385,4 @@ def fitted_features(
         out["log_kwp_phys"] = float(np.log(4 * max(pre, 0) + EPS) - 1.5 * np.log(np.cos(np.pi / 4 * zw / 6.5)))
     elif np.isfinite(out["dip_kw"]):
         out["log_kwp_phys"] = float(np.log(out["dip_kw"] + 0.1))
-    return out, cp
+    return out, date_cp

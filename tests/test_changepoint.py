@@ -6,7 +6,6 @@ import pytest
 
 from pvdetect.changepoint import (
     Commissioning,
-    ONSET_FIRST_FRAC,
     TAIL_GUARD_MIN_VALID,
     assign_regime,
     detect_commissioning,
@@ -100,17 +99,27 @@ def test_tail_guard_holiday_tail_scenario_runs():
 
 # --- Unit tests for onset_first ---
 
-def test_onset_first_frac_constant():
-    """ONSET_FIRST_FRAC is the documented value (0.3)."""
-    assert ONSET_FIRST_FRAC == 0.3
+def test_onset_first_changes_only_the_dating_commissioning_never_the_features():
+    """`onset_first` is a dating option: every feature equals the default run, while the returned
+    commissioning is the earliest-qualifying detector's (dates and regimes may move)."""
+    from pvdetect.pipeline import build_feature_table, compute_features
+    from pvdetect.season import fit_climatology
 
-
-def test_onset_first_does_not_raise():
-    """onset_first=True runs without error on a normal summer install."""
-    spec = CustomerSpec("000001", "2022-01-01", "2025-12-31", pv=PVSpec("2022-06-01", 8.0))
-    daily = customer_daily(spec, 7)
-    cp = detect_commissioning(daily, zero_climatology(), onset_first=True)
-    assert cp is not None  # may or may not find, but must not raise
+    ts, labels, _ = generate_dataset(16, seed=50, scenario="winter_install_ramp")
+    table = build_feature_table(as_loaded(ts))
+    lab = labels.set_index("customer_id")
+    nonpv = [c for c in lab.index if lab.at[c, "pv_installed"] == "FALSE"]
+    pv_dates = {c: pd.Timestamp(d).date() for c, d in lab["pv_installation_date"].items() if d}
+    clim = fit_climatology(table.dailies(), nonpv, pv_dates)
+    ids = list(lab.index)
+    F_base, cps_base = compute_features(table, ids, clim)
+    F_of, cps_of = compute_features(table, ids, clim, onset_first=True)
+    pd.testing.assert_frame_equal(F_base, F_of)
+    for c in ids:
+        cd = table.customers[c]
+        assert cps_of[c] == detect_commissioning(cd.daily, clim, onset_first=True)
+        assert cps_base[c] == detect_commissioning(cd.daily, clim)
+    assert any(cps_of[c] != cps_base[c] for c in ids)  # the scenario exercises the rule
 
 
 def test_onset_first_never_picks_later_date_on_summer_install():
