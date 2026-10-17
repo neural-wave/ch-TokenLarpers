@@ -2,6 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 import functools
 import numpy as np
 import pandas as pd
@@ -23,11 +24,13 @@ class WindowBatch:
     center_dates: list[date]
     start_epochs: np.ndarray
 
-@functools.lru_cache(maxsize=16384)
+_ZURICH_TZ = ZoneInfo("Europe/Zurich")
+
+@functools.lru_cache(maxsize=131072)
 def _calendar(epoch: int) -> np.ndarray:
-    t = pd.Timestamp(epoch, unit="s", tz="UTC").tz_convert("Europe/Zurich")
-    tod = (t.hour * 3600 + t.minute * 60 + t.second) / 86400.0
-    wd = t.weekday() / 7.0
+    dt = datetime.fromtimestamp(epoch, tz=_ZURICH_TZ)
+    tod = (dt.hour * 3600 + dt.minute * 60 + dt.second) / 86400.0
+    wd = dt.weekday() / 7.0
     return np.array([np.sin(2*np.pi*tod), np.cos(2*np.pi*tod), np.sin(2*np.pi*wd), np.cos(2*np.pi*wd)], dtype=np.float32)
 def build_windows(measurements: pd.DataFrame, config: WindowConfig) -> WindowBatch:
     if config.context_length <= 0 or config.stride <= 0 or not (0 <= config.min_observed_fraction <= 1):
