@@ -100,7 +100,8 @@ SECURITY_HEADERS = (
     (
         "Content-Security-Policy",
         (
-            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
+            "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; "
+            "connect-src 'self'; "
             "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
         ),
     ),
@@ -109,6 +110,7 @@ STATIC_FILES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/assets/app.css": ("app.css", "text/css; charset=utf-8"),
     "/assets/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/assets/inter.woff2": ("inter.woff2", "font/woff2"),
 }
 JSON_TYPE = "application/json; charset=utf-8"
 

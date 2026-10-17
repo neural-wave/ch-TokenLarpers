@@ -103,11 +103,13 @@ The terminal prints `PV detector GUI: http://127.0.0.1:PORT/`; the browser opens
 
 - **Run synthetic check** needs no files and no model. It generates fabricated variant-A customers (train seed 101, n = 24; test seed 102, n = 12), fits a demo model with the normal training procedure, runs inference, repeats it, runs `inference.py` in an isolated copy of the app, and compares both CSVs byte for byte. The synthetic score is labelled as a regression demonstration, not real-world accuracy.
 - **Analyze local CSV** uploads a file through the browser to a private temporary folder and runs it with the model configured at launch only. The demo model is never used for your file; without a configured model this action is disabled.
-- Results: summary, input-quality counts, output checks, a customer table (search, PV filter, paging) and a customer view with weekly/daily withdrawal, midday power, the estimated installation marker and a before/after typical-day comparison (observed withdrawal, not seasonally adjusted). Times use the fixed UTC+1 day matrix of the model.
+- Layout: header actions (Analyze CSV, Run synthetic check, download menu), a sidebar of run figures (customers, PV share, median/total capacity, date regimes, synthetic score, output checks, files, input quality), the selected customer's weekly/daily withdrawal or midday power with the estimated (and, for synthetic data, known) installation marker, a customer table with search and PV filter, and a before/after typical-day comparison (observed withdrawal, not seasonally adjusted). Times use the fixed UTC+1 day matrix of the model.
 - **Download** returns the exact `predictions.csv` and `pv_extensions_predictions.csv` written by `pvdetect.output`, byte-identical to the CLI for the same model and input.
 - **Clear session data** deletes uploads, outputs, synthetic data and the demo model; your original files, the configured model and downloaded files are untouched. Stopping the app deletes the session folder as well. A hard kill can leave the folder (`pvdetect-gui-*`) in the OS temp directory; it is not securely erased.
 
 Privacy: the server binds to 127.0.0.1 only, rejects other Host headers and cross-origin requests, requires a per-launch token for every API call, logs no data, and loads no external resources. Do not use real customer data in screenshots, videos or reports; demo material comes from the synthetic check.
+
+Design credit: the visual design (dark Quartz layout, palette, chart styling and icons) is ported from Open Climate Fix's MIT-licensed [quartz-frontend](https://github.com/openclimatefix/quartz-frontend); see `pvdetect/gui_assets/Quartz-frontend-MIT.txt`. The bundled Inter font is under the SIL Open Font License (`pvdetect/gui_assets/Inter-OFL.txt`).
 
 ## Submission export
 
