@@ -22,6 +22,10 @@ FOUND_SHARE = 0.5  # a one-time event keeps at least half of its step after remo
 BACKTRACK_DAYS = 150
 MAX_CANDIDATES = 8  # post-install seasonal PV swings can outrank a weak winter onset; evidence ranks them
 MIN_PERSIST = 0.5
+# `recur_strict` option: with no ±1–3-year recurrence window inside the data (short series), a step is
+# not checked against the seasonal pattern, so `found` needs a stronger persistence.
+MIN_PERSIST_SHORT = 0.75
+DATE_SCORE_DAYS = 30  # the official date score: max(0, 1 − |error| / 30)
 
 
 @dataclass(frozen=True)
@@ -112,7 +116,7 @@ def _candidates(ds: np.ndarray, first: int, last: int) -> list[int]:
     return [int(starts[b]) for b in bkps]
 
 
-def detect_commissioning(daily: pd.DataFrame, clim: Climatology) -> Commissioning | None:
+def detect_commissioning(daily: pd.DataFrame, clim: Climatology, *, recur_strict: bool = False) -> Commissioning | None:
     valid = daily["valid"].to_numpy(bool)
     if valid.sum() < MIN_VALID_DAYS:
         return None
@@ -142,6 +146,8 @@ def detect_commissioning(daily: pd.DataFrame, clim: Climatology) -> Commissionin
     persistent = [c for c in stats if np.isfinite(c[2]) and c[2] >= MIN_PERSIST]
     best = max(persistent, key=lambda c: c[4]) if persistent else None
     found = best is not None and best[4] >= max(FOUND_EVIDENCE, FOUND_SHARE * best[1])
+    if found and recur_strict and not np.isfinite(best[3]):
+        found = best[2] >= MIN_PERSIST_SHORT
     chosen = best
     if chosen is None:
         positive = [c for c in stats if c[1] > 0]
@@ -213,3 +219,16 @@ def shrunk_median(values: list[float], lo: float, hi: float) -> int:
         return 0
     n = len(values)
     return int(round(float(np.clip(np.median(values) * n / (n + 5), lo, hi))))
+
+
+def triangle_offset(values: list[float], lo: float, hi: float) -> int:
+    """Integer x in [lo, hi] maximising Σ max(0, 1 − |v − x|/30) (the summed date score); ties → the x
+    closest to `shrunk_median`, then the smaller |x|, then the smaller x. 0 for an empty list."""
+    if not values:
+        return 0
+    v = np.asarray(values, float)
+    x = np.arange(int(np.ceil(lo)), int(np.floor(hi)) + 1)
+    score = np.maximum(0.0, 1.0 - np.abs(v[None, :] - x[:, None]) / DATE_SCORE_DAYS).sum(axis=1)
+    tied = x[score >= score.max() - 1e-9]
+    m = shrunk_median(values, lo, hi)
+    return int(min(tied, key=lambda t: (abs(t - m), abs(t), t)))

@@ -31,9 +31,9 @@ CAP_CEILING = 500.0  # pipeline.to_kwp upper clip
 
 
 def load_predictions(path: str | Path, repeat: int | None = 0) -> tuple[pd.DataFrame, int]:
-    """Submission-format or OOF predictions; returns (frame, number of repeats in the file)."""
+    """Submission-format or OOF predictions; returns (frame, repeats in an OOF file, 0 for a predictions file)."""
     df, _ = _read_str_table(path)
-    n_rep = 1
+    n_rep = 0
     if "repeat" in df.columns:
         reps = sorted(df["repeat"].astype(int).unique())
         n_rep = len(reps)
@@ -223,12 +223,21 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     out_dir = _outside_repo(args.out_dir) if args.out_dir else None
     pred, n_rep = load_predictions(args.pred, args.repeat)
+    is_oof = n_rep > 0
     truth = load_labels(args.truth)
+    held_out = 0
+    if is_oof:
+        # An out-of-fold file covers exactly the customers that were trained on (e.g. after `--split-dir`);
+        # labelled customers outside it were never predicted, not missed.
+        keep = truth["customer_id"].isin(pred["customer_id"])
+        held_out, truth = int((~keep).sum()), truth[keep]
     missing = int((~truth["customer_id"].isin(pred["customer_id"])).sum())
     tab = error_table(pred, truth)
-    source = f"out-of-fold, repeat {args.repeat} of {n_rep}" if n_rep > 1 else "predictions file"
-    if n_rep > 1:
+    source = f"out-of-fold, repeat {args.repeat} of {n_rep}" if is_oof else "predictions file"
+    if is_oof:
         print(f"source: out-of-fold file, repeat {args.repeat} of {n_rep}")
+        if held_out:
+            print(f"note: {held_out} labelled customers are not in the out-of-fold file (held out) and are not scored")
     else:
         print("source: predictions file (if the model was trained on these customers, every number is optimistic)")
     if missing:
@@ -242,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
         doc = {
             "schema": DIAGNOSIS_SCHEMA,
             "source": source,
-            "out_of_fold": n_rep > 1,
+            "out_of_fold": is_oof,
             "missing_predictions": missing,
             "failure_modes": failure_modes(summary),
             **summary,

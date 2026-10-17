@@ -16,7 +16,7 @@ from pvdetect.io import load_extension_labels, load_labels, load_timeseries, spl
 from pvdetect.model import save_model
 from pvdetect.output import write_oof
 from pvdetect.pipeline import build_feature_table, predict
-from pvdetect.procedure import DEFAULT_OPTIONS, export_enabled_for, fit
+from pvdetect.procedure import C_OPTIONS, DEFAULT_OPTIONS, WEEKLY_KINDS, export_enabled_for, fit
 from pvdetect.unlabelled import POOL_MIN_VALID_DAYS, accumulate_file, build_pool, build_unlabelled_prior
 
 REPO = Path(__file__).resolve().parent
@@ -34,8 +34,14 @@ def _selection_line(infos: list[dict]) -> str:
     ka = np.array([i.get("kappa", np.nan) for i in infos], float)
     off = np.array([i.get("offset_event", np.nan) for i in infos], float)
     rule = Counter(i.get("insufficient_rule") for i in infos if i.get("insufficient_rule"))
-    parts = [
-        f"classifier logreg={clf.get('logreg', 0)}/{n} catboost={clf.get('catboost', 0)}/{n} avg={clf.get('avg', 0)}/{n}",
+    clf_part = f"classifier logreg={clf.get('logreg', 0)}/{n} catboost={clf.get('catboost', 0)}/{n} avg={clf.get('avg', 0)}/{n}"
+    if any("inner_score_weekly" in i for i in infos) or any(clf.get(k) for k in WEEKLY_KINDS):
+        clf_part += "".join(f" {k}={clf.get(k, 0)}/{n}" for k in WEEKLY_KINDS)
+    parts = [clf_part]
+    cs = Counter(i.get("logreg_C") for i in infos if i.get("logreg_C") is not None)
+    if cs:
+        parts.append("logreg_C " + " ".join(f"{c}={cs.get(c, 0)}/{n}" for c in C_OPTIONS))
+    parts += [
         f"capacity ridge={cap.get('ridge', 0)}/{n} catboost={cap.get('catboost', 0)}/{n}",
         f"threshold median={_fmt(np.nanmedian(th), 2)} [{_fmt(np.nanmin(th), 2)},{_fmt(np.nanmax(th), 2)}]",
         f"kappa median={_fmt(np.nanmedian(ka), 2)}",
@@ -60,6 +66,10 @@ def _selection_line(infos: list[dict]) -> str:
     pseudo = Counter(i.get("pseudo") for i in infos if i.get("pseudo"))
     if pseudo:
         parts.append(f"pseudo off={pseudo.get('off', 0)}/{n} on={pseudo.get('on', 0)}/{n}")
+    for key in ("offset_tri", "recur_strict"):
+        got = Counter(i.get(key) for i in infos if i.get(key))
+        if got:
+            parts.append(f"{key} off={got.get('off', 0)}/{n} on={got.get('on', 0)}/{n}")
     return "selection: " + " | ".join(parts)
 
 
@@ -108,6 +118,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--unlabelled-chunksize", type=int, default=500_000)
     ap.add_argument("--unlabelled-id-prefix", default="POD", help='keep only ids with this prefix ("" keeps all)')
     ap.add_argument("--no-e1e2", action="store_true", help="drop the E1 persistence and E2 avg options (baseline)")
+    ap.add_argument("--no-weekly", action="store_true", help="drop the weekly-evidence head options (weekly, avg_weekly)")
+    ap.add_argument("--no-ctune", action="store_true", help="keep the logreg C at its default (no inner-CV C choice)")
+    ap.add_argument("--no-offset-tri", action="store_true", help="keep the shrunk-median date offsets (no inner-CV choice)")
+    ap.add_argument("--no-recur-strict", action="store_true", help="drop the strict short-series detection option")
     ap.add_argument("--schedule", action="store_true", help="add the schedule-robust feature-block option")
     ap.add_argument(
         "--pseudo-pool",
@@ -124,7 +138,14 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     if args.folds and not args.cv:
         ap.error("--folds requires --cv")
-    options = DEFAULT_OPTIONS - ({"e1", "e2"} if args.no_e1e2 else set()) | ({"schedule"} if args.schedule else set())
+    dropped = (
+        ({"e1", "e2"} if args.no_e1e2 else set())
+        | ({"weekly"} if args.no_weekly else set())
+        | ({"ctune"} if args.no_ctune else set())
+        | ({"offset_tri"} if args.no_offset_tri else set())
+        | ({"recur_strict"} if args.no_recur_strict else set())
+    )
+    options = DEFAULT_OPTIONS - dropped | ({"schedule"} if args.schedule else set())
     if args.oof_out and not args.cv:
         ap.error("--oof-out requires --cv")
 

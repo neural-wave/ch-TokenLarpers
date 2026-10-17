@@ -20,6 +20,7 @@ from pvdetect.features import (
 from pvdetect.io import LoadedTimeseries, day_matrix
 from pvdetect.model import linear_score, sigmoid
 from pvdetect.season import Climatology
+from pvdetect.weekly import customer_scores
 
 if TYPE_CHECKING:
     from pvdetect.unlabelled import UnlabelledPrior
@@ -104,10 +105,12 @@ def compute_features(
     ids: list[str],
     clim: Climatology,
     *,
+    recur_strict: bool = False,
     embedding=None,
     projection: dict | None = None,
 ) -> tuple[pd.DataFrame, dict]:
-    """Features for ``ids`` under ``clim``; embedding is opt-in and persisted."""
+    """Features for ``ids`` under ``clim`` (and the fit's ``recur_strict`` detection option); only the
+    label-free part is cached on the table. The embedding block is opt-in and persisted."""
     lf_cache = table.cache.setdefault("label_free", {})
     rows, cps = {}, {}
     for cid in ids:
@@ -115,7 +118,7 @@ def compute_features(
         if cid not in lf_cache:
             lf_cache[cid] = label_free_features(cd)
         lf = lf_cache[cid]
-        fitted, cp = fitted_features(cd, clim, lf)
+        fitted, cp = fitted_features(cd, clim, lf, recur_strict=recur_strict)
         rows[cid] = {**lf, **fitted}
         cps[cid] = cp
     F = pd.DataFrame.from_dict(rows, orient="index").reindex(ids)
@@ -134,14 +137,26 @@ def capacity_matrix(F: pd.DataFrame, names: list[str]) -> np.ndarray:
     return X
 
 
-def classifier_proba(clf: dict, objects: dict, F: pd.DataFrame, names: list[str], kind: str | None = None) -> np.ndarray:
-    """P(PV); `avg` (E2) is the mean of the logreg and CatBoost probabilities."""
+def classifier_proba(
+    clf: dict,
+    objects: dict,
+    F: pd.DataFrame,
+    names: list[str],
+    kind: str | None = None,
+    weekly: np.ndarray | None = None,
+) -> np.ndarray:
+    """P(PV); `avg` (E2) is the mean of the logreg and CatBoost probabilities; `weekly` kinds need the
+    weekly head's customer scores (`weekly`): `weekly` is that score, `avg_weekly` its mean with logreg."""
     kind = kind or clf["kind"]
+    if kind == "weekly":
+        return weekly
     X = F[names].to_numpy(float)
     if kind == "logreg":
         return sigmoid(linear_score(clf["logreg"], X))
     if kind == "avg":
         return (sigmoid(linear_score(clf["logreg"], X)) + objects["catboost_clf"].predict_proba(X)[:, 1]) / 2
+    if kind == "avg_weekly":
+        return (sigmoid(linear_score(clf["logreg"], X)) + weekly) / 2
     return objects["catboost_clf"].predict_proba(X)[:, 1]
 
 
@@ -195,9 +210,17 @@ def predict(model: dict, table: FeatureTable, ids: list[str]) -> tuple[pd.DataFr
     objects = model.get("_objects", {})
     embedding = model.get("_embedding_encoder")
     projection = (model.get("embedding") or {}).get("projection") if embedding is not None else None
-    F, cps = compute_features(table, ids, clim, embedding=embedding, projection=projection)
+    F, cps = compute_features(
+        table,
+        ids,
+        clim,
+        recur_strict=model["date"].get("recur_strict", False),
+        embedding=embedding,
+        projection=projection,
+    )
     clf = model["classifier"]
-    prob = classifier_proba(clf, objects, F, model["feature_names"])
+    weekly = customer_scores(clf["weekly"], table, ids, clim) if "weekly" in clf else None
+    prob = classifier_proba(clf, objects, F, model["feature_names"], weekly=weekly)
     cap = model["capacity"]
     kwp = to_kwp(capacity_log(cap, objects, F, model["capacity_feature_names"]), cap["kappa"], cap["fallback_kwp"])
     regimes, dates = regimes_and_dates(table, ids, F, cps, model["date"], model["date"]["insufficient_rule"])

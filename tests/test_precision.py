@@ -26,6 +26,8 @@ from tests.test_evaluation import typed_labels
 
 PERSIST = PERSISTENCE_FEATURES[0]
 RELEASE_DIR = Path(__file__).resolve().parents[1] / "scripts"
+# The stubbed inner OOFs below score neither the weekly head nor other logreg Cs (see tests/test_weekly.py).
+E1E2 = procedure.DEFAULT_OPTIONS - {"weekly", "ctune", "offset_tri", "recur_strict"}
 
 
 # ------------------------------------------------------------------ E1 feature
@@ -170,13 +172,13 @@ def data():
 def test_fit_with_avg_saves_both_sub_models_and_predicts_their_mean(data, monkeypatch, tmp_path):
     table, labels = data
 
-    def stub(table, labels, lab, train_ids, splits, names, cap_names, setting=procedure.BASE_SETTING):
+    def stub(table, labels, lab, train_ids, splits, names, cap_names, setting=procedure.BASE_SETTING, **_):
         t = lab.loc[train_ids]
         return _oof(t, *_split_probs(t["pv_installed"].to_numpy(bool), 2))
 
     monkeypatch.setattr(procedure, "_inner_oof", stub)
     ids = labels["customer_id"].tolist()
-    model = fit(table, labels, ids)
+    model = fit(table, labels, ids, options=E1E2)
     clf = model["classifier"]
     assert clf["kind"] == "avg" and clf["logreg"] is not None and clf["catboost_file"] == "catboost_clf.cbm"
     assert model["selection"]["feature_block"] == "base"
@@ -203,7 +205,7 @@ def test_fit_feature_block_follows_inner_cv(data, monkeypatch, tmp_path, prefer_
     table, labels = data
     seen = []
 
-    def stub(table, labels, lab, train_ids, splits, names, cap_names, setting=procedure.BASE_SETTING):
+    def stub(table, labels, lab, train_ids, splits, names, cap_names, setting=procedure.BASE_SETTING, **_):
         seen.append((list(names), list(cap_names), len(splits)))
         t = lab.loc[train_ids]
         on = t["pv_installed"].to_numpy(float)
@@ -211,7 +213,7 @@ def test_fit_feature_block_follows_inner_cv(data, monkeypatch, tmp_path, prefer_
 
     monkeypatch.setattr(procedure, "_inner_oof", stub)
     ids = labels["customer_id"].tolist()
-    model = fit(table, labels, ids)
+    model = fit(table, labels, ids, options=E1E2)
     sel = model["selection"]
     base_names = feature_names(model["export_enabled"])
     assert [s[0] for s in seen] == [base_names, base_names + [PERSIST]]

@@ -30,6 +30,8 @@ from tests.helpers import as_loaded
 from tests.test_evaluation import typed_labels
 
 CHUNK = 7_000
+# the stubbed inner OOF scores no weekly head / C / date options
+STUB_OPTIONS = procedure.DEFAULT_OPTIONS - {"weekly", "ctune", "offset_tri", "recur_strict"}
 
 
 def _write_csv(ts: pd.DataFrame, path: Path) -> Path:
@@ -124,7 +126,7 @@ def _hand_prior(table) -> UnlabelledPrior:
 def _stub_inner_oof(good):
     """OOF frames whose quality depends only on the option setting (perfect vs dates/capacity off)."""
 
-    def stub(table, labels, lab, train_ids, splits, names, cap_names, setting=BASE_SETTING):
+    def stub(table, labels, lab, train_ids, splits, names, cap_names, setting=BASE_SETTING, **_):
         t = lab.loc[train_ids]
         t_pv = t["pv_installed"].to_numpy(bool)
         ok = good(setting)
@@ -155,7 +157,7 @@ def test_fit_keeps_baseline_when_inner_prefers_it(data, monkeypatch):
     table, labels = data
     table = dataclasses.replace(table, unlabelled=_hand_prior(table))
     monkeypatch.setattr(procedure, "_inner_oof", _stub_inner_oof(lambda s: s == BASE_SETTING))
-    model = fit(table, labels, labels["customer_id"].tolist())
+    model = fit(table, labels, labels["customer_id"].tolist(), options=STUB_OPTIONS)
     sel = model["selection"]
     assert (sel["climatology"], sel["evidence_scale"]) == BASE_SETTING
     assert set(sel["unlabelled_options"]) == {"climatology", "evidence_scale"}
@@ -175,7 +177,7 @@ def test_fit_adopts_option_that_wins_by_margin(data, monkeypatch, tmp_path, winn
     table = dataclasses.replace(table, unlabelled=_hand_prior(table))
     monkeypatch.setattr(procedure, "_inner_oof", _stub_inner_oof(winner))
     ids = labels["customer_id"].tolist()
-    model = fit(table, labels, ids)
+    model = fit(table, labels, ids, options=STUB_OPTIONS)
     sel = model["selection"]
     assert (sel["climatology"], sel["evidence_scale"]) == expect
     boots = [o["bootstrap_p"] for o in sel["unlabelled_options"].values() if o["bootstrap_p"] is not None]

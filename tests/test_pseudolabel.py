@@ -118,21 +118,24 @@ def test_with_pseudo_builds_capped_weighted_set(monkeypatch):
     pool_ids = [f"PODSYN{i:02d}" for i in range(prob.size)]
     Fp = pd.DataFrame({"a": 100.0 + np.arange(prob.size), "b": 0.0}, index=pool_ids)
     seen = {}
-    monkeypatch.setattr(pseudolabel, "pool_features", lambda table, clim: Fp)
+    monkeypatch.setattr(pseudolabel, "pool_features", lambda table, clim, recur_strict=False: Fp)
 
-    def proba(clf, objects, F_, names_, kind):
-        seen["kind"] = kind
+    def proba(clf, objects, F_, names_, kind, weekly=None):
+        seen.update(kind=kind, weekly=weekly)
         return prob
 
-    def fake_fit(X, y, kinds, weight):
-        seen.update(X=X, y=y, kinds=kinds, w=weight)
+    def fake_fit(X, y, kinds, weight, C):
+        seen.update(X=X, y=y, kinds=kinds, w=weight, C=C)
         return {"refit": True}, {"catboost_clf": "refit"}
 
     monkeypatch.setattr(pseudolabel, "classifier_proba", proba)
     monkeypatch.setattr(procedure, "_fit_classifiers", fake_fit)
-    comp = procedure.Components(None, F, {}, {}, {"refit": False}, {"r": 1}, None, 5.0, {"catboost_cap": "cap"})
+    comp = procedure.Components(
+        None, F, {}, {}, {"refit": False}, {"r": 1}, None, 5.0, {"catboost_cap": "cap"}, logreg_C=2.0
+    )
     out, counts = pseudolabel.with_pseudo(None, lab, ids, names, comp, "catboost")
     assert seen["kind"] == "logreg"  # no CatBoost in comp -> logreg scores the pool, as in `_inner_oof`
+    assert seen["weekly"] is None and seen["C"] == 2.0  # refit at the fit's logreg C
     assert counts == (6, 9) and seen["kinds"] == ("logreg", "catboost")
     pos_rows = list(range(2, 8))  # the 6 highest of the 8 increasing positives
     neg_rows = list(range(8, 17))  # the 9 lowest of the 10 increasing negatives
@@ -144,7 +147,7 @@ def test_with_pseudo_builds_capped_weighted_set(monkeypatch):
     assert out.objects == {"catboost_cap": "cap", "catboost_clf": "refit"}
     assert (out.ridge, out.fallback, out.F) == (comp.ridge, comp.fallback, comp.F)
     # nothing confident -> unchanged
-    monkeypatch.setattr(pseudolabel, "classifier_proba", lambda *a: np.full(prob.size, 0.5))
+    monkeypatch.setattr(pseudolabel, "classifier_proba", lambda *a, **k: np.full(prob.size, 0.5))
     assert pseudolabel.with_pseudo(None, lab, ids, names, comp, "logreg") == (comp, (0, 0))
 
 
@@ -164,10 +167,14 @@ def data():
     return table, dataclasses.replace(table, unlabelled_pool=pool), typed_labels(labels)
 
 
+# the stubbed inner OOF scores no weekly head / C / date options
+STUB_OPTIONS = procedure.DEFAULT_OPTIONS - {"weekly", "ctune", "offset_tri", "recur_strict"}
+
+
 def _stub_inner_oof(good):
     """OOF frames whose quality depends only on whether pseudo-labelling refits the classifier."""
 
-    def stub(table, labels, lab, train_ids, splits, names, cap_names, setting=BASE_SETTING, refit=None):
+    def stub(table, labels, lab, train_ids, splits, names, cap_names, setting=BASE_SETTING, refit=None, **_):
         t = lab.loc[train_ids]
         t_pv = t["pv_installed"].to_numpy(bool)
         ok = good(refit is not None)
@@ -203,8 +210,8 @@ def test_fit_keeps_off_when_inner_prefers_it_and_model_is_unchanged(data, monkey
     plain, pooled, labels = data
     ids = labels["customer_id"].tolist()
     monkeypatch.setattr(procedure, "_inner_oof", _stub_inner_oof(lambda pseudo: not pseudo))
-    with_pool = _json(fit(pooled, labels, ids), tmp_path / "a" / "model.json")
-    without = _json(fit(plain, labels, ids), tmp_path / "b" / "model.json")
+    with_pool = _json(fit(pooled, labels, ids, options=STUB_OPTIONS), tmp_path / "a" / "model.json")
+    without = _json(fit(plain, labels, ids, options=STUB_OPTIONS), tmp_path / "b" / "model.json")
     sel = with_pool["selection"]
     assert sel["pseudo"] == "off" and "pseudo_labeller" not in sel
     assert sel["pseudo_options"]["on"] < sel["pseudo_options"]["off"]
@@ -218,7 +225,7 @@ def test_fit_adopts_pseudo_that_wins_by_margin(data, monkeypatch, tmp_path):
     plain, pooled, labels = data
     ids = labels["customer_id"].tolist()
     monkeypatch.setattr(procedure, "_inner_oof", _stub_inner_oof(lambda pseudo: pseudo))
-    model = fit(pooled, labels, ids)
+    model = fit(pooled, labels, ids, options=STUB_OPTIONS)
     sel = model["selection"]
     assert sel["pseudo"] == "on" and sel["pseudo_labeller"] == "logreg"
     assert sel["pseudo_options"]["on"] - sel["pseudo_options"]["off"] >= procedure.CLASSIFIER_MARGIN
@@ -235,7 +242,7 @@ def test_fit_adopts_pseudo_that_wins_by_margin(data, monkeypatch, tmp_path):
     assert len(pred) == len(ids)
     # pseudo-labels reach only the classifier: climatology, capacity and date fits are the labelled ones
     # (κ is a selection on the inner OOF, so it may differ)
-    base = fit(plain, labels, ids)
+    base = fit(plain, labels, ids, options=STUB_OPTIONS)
     assert model["climatology"] == base["climatology"]
     for k in ("kind", "ridge", "ridge_export", "fallback_kwp"):
         assert model["capacity"][k] == base["capacity"][k]
