@@ -42,7 +42,7 @@ History and visibility: commits `e303f6d`, `1f875b6`, `a65b552` and `086eda8` on
 ## Train
 
 ```
-python train.py --timeseries energy.csv --labels labels.csv --out artifacts/model.json [--cv] [--outer-repeats 4] [--report-dir DIR]
+python train.py --timeseries energy.csv --labels labels.csv --out artifacts/model.json [--cv] [--outer-repeats 4] [--report-dir DIR] [--folds F0,F1,...] [--oof-out PATH]
 ```
 
 `--cv` runs nested customer-level cross-validation of the whole training procedure and prints aggregate lines only: `data:` (including whether readings are signed, which switches export features on), `nested:` (score ± SD over repeats, bootstrap 90% interval, F1/D/P, `inner=`/`gap=` for the inner-vs-outer score gap, and `outer_informed_decisions=k`), `dates:` (date accuracy per regime), `regime_confusion:`, `selection:` (how often each inner-CV choice was made). The final model is always fit on all labelled customers. `--report-dir` writes the repeat-0 out-of-fold table (`oof_repeat0.csv`) and selection records.

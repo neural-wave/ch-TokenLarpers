@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from pvdetect.evaluation import REGIMES, count_decisions, nested_cv, outer_splits
+from pvdetect.evaluation import REGIMES, count_decisions, load_split_file, nested_cv, outer_splits, splits_from_fold_map
 from pvdetect.io import load_extension_labels, load_labels, load_timeseries
 from pvdetect.model import save_model
 from pvdetect.pipeline import build_feature_table, predict
@@ -52,7 +52,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--cv", action="store_true")
     ap.add_argument("--outer-repeats", type=int, default=4)
     ap.add_argument("--report-dir")
+    ap.add_argument("--folds", help="comma-separated split files (customer_id, fold); each file is one outer repeat")
     args = ap.parse_args(argv)
+    if args.folds and not args.cv:
+        ap.error("--folds requires --cv")
 
     loaded = load_timeseries(args.timeseries)
     labels = load_labels(args.labels)
@@ -60,8 +63,9 @@ def main(argv: list[str] | None = None) -> int:
     if missing:
         raise ValueError(f"{len(missing)} labelled customers missing from timeseries")
     ext_labels = load_extension_labels(args.ext_labels) if args.ext_labels else None
-    table = build_feature_table(loaded)
     ids = labels["customer_id"].tolist()
+    fold_maps = [load_split_file(p, ids) for p in args.folds.split(",")] if args.folds else None
+    table = build_feature_table(loaded)
     rep = loaded.report
     dl = rep["day_length_counts"]
     signed = sum(1 for c in ids if table.customers[c] is not None and table.customers[c].neg_frac >= 0.01)
@@ -73,11 +77,14 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.cv:
-        try:
-            splits = outer_splits(labels, repeats=args.outer_repeats)
-        except ValueError:
-            print("cv skipped: fewer than 2 customers in a class")
-            splits = None
+        if fold_maps is not None:
+            splits = [splits_from_fold_map(m, ids) for m in fold_maps]
+        else:
+            try:
+                splits = outer_splits(labels, repeats=args.outer_repeats)
+            except ValueError:
+                print("cv skipped: fewer than 2 customers in a class")
+                splits = None
         if splits is not None:
             res = nested_cv(fit, predict, table, labels, splits, ext_labels=ext_labels)
             k = count_decisions(REPO / "DECISIONS.md")

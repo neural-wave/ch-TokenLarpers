@@ -35,6 +35,48 @@ def outer_splits(labels: pd.DataFrame, repeats: int = 4, folds: int = 5, seed: i
     return out
 
 
+SPLIT_COLUMNS = ("customer_id", "fold")
+
+
+def load_split_file(path: str | Path, labelled_ids: list[str]) -> dict[str, int]:
+    """Map every labelled customer to its outer fold (mirrors `oof_contract.load_split_file`).
+
+    Parquet or `;`/`,` CSV with `customer_id`, `fold`; extra customers are ignored.
+    Error messages carry counts, never identifiers.
+    """
+    path = Path(path)
+    if path.suffix.lower() == ".parquet":
+        frame = pd.read_parquet(path)
+    else:
+        with open(path, encoding="utf-8-sig") as f:
+            sep = ";" if ";" in f.readline() else ","
+        frame = pd.read_csv(path, sep=sep, dtype={"customer_id": str}, encoding="utf-8-sig", keep_default_na=False)
+    if "customer_id" in frame.columns:
+        frame["customer_id"] = frame["customer_id"].astype(str).str.strip()
+    missing_columns = [c for c in SPLIT_COLUMNS if c not in frame.columns]
+    if missing_columns:
+        raise ValueError(f"split file {path} lacks columns: {missing_columns}")
+    labelled = {str(c).strip() for c in labelled_ids}
+    frame = frame[frame["customer_id"].isin(labelled)]
+    if frame["customer_id"].duplicated().any():
+        raise ValueError(f"split file {path} assigns a labelled customer to several folds")
+    folds = pd.to_numeric(frame["fold"], errors="coerce")
+    if folds.isna().any() or (folds % 1 != 0).any():
+        raise ValueError(f"split file {path} has non-integer folds")
+    missing = labelled - set(frame["customer_id"])
+    if missing:
+        raise ValueError(f"split file {path} does not cover labelled customers: {len(missing)} missing")
+    return {cid: int(fold) for cid, fold in zip(frame["customer_id"], folds)}
+
+
+def splits_from_fold_map(fold_map: dict[str, int], ids: list[str]) -> list[tuple[list[str], list[str]]]:
+    """One outer repeat from a fold map: per sorted fold value, (other labelled customers, that fold)."""
+    return [
+        ([c for c in ids if fold_map[c] != f], [c for c in ids if fold_map[c] == f])
+        for f in sorted(set(fold_map.values()))
+    ]
+
+
 def inner_splits(labels: pd.DataFrame, train_ids: list[str], groups: list[str] | None = None) -> list[tuple[list[str], list[str]]]:
     """Common customer folds for every Tier A option of one fit (grouped by source customer)."""
     from sklearn.model_selection import StratifiedGroupKFold
