@@ -280,6 +280,25 @@ def model_status(path: Path) -> tuple[bool, str | None]:
     return True, None
 
 
+def saved_evaluation(model_path: Path) -> dict | None:
+    """Aggregate error analysis (`pvdetect.diagnose --out-dir`) saved next to the configured model, if any.
+
+    Only the aggregate summary is read; the per-customer `errors.csv` is never served."""
+    from pvdetect.diagnose import DIAGNOSIS_FILE, DIAGNOSIS_SCHEMA
+
+    path = model_path.parent / DIAGNOSIS_FILE
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        stale = path.stat().st_mtime < model_path.stat().st_mtime - 1
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or doc.get("schema") != DIAGNOSIS_SCHEMA:
+        return None
+    keep = ("source", "out_of_fold", "missing_predictions", "failure_modes", "counts", "precision", "recall", "f1",
+            "D", "P", "score", "lost", "largest", "dates", "capacity", "by_size", "by_season", "by_year")
+    return {**{k: doc.get(k) for k in keep}, "stale": stale}
+
+
 def _display_name(raw: str | None) -> str | None:
     """Display-only file name: percent-decoded, no path parts or control characters, at most 120 characters."""
     if not raw:
@@ -401,11 +420,14 @@ class _LoopbackHTTPServer(http.server.ThreadingHTTPServer):
 class GuiServer:
     """One loopback HTTP service with at most one job; see `create_server`."""
 
-    def __init__(self, model_path: Path, port: int = 8765, session_root: Path | None = None):
+    def __init__(
+        self, model_path: Path, port: int = 8765, session_root: Path | None = None, labels_path: Path | None = None
+    ):
         import inference
 
         self.model_path = Path(model_path).expanduser().absolute()
         self.model_source = "default" if self.model_path.resolve() == inference.MODEL_PATH.resolve() else "configured"
+        self.labels_path = Path(labels_path).expanduser().absolute() if labels_path else None
         self.token = secrets.token_urlsafe(32)
         self.assets_dir = ASSETS_DIR
         if session_root is not None:
@@ -473,6 +495,10 @@ class GuiServer:
                 "source": self.model_source,
                 "reason": reason,
             },
+            "evaluation": saved_evaluation(self.model_path) if available else None,
+            "labels": {"configured": self.labels_path is not None, "label": self.labels_path.name}
+            if self.labels_path
+            else {"configured": False, "label": None},
             "input": dict(INPUT_FORMAT),
             "outputs": list(OUTPUT_FILES),
             "job": job,
@@ -595,6 +621,7 @@ class GuiServer:
                 "input": str(job.dir / "input.csv"),
                 "model": str(self.model_path),
                 "model_label": self.model_path.name,
+                "labels": str(self.labels_path) if self.labels_path else None,
             }
             self._spawn(job, spec, "load")
             with self._lock:
@@ -1010,10 +1037,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         return "received" if job.state == "receiving" else "cancelled"
 
 
-def create_server(model_path: Path, port: int = 8765, session_root: Path | None = None) -> GuiServer:
+def create_server(
+    model_path: Path, port: int = 8765, session_root: Path | None = None, labels_path: Path | None = None
+) -> GuiServer:
     """Bind 127.0.0.1:`port` (0 = ephemeral). Analysis uses only `model_path`; session data lives under a
-    fresh 0700 directory (inside `session_root` when given, else the system temp directory)."""
-    return GuiServer(model_path, port, session_root)
+    fresh 0700 directory (inside `session_root` when given, else the system temp directory). With
+    `labels_path`, every completed analysis is diagnosed against those labels."""
+    return GuiServer(model_path, port, session_root, labels_path)
 
 
 # --------------------------------------------------------------------------------------------- worker
@@ -1440,9 +1470,31 @@ def _run_analysis(spec: dict, stage) -> None:
         "outputs": _outputs(checks, out),
         "checks": checks,
         "synthetic": None,
+        "diagnosis": _diagnosis(out / "predictions.csv", Path(spec["labels"]), ids) if spec.get("labels") else None,
         "customers": customers,
     }
     _write_json(job_dir / "result.json", result)
+
+
+def _diagnosis(pred_csv: Path, labels_csv: Path, ids: list[str]) -> dict:
+    """Aggregate error analysis of this job's predictions against the labels of the customers it contains.
+
+    Customers of the CSV without a label are left out; the result is in-sample when the model was trained
+    on these customers (the frontend says so). Never raises: failures become a sanitized reason."""
+    from pvdetect.diagnose import _json_safe, error_table, failure_modes, load_predictions, summarize
+    from pvdetect.io import load_labels
+
+    try:
+        truth = load_labels(labels_csv)
+    except (OSError, ValueError, KeyError):
+        return {"available": False, "reason": "The labels file could not be read as a labels CSV."}
+    truth = truth[truth["customer_id"].isin(set(ids))]
+    if truth.empty:
+        return {"available": False, "reason": "No customer in this CSV appears in the labels file."}
+    pred, _ = load_predictions(pred_csv, None)
+    s = summarize(error_table(pred, truth))
+    doc = {"available": True, "matched": len(truth), "unlabelled": len(ids) - len(truth), "failure_modes": failure_modes(s)}
+    return _json_safe({**doc, **s})
 
 
 def _build_synthetic(build: Path, final: Path) -> None:
@@ -1594,6 +1646,7 @@ def _run_synthetic(spec: dict, stage) -> None:
             "test_customers": SYNTHETIC_TEST[0],
             "seeds": {"train": SYNTHETIC_TRAIN[1], "test": SYNTHETIC_TEST[1]},
         },
+        "diagnosis": _diagnosis(out / "predictions.csv", labels_csv, ids),
         "customers": customers,
     }
     _write_json(job_dir / "result.json", result)

@@ -92,3 +92,31 @@ def test_out_dir_inside_repository_is_refused(tmp_path, pair):
     assert not (diagnose.REPO / "x").exists()
     assert diagnose.main([str(tmp_path / "p.csv"), str(tmp_path / "t.csv"), "--out-dir", str(tmp_path / "priv")]) == 0
     assert (tmp_path / "priv" / "errors.csv").exists()
+
+
+def test_saved_evaluation_reaches_the_gui_as_strict_json_and_goes_stale(tmp_path, pair):
+    import json
+    import os
+
+    from pvdetect.gui import saved_evaluation
+
+    pred, truth = pair
+    for name, df in (("p.csv", pred), ("t.csv", truth)):
+        df.assign(
+            pv_installed=df["pv_installed"].map({True: "TRUE", False: "FALSE"}),
+            pv_installation_date=df["pv_installation_date"].dt.strftime("%Y-%m-%d"),
+        ).to_csv(tmp_path / name, sep=";", index=False)
+    priv = tmp_path / "priv"
+    diagnose.main([str(tmp_path / "p.csv"), str(tmp_path / "t.csv"), "--out-dir", str(priv)])
+    doc = json.loads((priv / diagnose.DIAGNOSIS_FILE).read_text(), parse_constant=lambda c: pytest.fail(c))
+    assert doc["by_size"]["<10"]["D"] is None  # NaN written as null
+    model = priv / "model.json"
+    model.write_text("{}")
+    os.utime(model, (0, 0))
+    ev = saved_evaluation(model)
+    assert ev["counts"] == {"TP": 2, "FP": 1, "FN": 1, "TN": 1} and ev["stale"] is False
+    os.utime(model, None)
+    os.utime(priv / diagnose.DIAGNOSIS_FILE, (0, 0))
+    assert saved_evaluation(model)["stale"] is True
+    (priv / diagnose.DIAGNOSIS_FILE).write_text('{"schema": 99}')
+    assert saved_evaluation(model) is None
