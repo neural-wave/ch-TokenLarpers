@@ -66,8 +66,11 @@ Repeat with `pretrained/medium` and a different output directory to exercise tha
 For final CSV inference, `python inference.py path/to/test.csv` loads `artifacts/model.json` in the exported submission. For an explicit model and output path during development, use the shared Python API:
 
 ```python
+from pathlib import Path
 from inference import run_inference
-run_inference("/private/test.csv", "/private/run/model.json", "/private/output")
+output = Path("/private/output")
+output.mkdir(parents=True, exist_ok=True)
+run_inference("/private/test.csv", "/private/run/model.json", output)
 ```
 
 Use fabricated files for agent-executed calls; the real-data forms below are for the human data holder.
