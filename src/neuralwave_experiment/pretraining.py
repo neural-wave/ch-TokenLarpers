@@ -68,9 +68,14 @@ def _visible_inputs(model, batch, target, device):
         genuine = row.reshape(-1)[keep]
         if genuine.numel() == 0: centers.append(row.new_tensor(0.)); scales.append(row.new_tensor(1.))
         else:
-            center = genuine.median(); centers.append(center); scales.append((genuine-center).abs().median().clamp_min(.001))
+            med = genuine.median()
+            mad = (genuine - med).abs().median()
+            std = genuine.std()
+            s = mad if mad > 0.01 else (std if std > 0.01 else row.new_tensor(0.05))
+            centers.append(med)
+            scales.append(s.clamp_min(0.05))
     center=torch.stack(centers)[:,None]; scale=torch.stack(scales)[:,None]
-    normalized=((raw.reshape(len(raw),-1)-center)/scale).reshape(-1,q,p)
+    normalized=((raw.reshape(len(raw),-1)-center)/scale).clamp(-50.0, 50.0).reshape(-1,q,p)
     masked = normalized.masked_fill(~visible, 0.)
     return masked.reshape(-1,q*p,1), (obs & ~target_points).reshape(-1,q*p,1), calendar, normalized, obs
 

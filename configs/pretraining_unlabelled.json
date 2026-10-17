@@ -19,6 +19,6 @@
   "mask_ratio": 0.3,
   "grad_clip_norm": 5.0,
   "amp": true,
-  "amp_dtype": "float16",
+  "amp_dtype": "bfloat16",
   "seed": 17
 }
