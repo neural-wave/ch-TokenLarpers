@@ -4,7 +4,7 @@ Detects photovoltaic installations, commissioning dates and nominal capacity (kW
 
 The repository also retains Pipeline A, strict conversion of authorized CSV manifests into canonical Parquet, and Pipeline B, deterministic paired synthetic PV scenarios. Use fabricated fixtures for agent-run development checks.
 
-For a readable, step-by-step explanation of the implemented pipeline, open [`docs/PIPELINE_EXPLAINED.html`](docs/PIPELINE_EXPLAINED.html) in a browser.
+For a readable, step-by-step explanation of the implemented pipeline, open [`docs/PIPELINE_EXPLAINED.html`](docs/PIPELINE_EXPLAINED.html) in a browser. The model card (intended use, data, training procedure, evaluation protocol, limitations, privacy notes, reproducibility commands) is in [`docs/MODEL_CARD.md`](docs/MODEL_CARD.md).
 
 ## Team
 
