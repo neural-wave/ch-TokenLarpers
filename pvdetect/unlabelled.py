@@ -1,14 +1,16 @@
-"""Memory-bounded streaming of the unlabelled series (Step 17) and the label-free unlabelled prior (Step 18).
+"""Memory-bounded streaming of the unlabelled series (Step 17), the label-free unlabelled prior (Step 18)
+and the bounded pseudo-labelling pool.
 
-Nothing here sees labels. The prior is computed once, outside `fit`, and attached to the `FeatureTable`;
-`Procedure.fit` decides by inner CV whether any of its options is used.
+Nothing here sees labels. The prior and the pool are computed once, outside `fit`, and attached to the
+`FeatureTable`; `Procedure.fit` decides by inner CV whether any of its options is used.
 """
 
 from __future__ import annotations
 
+import hashlib
 import warnings
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +19,7 @@ import pandas as pd
 from pvdetect.daily import daily_from_sums
 from pvdetect.features import _contrast, last365
 from pvdetect.io import SLOT_S, STD_OFFSET_S, iter_chunks
+from pvdetect.pipeline import CustomerData, customer_data
 from pvdetect.season import N_WEEKS, SIGNALS, signal_curves, weekly_median
 
 QUANTILES = (0.0, 0.25, 0.5, 0.75)
@@ -187,6 +190,75 @@ def accumulate_file(
         acc.add(frame)
     dailies = acc.finalize()
     return dailies, acc.report
+
+
+# --------------------------------------------------------------------------- pseudo-labelling pool
+
+POOL_SALT = b"pvdetect-pseudo-pool-1"
+POOL_MIN_VALID_DAYS = 365
+
+
+def _pool_rank(cid: str) -> str:
+    return hashlib.sha256(POOL_SALT + cid.encode()).hexdigest()
+
+
+def select_pool(n_valid: Mapping[str, int], size: int) -> list[str]:
+    """At most `size` customers with ≥365 valid days, chosen by a salted hash of the id (independent of
+    file order), returned sorted by id."""
+    eligible = [c for c, n in n_valid.items() if n >= POOL_MIN_VALID_DAYS]
+    return sorted(sorted(eligible, key=lambda c: (_pool_rank(c), c))[: max(size, 0)])
+
+
+class PoolAccumulator:
+    """Second streaming pass: the float64 UTC+1 day matrix of a fixed set of customers over the day
+    range found by the first pass, keep-first per (customer, slot) across the file like `load_timeseries`."""
+
+    def __init__(self, spans: Mapping[str, tuple[int, int]]):
+        self.ids = sorted(spans)
+        self.index = pd.Index(self.ids)
+        self.first_day = np.array([spans[c][0] for c in self.ids], np.int64)
+        self.M = [np.full((spans[c][1], 96), np.nan) for c in self.ids]
+
+    def add(self, frame: pd.DataFrame) -> None:
+        code = self.index.get_indexer(frame["customer_id"].to_numpy(dtype=object))
+        keep = code >= 0
+        if not keep.any():
+            return
+        code = code[keep]
+        std = frame["epoch_s"].to_numpy(np.int64)[keep] + STD_OFFSET_S
+        energy = frame["energy_kwh"].to_numpy(np.float64)[keep]
+        cell = (std // 86400 - self.first_day[code]) * 96 + (std % 86400) // SLOT_S
+        order = np.argsort(code, kind="stable")  # file order within each customer
+        for grp in np.split(order, np.flatnonzero(np.diff(code[order])) + 1):
+            flat = self.M[code[grp[0]]].reshape(-1)
+            cells, first = np.unique(cell[grp], return_index=True)  # keep-first within the chunk
+            values = energy[grp][first]
+            new = np.isnan(flat[cells])  # keep-first against earlier chunks
+            flat[cells[new]] = values[new]
+
+    def finalize(self) -> dict[str, CustomerData]:
+        """`CustomerData` exactly as `build_feature_table` builds it, then M stored as float32."""
+        out: dict[str, CustomerData] = {}
+        for i, cid in enumerate(self.ids):
+            M, self.M[i] = self.M[i], None
+            dates = np.arange(self.first_day[i], self.first_day[i] + len(M)).astype("datetime64[D]")
+            cd = customer_data(dates, M, M[~np.isnan(M)])
+            out[cid] = replace(cd, M=M.astype(np.float32))
+        return out
+
+
+def build_pool(
+    path: str | Path, dailies: Mapping[str, pd.DataFrame], size: int, chunksize: int = 500_000
+) -> dict[str, CustomerData]:
+    """The pseudo-labelling pool: `select_pool` on the first pass's dailies, then one more streaming pass."""
+    ids = select_pool({c: int(d["valid"].sum()) for c, d in dailies.items()}, size)
+    if not ids:
+        return {}
+    day0 = {c: int(dailies[c].index[0].to_datetime64().astype("datetime64[D]").astype(np.int64)) for c in ids}
+    acc = PoolAccumulator({c: (day0[c], len(dailies[c])) for c in ids})
+    for frame, _ in iter_chunks(path, chunksize=chunksize):
+        acc.add(frame)
+    return acc.finalize()
 
 
 # --------------------------------------------------------------------------- prior

@@ -42,34 +42,39 @@ class CustomerData:
 @dataclass(frozen=True)
 class FeatureTable:
     """Label-free per-customer data. `cache` holds label-free derived values only (§2 cache rule);
-    `unlabelled` is the optional label-free, fold-independent prior from the unlabelled series."""
+    `unlabelled` is the optional label-free, fold-independent prior from the unlabelled series;
+    `unlabelled_pool` is the optional label-free pool of unlabelled customers for pseudo-labelling."""
 
     ids: list[str]
     customers: dict[str, CustomerData | None]
     cache: dict = field(default_factory=dict)
     unlabelled: UnlabelledPrior | None = None
+    unlabelled_pool: dict[str, CustomerData] | None = None
 
     def dailies(self) -> dict[str, pd.DataFrame]:
         return {c: d.daily for c, d in self.customers.items() if d is not None}
 
 
+def customer_data(dates: np.ndarray, M: np.ndarray, energy: np.ndarray) -> CustomerData:
+    """One customer's data from its UTC+1 day matrix and its (deduplicated) readings."""
+    daily = daily_signal(dates, M)
+    valid = daily.index[daily["valid"].to_numpy()]
+    first = (valid[0] if len(valid) else daily.index[0]).date()
+    return CustomerData(
+        daily=daily,
+        dates=dates,
+        M=M,
+        neg_frac=float(np.mean(energy < 0)),
+        q001=float(np.quantile(energy, 0.001)),
+        first_date=first,
+        n_valid=int(daily["valid"].sum()),
+    )
+
+
 def build_feature_table(loaded: LoadedTimeseries) -> FeatureTable:
     customers: dict[str, CustomerData | None] = dict.fromkeys(loaded.customer_ids)
     for cid, g in loaded.frame.groupby("customer_id", sort=False):
-        dates, M = day_matrix(g)
-        daily = daily_signal(dates, M)
-        e = g["energy_kwh"].to_numpy()
-        valid = daily.index[daily["valid"].to_numpy()]
-        first = (valid[0] if len(valid) else daily.index[0]).date()
-        customers[str(cid)] = CustomerData(
-            daily=daily,
-            dates=dates,
-            M=M,
-            neg_frac=float(np.mean(e < 0)),
-            q001=float(np.quantile(e, 0.001)),
-            first_date=first,
-            n_valid=int(daily["valid"].sum()),
-        )
+        customers[str(cid)] = customer_data(*day_matrix(g), g["energy_kwh"].to_numpy())
     return FeatureTable(ids=list(loaded.customer_ids), customers=customers)
 
 

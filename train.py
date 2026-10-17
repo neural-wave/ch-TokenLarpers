@@ -6,6 +6,7 @@ import argparse
 import json
 from collections import Counter
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -16,8 +17,8 @@ from pvdetect.io import load_extension_labels, load_labels, load_timeseries
 from pvdetect.model import save_model
 from pvdetect.output import write_oof
 from pvdetect.pipeline import build_feature_table, predict
-from pvdetect.procedure import export_enabled_for, fit
-from pvdetect.unlabelled import accumulate_file, build_unlabelled_prior
+from pvdetect.procedure import DEFAULT_OPTIONS, export_enabled_for, fit
+from pvdetect.unlabelled import POOL_MIN_VALID_DAYS, accumulate_file, build_pool, build_unlabelled_prior
 
 REPO = Path(__file__).resolve().parent
 
@@ -54,11 +55,18 @@ def _selection_line(infos: list[dict]) -> str:
     block = Counter(i.get("feature_block") for i in infos if i.get("feature_block"))
     if block:
         parts.append(f"features base={block.get('base', 0)}/{n} persistence={block.get('persistence', 0)}/{n}")
+    sched = Counter(i.get("schedule_block") for i in infos if i.get("schedule_block"))
+    if sched:
+        parts.append(f"schedule off={sched.get('off', 0)}/{n} on={sched.get('on', 0)}/{n}")
+    pseudo = Counter(i.get("pseudo") for i in infos if i.get("pseudo"))
+    if pseudo:
+        parts.append(f"pseudo off={pseudo.get('off', 0)}/{n} on={pseudo.get('on', 0)}/{n}")
     return "selection: " + " | ".join(parts)
 
 
 def _attach_unlabelled(table, dev_ids: list[str], args):
-    """Stream the unlabelled file (dev customers excluded), build the label-free prior, attach it."""
+    """Stream the unlabelled file (dev customers excluded), build the label-free prior and, unless
+    `--pseudo-pool 0`, the pseudo-labelling pool (a second pass); attach both."""
     dailies, rep = accumulate_file(
         args.unlabelled,
         chunksize=args.unlabelled_chunksize,
@@ -66,6 +74,9 @@ def _attach_unlabelled(table, dev_ids: list[str], args):
         exclude_ids=set(dev_ids),
     )
     prior = build_unlabelled_prior(dailies)
+    pool = {}
+    if args.pseudo_pool > 0:
+        pool = build_pool(args.unlabelled, dailies, args.pseudo_pool, chunksize=args.unlabelled_chunksize)
     del dailies
     out = Path(args.out).parent
     out.mkdir(parents=True, exist_ok=True)
@@ -75,7 +86,9 @@ def _attach_unlabelled(table, dev_ids: list[str], args):
         f"unlabelled: customers={prior.n_customers} used_q50={prior.n_q[0.5]} sensitivity={prior.sensitivity:.3f} "
         f"option={option} rows_excluded_labelled={rep['rows_excluded_labelled']}"
     )
-    return replace(table, unlabelled=prior)
+    if args.pseudo_pool > 0:
+        print(f"pseudo_pool: customers={len(pool)} max={args.pseudo_pool} min_valid_days={POOL_MIN_VALID_DAYS}")
+    return replace(table, unlabelled=prior, unlabelled_pool=pool or None)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -92,9 +105,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--unlabelled", help="unlabelled timeseries CSV for label-free Tier A options (Step 18)")
     ap.add_argument("--unlabelled-chunksize", type=int, default=500_000)
     ap.add_argument("--unlabelled-id-prefix", default="POD", help='keep only ids with this prefix ("" keeps all)')
+    ap.add_argument("--no-e1e2", action="store_true", help="drop the E1 persistence and E2 avg options (baseline)")
+    ap.add_argument("--schedule", action="store_true", help="add the schedule-robust feature-block option")
+    ap.add_argument(
+        "--pseudo-pool",
+        type=int,
+        default=300,
+        help="unlabelled customers (≥365 valid days) for the pseudo-labelling option; 0 disables; needs --unlabelled",
+    )
     args = ap.parse_args(argv)
     if args.folds and not args.cv:
         ap.error("--folds requires --cv")
+    options = DEFAULT_OPTIONS - ({"e1", "e2"} if args.no_e1e2 else set()) | ({"schedule"} if args.schedule else set())
+    fit_procedure = partial(fit, options=options)
     if args.oof_out and not args.cv:
         ap.error("--oof-out requires --cv")
 
@@ -129,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
                 print("cv skipped: fewer than 2 customers in a class")
                 splits = None
         if splits is not None:
-            res = nested_cv(fit, predict, table, labels, splits, ext_labels=ext_labels)
+            res = nested_cv(fit_procedure, predict, table, labels, splits, ext_labels=ext_labels)
             k = count_decisions(REPO / "DECISIONS.md")
             biased = " selection-biased" if k > 0 else ""
             inner_scores = [x["inner_score"] for x in res.fit_infos if np.isfinite(x.get("inner_score", np.nan))]
@@ -185,7 +208,7 @@ def main(argv: list[str] | None = None) -> int:
                     Path(args.oof_out),
                 )
 
-    model = fit(table, labels, ids)
+    model = fit_procedure(table, labels, ids)
     save_model(model, args.out)
     sel = model["selection"]
     print(

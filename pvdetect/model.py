@@ -38,12 +38,12 @@ def sigmoid(z: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-np.clip(z, -50, 50)))
 
 
-def fit_logreg(X: np.ndarray, y: np.ndarray, C: float) -> dict:
+def fit_logreg(X: np.ndarray, y: np.ndarray, C: float, sample_weight: np.ndarray | None = None) -> dict:
     from sklearn.linear_model import LogisticRegression
 
     p = standardize_params(X)
     est = LogisticRegression(C=C, class_weight="balanced", max_iter=2000)
-    est.fit(standardize(p, X), y.astype(int))
+    est.fit(standardize(p, X), y.astype(int), sample_weight=sample_weight)
     p.update(coef=est.coef_[0].tolist(), intercept=float(est.intercept_[0]))
     return p
 
