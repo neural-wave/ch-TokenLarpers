@@ -7,8 +7,8 @@ every file under DEST on the filesystem (not via git) and exits 1 when
 * a file that is not on the ``--allow`` list is a data or model dump, or lives
   under an artifacts/data directory (``check_hygiene.is_data_path``);
 * any file, allowed ones included, contains a real customer identifier
-  (``check_hygiene.ID_PATTERN``: the letters ``POD`` immediately followed by
-  digits);
+  (``check_hygiene.ID_PATTERN``: the letters ``POD`` in any case, starting a
+  word and immediately followed by digits);
 * an ``--allow`` path does not exist.
 
 ``--allow`` paths are exact files relative to DEST in POSIX form (no
