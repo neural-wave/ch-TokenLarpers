@@ -325,6 +325,8 @@ The baseline and optional frozen-encoder pipeline are integrated, including upst
 
 Upstream baseline export rehearsal (reported on `Jeffremm10/new-stack`, Step 2.5-X2, synthetic model, 2026-10-17): passed with default `python3` and fresh Python 3.12.14 dependencies; network-blocked inference on 20 synthetic customers produced repeatable output. Hybrid integration verification is recorded separately in `docs/evaluation_protocol.md`.
 
+Clean-environment rehearsal (release hardening, synthetic `generate_dataset(20, seed=9)`, 2026-10-17): **pass** — fresh `uv venv` Python 3.12.14 from `requirements.txt` (no torch), export of `bfc5507` passed `check_release.py`, socket-blocked inference 4 s for 20 customers, exact headers, 20 rows, every TRUE row dated with capacity > 0, two runs byte-identical (training 54 s).
+
 ## Canonical preprocessing checks
 
 Run the regression suite with `PYTHONPATH=src python -m pytest -q tests/test_preprocessing.py tests/test_augmentation.py` after installing dependencies. The tests construct only temporary artificial data and exercise preprocessing and synthesis.
