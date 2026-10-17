@@ -103,16 +103,51 @@ def iter_chunks(path: str | Path, chunksize: int = 500_000) -> Iterator[tuple[pd
             yield frame, {"rows_total": len(raw), **counts}
 
 
+def _stratified_test_counts(sizes: list[int], n_test: int) -> list[int]:
+    """Per-stratum test counts: proportional largest-remainder allocation of `n_test`, then moved so every
+    stratum with ≥2 customers has ≥1 on each side when another stratum can give or take one."""
+    total = sum(sizes)
+    quota = [n_test * c / total for c in sizes]
+    t = [int(np.floor(q)) for q in quota]
+    order = sorted(range(len(sizes)), key=lambda k: (-(quota[k] - t[k]), k))
+    for k in order[: n_test - sum(t)]:
+        t[k] += 1
+    lo = [1 if c >= 2 else 0 for c in sizes]
+    hi = [c - 1 if c >= 2 else c for c in sizes]
+    for k in range(len(sizes)):
+        if t[k] < lo[k]:
+            donors = [j for j in range(len(sizes)) if j != k and t[j] > lo[j]]
+            if donors:
+                j = max(donors, key=lambda j: (t[j] - quota[j], -j))
+                t[j], t[k] = t[j] - 1, t[k] + 1
+        if t[k] > hi[k]:
+            takers = [j for j in range(len(sizes)) if j != k and t[j] < hi[j]]
+            if takers:
+                j = min(takers, key=lambda j: (t[j] - quota[j], j))
+                t[j], t[k] = t[j] + 1, t[k] - 1
+    return t
+
+
 def split_by_customer(
-    path: str | Path, out_dir: str | Path, train_frac: float = 0.75, seed: int = 0, chunksize: int = 500_000
+    path: str | Path,
+    out_dir: str | Path,
+    train_frac: float = 0.75,
+    seed: int = 0,
+    chunksize: int = 500_000,
+    labels: pd.DataFrame | None = None,
+    n_test: int | None = None,
 ) -> tuple[list[str], list[str]]:
     """Write `out_dir/training.csv` and `out_dir/test.csv`: a seeded random `train_frac` of the unique
-    customer ids goes to training, the rest to test, each with all of its rows.
+    customer ids (or all but exactly `n_test`) goes to training, the rest to test, each with all of its rows.
 
+    With `labels` (`customer_id`, `pv_installed`), the test customers are drawn per `pv_installed` class in
+    proportion to the labelled customers of the time series (largest-remainder rounding, at least one per
+    class on each side when possible); labels without time-series rows are ignored and customers without a
+    label stay in training.
     Rows are copied as text (same separator and columns; leading zeros and decimal marks kept).
     Rows with an empty customer id belong to no customer and are written to neither file.
     Returns the sorted (training ids, test ids)."""
-    if not 0.0 < train_frac < 1.0:
+    if n_test is None and not 0.0 < train_frac < 1.0:
         raise ValueError("train_frac must be in (0, 1)")
     sep, _, cols = _sniff(path)
     _check_header(cols)
@@ -126,9 +161,23 @@ def split_by_customer(
     ids.discard("")
     if len(ids) < 2:
         raise ValueError(f"need at least 2 customers to split, found {len(ids)}")
-    order = np.random.default_rng(seed).permutation(sorted(ids))
-    n_train = min(max(int(round(train_frac * len(order))), 1), len(order) - 1)
-    train_ids = set(order[:n_train].tolist())
+    rng = np.random.default_rng(seed)
+
+    def n_held(n: int) -> int:
+        k = n - min(max(int(round(train_frac * n)), 1), n - 1) if n_test is None else int(n_test)
+        if not 1 <= k <= n - 1:
+            raise ValueError(f"n_test must be in [1, {n - 1}]")
+        return k
+
+    if labels is None:
+        order = rng.permutation(sorted(ids))
+        train_ids = set(order[: len(order) - n_held(len(order))].tolist())
+    else:
+        pv = dict(zip(labels["customer_id"].astype(str).str.strip(), labels["pv_installed"].astype(bool).tolist()))
+        strata = [s for s in (sorted(c for c in ids if c in pv and pv[c] == v) for v in (False, True)) if s]
+        counts = _stratified_test_counts([len(s) for s in strata], n_held(sum(len(s) for s in strata)))
+        test_ids = {c for s, k in zip(strata, counts) for c in rng.permutation(s)[:k].tolist()}
+        train_ids = ids - test_ids
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)

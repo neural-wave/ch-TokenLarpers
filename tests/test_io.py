@@ -96,3 +96,51 @@ def test_split_by_customer_partitions_customers_and_rows(tmp_path):
 
     assert split_by_customer(src, tmp_path / "b", seed=3) == (train, test)
     assert split_by_customer(src, tmp_path / "c", seed=4) != (train, test)
+
+
+def _labelled_series(tmp_path, n_pv: int, n_non: int, unlabelled: int = 0):
+    ids = [f"{i:05d}" for i in range(1, n_pv + n_non + unlabelled + 1)]
+    df = pd.concat(
+        [generate_customer(CustomerSpec(c, "2024-03-01", "2024-03-03", missing=False), i) for i, c in enumerate(ids)],
+        ignore_index=True,
+    )
+    src = tmp_path / "in.csv"
+    df.to_csv(src, index=False, sep=";")
+    labels = pd.DataFrame({"customer_id": ids[: n_pv + n_non], "pv_installed": [True] * n_pv + [False] * n_non})
+    return src, labels, ids
+
+
+@pytest.mark.parametrize(
+    ("sizes", "n_test", "expected"),
+    [([20, 20], 10, [5, 5]), ([7, 5], 4, [2, 2]), ([9, 2], 2, [1, 1]), ([30, 10], 10, [8, 2]), ([1, 5], 2, [0, 2])],
+)
+def test_stratified_counts_largest_remainder_with_one_per_side(sizes, n_test, expected):
+    from pvdetect.io import _stratified_test_counts
+
+    assert _stratified_test_counts(sizes, n_test) == expected
+
+
+def test_stratified_split_class_counts_disjoint_and_deterministic(tmp_path):
+    src, labels, ids = _labelled_series(tmp_path, n_pv=5, n_non=7)
+    pv = set(labels.loc[labels["pv_installed"], "customer_id"])
+    train, test = split_by_customer(src, tmp_path / "a", seed=2026, labels=labels, n_test=4, chunksize=500)
+    assert not set(train) & set(test) and sorted(train + test) == ids
+    assert (len(set(test) & pv), len(set(test) - pv)) == (2, 2)
+    assert (len(set(train) & pv), len(set(train) - pv)) == (3, 5)
+    te = pd.read_csv(tmp_path / "a" / "test.csv", sep=";", dtype=str, keep_default_na=False)
+    assert sorted(set(te["customer_id"])) == test
+    assert split_by_customer(src, tmp_path / "b", seed=2026, labels=labels, n_test=4) == (train, test)
+    draws = {tuple(split_by_customer(src, tmp_path / f"s{s}", seed=s, labels=labels, n_test=4)[1]) for s in range(5)}
+    assert len(draws) > 1
+
+
+def test_stratified_split_ignores_labels_without_rows_and_keeps_unlabelled_in_training(tmp_path):
+    src, labels, ids = _labelled_series(tmp_path, n_pv=3, n_non=6, unlabelled=2)
+    ghosts = pd.DataFrame({"customer_id": ["99991", "99992", "99993"], "pv_installed": [True, True, False]})
+    base = split_by_customer(src, tmp_path / "a", seed=7, labels=labels, n_test=3)
+    assert split_by_customer(src, tmp_path / "b", seed=7, labels=pd.concat([labels, ghosts]), n_test=3) == base
+    assert set(ids[-2:]) <= set(base[0])
+    pv = set(labels.loc[labels["pv_installed"], "customer_id"])
+    assert (len(set(base[1]) & pv), len(set(base[1]) - pv)) == (1, 2)
+    with pytest.raises(ValueError, match="n_test"):
+        split_by_customer(src, tmp_path / "c", seed=7, labels=labels, n_test=9)
