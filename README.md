@@ -71,7 +71,7 @@ Matched run (data holder, private directory only):
 python -m neuralwave_data.prepare <manifest> --out <private>/prep_s{0,1,2} --folds 5 --seed {0,1,2}
 python train.py --timeseries <dev energy> --labels <dev labels> --out <private>/pvdetect/model.json --cv \
   --folds <private>/prep_s0/splits.parquet,<private>/prep_s1/splits.parquet,<private>/prep_s2/splits.parquet \
-  --oof-out <private>/pvdetect_oof.csv
+  --oof-out <private>/pvdetect_oof.csv --report-dir <private>/pvdetect_report
 python -m neuralwave_experiment.evaluation --canonical-dir <private>/canonical --out <private>/patchtst \
   --data-kind development --splits <private>/prep_s0/splits.parquet,<private>/prep_s1/splits.parquet,<private>/prep_s2/splits.parquet
 python -m neuralwave_experiment.oof_contract --labels <dev labels> <private>/pvdetect_oof.csv <private>/patchtst/oof_patchtst_scratch.csv
@@ -105,7 +105,7 @@ Use `--device cuda` only on a verified CUDA host. `--max-steps N` pauses cleanly
 ```
 python train.py --timeseries <private>/energy.csv --labels <private>/labels.csv \
   --out <private>/hybrid/model.json --cv --folds <same split files> --oof-out <private>/hybrid_oof.csv \
-  --embedding-checkpoint <private>/pretrain/encoder --feature-block auto
+  --embedding-checkpoint <private>/pretrain/encoder --feature-block auto --report-dir <private>/hybrid_report
 ```
 
 The frozen encoder produces label-free customer summaries. Imputation, scaling and the four-component projection are fit only on the current training customers, including inside inner folds. Physical features, date detection and capacity estimation remain intact. `auto` compares baseline and embedding candidates on identical inner folds using complete predictions and the existing margin/bootstrap rule; outer results never choose the feature block. `--feature-block embedding` is a forced diagnostic, not an adoption decision. A selected baseline saves no encoder dependency; a selected hybrid saves the exact hash-checked `encoder/` pair with model schema v3.
