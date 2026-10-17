@@ -24,7 +24,11 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from neuralwave_experiment.encoder import EncoderConfig
 from neuralwave_experiment.encoder_factory import build_encoder
+from neuralwave_experiment.oof_contract import OOFRow, load_split_files, write_oof_predictions
 from neuralwave_experiment.windows import WindowConfig, WindowBatch, build_windows
+
+# The configuration every Task 1 checkpoint is trained and loaded with.
+TASK1_ENCODER_CONFIG = EncoderConfig(context_length=672, patch_length=16, d_model=64, n_heads=4, n_layers=2, dropout=0.2)
 
 
 class WindowClassifier(nn.Module):
@@ -286,129 +290,141 @@ def train_fold(
     return fold_res, val_traces, {"train_loss": history}
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Run Task 1 Window Classifier across 5 folds")
+def _pooled_metrics(all_ids: list[str], pooled_true: dict[str, bool], pooled_preds: dict[str, bool]) -> dict[str, float | int]:
+    y_true = np.array([pooled_true[c] for c in all_ids])
+    y_pred = np.array([pooled_preds[c] for c in all_ids])
+    tp = int(np.sum(y_pred & y_true)); fp = int(np.sum(y_pred & ~y_true))
+    fn = int(np.sum(~y_pred & y_true)); tn = int(np.sum(~y_pred & ~y_true))
+    prec = tp / max(1, tp + fp); rec = tp / max(1, tp + fn)
+    f1 = 2 * prec * rec / max(1e-8, prec + rec)
+    return {"f1": float(f1), "precision": float(prec), "recall": float(rec),
+            "tp": tp, "fp": fp, "fn": fn, "tn": tn, "task1_score_pts": float(f1 * 70.0)}
+
+
+def run_repeat(repeat: int, fold_map: dict[str, int], all_ids: list[str], windows_dict: dict[str, WindowBatch],
+               labels: pd.DataFrame, enc_cfg: EncoderConfig, backend: str, epochs: int, device: str,
+               seed: int, out: Path) -> tuple[dict[str, Any], dict[str, Any], list[OOFRow]]:
+    """Train and score every fold of one split file (one outer repeat).
+
+    Checkpoints are written only for repeat 0 (``task1_model_fold_<k>.pt``).
+    """
+    folds = sorted(set(fold_map.values()))
+    fold_results, traces, oof_rows = [], {}, []
+    pooled_preds: dict[str, bool] = {}
+    pooled_true: dict[str, bool] = {}
+    for fold in folds:
+        t_fold = time.time()
+        val_ids = [c for c in all_ids if fold_map[c] == fold]
+        train_ids = [c for c in all_ids if fold_map[c] != fold]
+        fold_res, val_traces, _ = train_fold(
+            fold=fold, train_ids=train_ids, val_ids=val_ids, windows_dict=windows_dict, labels_df=labels,
+            enc_cfg=enc_cfg, backend=backend, epochs=epochs, device=device, seed=seed + 1000 * repeat,
+            out_dir=out if repeat == 0 else None,  # checkpoints of the first repeat serve wild inference
+        )
+        fold_results.append(fold_res)
+        traces.update(val_traces)
+        pooled_preds.update(fold_res["customer_preds"])
+        pooled_true.update(fold_res["customer_true"])
+        for cid in val_ids:
+            oof_rows.append(OOFRow(customer_id=cid, repeat=repeat, fold=int(fold),
+                                   prob=float(fold_res["customer_scores"][cid]),
+                                   pv_installed=bool(fold_res["customer_preds"][cid])))
+        print(f"  repeat {repeat} fold {fold}: Train F1={fold_res['train_f1']:.3f} | Val F1={fold_res['val_f1']:.3f} "
+              f"(P={fold_res['val_precision']:.2f}, R={fold_res['val_recall']:.2f}) | TP={fold_res['tp']} FP={fold_res['fp']} "
+              f"FN={fold_res['fn']} TN={fold_res['tn']} [{time.time() - t_fold:.1f}s]")
+    pooled = _pooled_metrics(all_ids, pooled_true, pooled_preds)
+    summary = {"repeat": repeat, "pooled": pooled, "folds": fold_results,
+               "pooled_true": pooled_true, "pooled_preds": pooled_preds}
+    return summary, traces, oof_rows
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run the Task 1 window classifier over customer-disjoint folds")
     parser.add_argument("--canonical-dir", default="data_private/patchtst_comparison_canonical")
+    parser.add_argument("--splits", default=None,
+                        help="comma-separated split files (parquet or CSV with customer_id,fold); each is one outer repeat. "
+                             "Default: <canonical-dir>/splits.parquet")
+    parser.add_argument("--oof-out", default=None,
+                        help="write the shared out-of-fold prediction file (customer_id;repeat;fold;prob;pv_installed;...)")
     parser.add_argument("--backend", default="official_patchtst", choices=["official_patchtst", "custom"])
     parser.add_argument("--epochs", type=int, default=8)
     parser.add_argument("--stride-days", type=int, default=2)
     parser.add_argument("--max-windows", type=int, default=250)
+    parser.add_argument("--seed", type=int, default=17)
+    parser.add_argument("--device", default="cpu")
     parser.add_argument("--out-dir", default="artifacts_private/task1_results")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     canonical = Path(args.canonical_dir)
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
     labels = pd.read_parquet(canonical / "labels.parquet")
-    splits = pd.read_parquet(canonical / "splits.parquet")
     labels["customer_id"] = labels["customer_id"].astype(str)
-    splits["customer_id"] = splits["customer_id"].astype(str)
-
     all_ids = labels["customer_id"].tolist()
-    fold_map = dict(zip(splits["customer_id"], splits["fold"]))
-    folds = sorted(set(fold_map.values()))
+    n_pos = int(labels.pv_installed.sum()); n_neg = int(len(labels) - n_pos)
+    split_paths = [p.strip() for p in args.splits.split(",")] if args.splits else [str(canonical / "splits.parquet")]
+    fold_maps = load_split_files(split_paths, all_ids)
 
     print(f"=== Running Task 1 Window-Level Classifier ({args.backend}) ===")
-    print(f"Total customers: {len(all_ids)} (PV: {labels.pv_installed.sum()}, Non-PV: {(~labels.pv_installed).sum()})")
-    print(f"Folds: {len(folds)} (5-fold GroupKFold)")
+    print(f"Total customers: {len(all_ids)} (PV: {n_pos}, Non-PV: {n_neg})")
+    print(f"Repeats: {len(fold_maps)} split file(s); folds per repeat: {[len(set(m.values())) for m in fold_maps]}")
 
-    # 1. Build windows once
+    # 1. Build windows once (label-free, shared by every repeat)
     stride_steps = args.stride_days * 96
-    win_cfg = WindowConfig(context_length=672, stride=stride_steps, min_observed_fraction=0.75, max_windows_per_customer=args.max_windows)
+    win_cfg = WindowConfig(context_length=TASK1_ENCODER_CONFIG.context_length, stride=stride_steps,
+                           min_observed_fraction=0.75, max_windows_per_customer=args.max_windows)
     print(f"Extracting 7-day windows (stride={args.stride_days} days, max={args.max_windows}/cust)...")
     t0 = time.time()
     windows_dict = extract_customer_windows(canonical, all_ids, win_cfg)
     total_w = sum(len(b.customer_ids) for b in windows_dict.values())
-    print(f"Extracted {total_w} total windows across {len(windows_dict)} customers in {time.time()-t0:.1f}s")
+    print(f"Extracted {total_w} total windows across {len(windows_dict)} customers in {time.time() - t0:.1f}s")
 
-    # 2. Run cross validation
-    enc_cfg = EncoderConfig(context_length=672, patch_length=16, d_model=64, n_heads=4, n_layers=2, dropout=0.2)
-    all_fold_res = []
-    all_traces = {}
-    pooled_preds = {}
-    pooled_true = {}
+    # 2. One nested run per split file
+    repeat_summaries, all_traces, all_oof = [], {}, []
+    for repeat, fold_map in enumerate(fold_maps):
+        summary, traces, oof_rows = run_repeat(repeat, fold_map, all_ids, windows_dict, labels, TASK1_ENCODER_CONFIG,
+                                               args.backend, args.epochs, args.device, args.seed, out)
+        pooled = summary["pooled"]
+        print(f"repeat {repeat}: pooled F1={pooled['f1']:.4f} precision={pooled['precision']:.4f} recall={pooled['recall']:.4f} "
+              f"TP={pooled['tp']}/{n_pos} FP={pooled['fp']}/{n_neg} FN={pooled['fn']} TN={pooled['tn']}")
+        repeat_summaries.append(summary)
+        all_traces[f"repeat_{repeat}"] = traces
+        all_oof.extend(oof_rows)
 
-    for fold in folds:
-        t_fold = time.time()
-        val_ids = [c for c in all_ids if fold_map[c] == fold]
-        train_ids = [c for c in all_ids if fold_map[c] != fold]
+    f1s = np.array([s["pooled"]["f1"] for s in repeat_summaries], dtype=float)
+    print("\n" + "=" * 50)
+    print(f"=== POOLED OUT-OF-FOLD RESULTS ({len(all_ids)} CUSTOMERS, {len(f1s)} REPEAT(S)) ===")
+    print("=" * 50)
+    print(f"Task 1 F1 mean:  {f1s.mean():.4f} ± {(f1s.std(ddof=1) if len(f1s) > 1 else 0.0):.4f}")
+    print(f"Task 1 Points:   {70.0 * f1s.mean():.2f} / 70.00")
+    print("=" * 50)
 
-        fold_res, val_traces, meta = train_fold(
-            fold=fold,
-            train_ids=train_ids,
-            val_ids=val_ids,
-            windows_dict=windows_dict,
-            labels_df=labels,
-            enc_cfg=enc_cfg,
-            backend=args.backend,
-            epochs=args.epochs,
-            device="cpu",
-            out_dir=out,
-        )
-        all_fold_res.append(fold_res)
-        all_traces.update(val_traces)
-        pooled_preds.update(fold_res["customer_preds"])
-        pooled_true.update(fold_res["customer_true"])
-
-        print(f"  Fold {fold}: Train F1={fold_res['train_f1']:.3f} | Val F1={fold_res['val_f1']:.3f} (P={fold_res['val_precision']:.2f}, R={fold_res['val_recall']:.2f}) | TP={fold_res['tp']} FP={fold_res['fp']} FN={fold_res['fn']} TN={fold_res['tn']} [{time.time()-t_fold:.1f}s]")
-
-    # 3. Compute Pooled Out-of-Fold Metrics
-    y_true_all = np.array([pooled_true[c] for c in all_ids])
-    y_pred_all = np.array([pooled_preds[c] for c in all_ids])
-
-    tp_all = int(np.sum((y_pred_all == 1) & (y_true_all == 1)))
-    fp_all = int(np.sum((y_pred_all == 1) & (y_true_all == 0)))
-    fn_all = int(np.sum((y_pred_all == 0) & (y_true_all == 1)))
-    tn_all = int(np.sum((y_pred_all == 0) & (y_true_all == 0)))
-
-    prec_all = tp_all / max(1, tp_all + fp_all)
-    rec_all = tp_all / max(1, tp_all + fn_all)
-    f1_all = 2 * prec_all * rec_all / max(1e-8, prec_all + rec_all)
-    task1_points = f1_all * 70.0
-
-    print("\n" + "="*50)
-    print("=== POOLED OUT-OF-FOLD RESULTS (40 CUSTOMERS) ===")
-    print("="*50)
-    print(f"True Positives:  {tp_all} / 22")
-    print(f"False Positives: {fp_all} / 18 (False alarms)")
-    print(f"False Negatives: {fn_all} / 22 (Missed PV)")
-    print(f"True Negatives:  {tn_all} / 18")
-    print(f"Precision:       {prec_all:.4f}")
-    print(f"Recall:          {rec_all:.4f}")
-    print(f"Task 1 F1 Score: {f1_all:.4f}")
-    print(f"Task 1 Points:   {task1_points:.2f} / 70.00")
-    print("="*50)
-
-    # Save artifacts
+    first = repeat_summaries[0]
     results_summary = {
-        "backend": args.backend,
-        "epochs": args.epochs,
-        "pooled": {
-            "f1": float(f1_all),
-            "precision": float(prec_all),
-            "recall": float(rec_all),
-            "tp": tp_all, "fp": fp_all, "fn": fn_all, "tn": tn_all,
-            "task1_score_pts": float(task1_points)
-        },
-        "folds": all_fold_res
+        "backend": args.backend, "epochs": args.epochs, "seed": args.seed,
+        "split_files": split_paths, "n_repeats": len(repeat_summaries),
+        "pooled": first["pooled"], "folds": first["folds"],
+        "repeats": [{"repeat": s["repeat"], "pooled": s["pooled"], "folds": s["folds"]} for s in repeat_summaries],
+        "pooled_f1_mean": float(f1s.mean()),
+        "pooled_f1_sd": float(f1s.std(ddof=1)) if len(f1s) > 1 else 0.0,
     }
     (out / "task1_summary.json").write_text(json.dumps(results_summary, indent=2))
     (out / "task1_traces.json").write_text(json.dumps(all_traces, indent=2))
 
-    # Save prediction table
     pred_df = pd.DataFrame([
-        {
-            "customer_id": cid,
-            "pv_installed_true": pooled_true[cid],
-            "pv_installed_pred": pooled_preds[cid],
-            "correct": pooled_true[cid] == pooled_preds[cid]
-        }
-        for cid in all_ids
+        {"customer_id": cid, "repeat": s["repeat"], "pv_installed_true": s["pooled_true"][cid],
+         "pv_installed_pred": s["pooled_preds"][cid], "correct": s["pooled_true"][cid] == s["pooled_preds"][cid]}
+        for s in repeat_summaries for cid in all_ids
     ])
     pred_df.to_csv(out / "task1_predictions.csv", index=False)
+
+    if args.oof_out:
+        path = write_oof_predictions(all_oof, args.oof_out)
+        print(f"Wrote shared out-of-fold predictions to {path}")
     print(f"Saved results and traces to {out}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
