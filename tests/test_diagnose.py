@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -77,6 +79,28 @@ def test_oof_file_selects_one_repeat(tmp_path):
     assert n == 2 and p0["pv_installed"].tolist() == [True] and p1["pv_installed"].tolist() == [False]
     with pytest.raises(ValueError, match="repeat 5"):
         diagnose.load_predictions(tmp_path / "oof.csv", 5)
+
+
+def test_oof_file_is_scored_only_on_its_own_customers(tmp_path, capsys):
+    """After `--split-dir` the OOF file covers only the training customers; held-out ones are not misses."""
+    oof = [
+        "customer_id;repeat;fold;prob;pv_installed;pv_installation_date;pv_capacity_kwp",
+        "001;0;0;0.9;TRUE;2023-06-01;10.00",
+        "002;0;1;0.1;FALSE;;",
+    ]
+    (tmp_path / "oof.csv").write_text("\n".join(oof) + "\n")
+    labels = [
+        "customer_id;pv_installed;pv_installation_date;pv_capacity_kwp",
+        "001;TRUE;2023-06-01;10",
+        "002;FALSE;;",
+        "003;TRUE;2024-01-01;5",
+    ]
+    (tmp_path / "labels.csv").write_text("\n".join(labels) + "\n")
+    diagnose.main([str(tmp_path / "oof.csv"), str(tmp_path / "labels.csv"), "--out-dir", str(tmp_path / "priv")])
+    out = capsys.readouterr().out
+    assert "repeat 0 of 1" in out and "1 labelled customers are not in the out-of-fold file" in out
+    doc = json.loads((tmp_path / "priv" / diagnose.DIAGNOSIS_FILE).read_text())
+    assert doc["out_of_fold"] is True and doc["counts"] == {"TP": 1, "FP": 0, "FN": 0, "TN": 1}
 
 
 def test_out_dir_inside_repository_is_refused(tmp_path, pair):
