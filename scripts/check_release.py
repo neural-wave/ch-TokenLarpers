@@ -36,6 +36,25 @@ from check_hygiene import has_customer_identifier, is_data_path  # noqa: E402
 REDACTED = "<path containing a customer identifier>"
 
 
+def model_files(model: dict) -> list[str]:
+    """Sibling files a model.json references, as safe relative POSIX paths.
+
+    Standard library only, so the export runs with any interpreter.  Must mirror
+    ``pvdetect.model.referenced_files`` (``tests/test_release.py`` checks that).
+    Raises ``ValueError`` for absolute, parent-relative or otherwise unsafe names.
+    """
+    names = []
+    for section in ("classifier", "capacity"):
+        name = (model.get(section) or {}).get("catboost_file")
+        if not name:
+            continue
+        path = PurePosixPath(name)
+        if path.is_absolute() or ".." in path.parts or "\n" in name or "\\" in name:
+            raise ValueError("unsafe referenced file name in model.json")
+        names.append(path.as_posix())
+    return names
+
+
 def _id_in_path(path: str) -> bool:
     return has_customer_identifier(path.encode("utf-8", "surrogateescape"))
 

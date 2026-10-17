@@ -145,3 +145,43 @@ def test_release_identifier_in_file_name_is_refused_without_echoing_it(tmp_path:
     assert result.returncode == 1
     assert "customer identifier in path" in result.stdout
     assert identifier not in result.stdout + result.stderr
+
+
+def test_release_model_file_listing_mirrors_referenced_files():
+    """The export lists model files with check_release.model_files (stdlib only); it must agree with
+    pvdetect.model.referenced_files and refuse unsafe names."""
+    sys.path.insert(0, str(RELEASE_SCRIPT.parent))
+    from check_release import model_files
+
+    both = {"classifier": {"catboost_file": "catboost_clf.cbm"}, "capacity": {"catboost_file": "catboost_cap.cbm"}}
+    for model in (both, {"classifier": {"catboost_file": None}, "capacity": {}}, {}):
+        assert model_files(model) == referenced_files(model)
+    for unsafe in ("../escape.cbm", "/abs.cbm", "a\\b.cbm"):
+        try:
+            model_files({"classifier": {"catboost_file": unsafe}})
+        except ValueError:
+            continue
+        raise AssertionError(f"unsafe name accepted: {unsafe!r}")
+
+
+def test_export_runs_without_site_packages(tmp_path: Path):
+    """The export works with an interpreter that cannot import numpy or pvdetect's dependencies."""
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "model.json").write_text(
+        '{"version": 2, "classifier": {"catboost_file": null}, "capacity": {"catboost_file": "catboost_cap.cbm"}}\n',
+        encoding="utf-8",
+    )
+    (model_dir / "catboost_cap.cbm").write_bytes(b"\x00fabricated model bytes\x01")
+    bare = tmp_path / "bare_python"
+    bare.write_text(f'#!/bin/sh\nexec "{sys.executable}" -S "$@"\n', encoding="utf-8")
+    bare.chmod(0o755)
+    probe = subprocess.run([str(bare), "-c", "import numpy"], capture_output=True)
+    assert probe.returncode != 0, "the bare interpreter must not see site-packages"
+    dest = tmp_path / "export"
+    result = subprocess.run(
+        ["sh", str(REPO / "scripts" / "export_submission.sh"), "HEAD", str(dest), str(model_dir)],
+        capture_output=True, text=True, env={"PATH": "/usr/bin:/bin", "PYTHON": str(bare)},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert sorted(p.name for p in (dest / "artifacts").iterdir()) == ["catboost_cap.cbm", "model.json"]
