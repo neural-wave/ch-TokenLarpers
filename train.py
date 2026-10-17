@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 from pvdetect.evaluation import REGIMES, count_decisions, load_split_file, nested_cv, outer_splits, splits_from_fold_map
-from pvdetect.io import load_extension_labels, load_labels, load_timeseries
+from pvdetect.io import load_extension_labels, load_labels, load_timeseries, split_by_customer
 from pvdetect.model import save_model
 from pvdetect.output import write_oof
 from pvdetect.pipeline import build_feature_table, predict
@@ -113,6 +113,12 @@ def main(argv: list[str] | None = None) -> int:
         default=300,
         help="unlabelled customers (≥365 valid days) for the pseudo-labelling option; 0 disables; needs --unlabelled",
     )
+    ap.add_argument(
+        "--split-dir",
+        help="split --timeseries by customer into DIR/training.csv and DIR/test.csv, then train on training.csv only",
+    )
+    ap.add_argument("--split-frac", type=float, default=0.75, help="share of customers in training.csv")
+    ap.add_argument("--split-seed", type=int, default=0)
     args = ap.parse_args(argv)
     if args.folds and not args.cv:
         ap.error("--folds requires --cv")
@@ -121,12 +127,27 @@ def main(argv: list[str] | None = None) -> int:
     if args.oof_out and not args.cv:
         ap.error("--oof-out requires --cv")
 
-    loaded = load_timeseries(args.timeseries)
+    timeseries, input_ids, held_out = args.timeseries, None, set()
+    if args.split_dir:
+        split_dir = Path(args.split_dir).expanduser().resolve()
+        if split_dir == REPO or REPO in split_dir.parents:
+            ap.error("--split-dir is inside the repository; choose a private folder outside it")
+        train_ids, test_ids = split_by_customer(
+            args.timeseries, split_dir, train_frac=args.split_frac, seed=args.split_seed
+        )
+        input_ids, held_out = train_ids + test_ids, set(test_ids)
+        timeseries = split_dir / "training.csv"
+        print(f"split: customers={len(input_ids)} training={len(train_ids)} test={len(test_ids)} seed={args.split_seed}")
+
+    loaded = load_timeseries(timeseries)
     labels = load_labels(args.labels)
+    labels = labels[~labels["customer_id"].isin(held_out)].reset_index(drop=True)
     missing = set(labels["customer_id"]) - set(loaded.customer_ids)
     if missing:
         raise ValueError(f"{len(missing)} labelled customers missing from timeseries")
     ext_labels = load_extension_labels(args.ext_labels) if args.ext_labels else None
+    if ext_labels is not None:
+        ext_labels = ext_labels[~ext_labels["customer_id"].isin(held_out)].reset_index(drop=True)
     ids = labels["customer_id"].tolist()
     fold_maps = [load_split_file(p, ids) for p in args.folds.split(",")] if args.folds else None
     table = build_feature_table(loaded)
@@ -140,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
         f"rows_bad_energy={rep['rows_bad_energy']} rows_duplicate={rep['rows_duplicate']}"
     )
     if args.unlabelled:
-        table = _attach_unlabelled(table, loaded.customer_ids, args)
+        table = _attach_unlabelled(table, input_ids or loaded.customer_ids, args)
 
     if args.cv:
         if fold_maps is not None:

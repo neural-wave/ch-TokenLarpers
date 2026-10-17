@@ -103,6 +103,44 @@ def iter_chunks(path: str | Path, chunksize: int = 500_000) -> Iterator[tuple[pd
             yield frame, {"rows_total": len(raw), **counts}
 
 
+def split_by_customer(
+    path: str | Path, out_dir: str | Path, train_frac: float = 0.75, seed: int = 0, chunksize: int = 500_000
+) -> tuple[list[str], list[str]]:
+    """Write `out_dir/training.csv` and `out_dir/test.csv`: a seeded random `train_frac` of the unique
+    customer ids goes to training, the rest to test, each with all of its rows.
+
+    Rows are copied as text (same separator and columns; leading zeros and decimal marks kept).
+    Rows with an empty customer id belong to no customer and are written to neither file.
+    Returns the sorted (training ids, test ids)."""
+    if not 0.0 < train_frac < 1.0:
+        raise ValueError("train_frac must be in (0, 1)")
+    sep, _, cols = _sniff(path)
+    _check_header(cols)
+    kw = dict(sep=sep, dtype=str, keep_default_na=False, encoding="utf-8-sig", chunksize=chunksize)
+    id_col = pd.read_csv(path, sep=sep, nrows=0, encoding="utf-8-sig").columns[cols.index("customer_id")]
+
+    ids: set[str] = set()
+    with pd.read_csv(path, usecols=[id_col], **kw) as reader:
+        for raw in reader:
+            ids.update(raw[id_col].str.strip())
+    ids.discard("")
+    if len(ids) < 2:
+        raise ValueError(f"need at least 2 customers to split, found {len(ids)}")
+    order = np.random.default_rng(seed).permutation(sorted(ids))
+    n_train = min(max(int(round(train_frac * len(order))), 1), len(order) - 1)
+    train_ids = set(order[:n_train].tolist())
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    paths = {True: out / "training.csv", False: out / "test.csv"}
+    with pd.read_csv(path, **kw) as reader:
+        for i, raw in enumerate(reader):
+            key = raw[id_col].str.strip()
+            for is_train, dest in paths.items():
+                part = raw[key.isin(train_ids)] if is_train else raw[(key != "") & ~key.isin(train_ids)]
+                part.to_csv(dest, sep=sep, index=False, header=i == 0, mode="w" if i == 0 else "a", encoding="utf-8")
+    return sorted(train_ids), sorted(ids - train_ids)
+
 
 def local_dates(epoch_s: np.ndarray) -> np.ndarray:
     """Europe/Zurich calendar dates (datetime64[D]) for UTC epoch seconds."""

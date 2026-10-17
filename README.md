@@ -42,7 +42,7 @@ History and visibility: commits `e303f6d`, `1f875b6`, `a65b552` and `086eda8` on
 ## Train
 
 ```
-python train.py --timeseries energy.csv --labels labels.csv --out <private>/model.json [--cv] [--outer-repeats 4] [--report-dir DIR] [--folds F0,F1,...] [--oof-out PATH] [--unlabelled <private>/unlabelled.csv]
+python train.py --timeseries energy.csv --labels labels.csv --out <private>/model.json [--cv] [--outer-repeats 4] [--report-dir DIR] [--folds F0,F1,...] [--oof-out PATH] [--unlabelled <private>/unlabelled.csv] [--split-dir <private>/split [--split-frac 0.75] [--split-seed 0]]
 ```
 
 `--cv` runs nested customer-level cross-validation of the whole training procedure and prints aggregate lines only: `data:` (including whether readings are signed, which switches export features on), `nested:` (score ± SD over repeats, bootstrap 90% interval, F1/D/P, `inner=`/`gap=` for the inner-vs-outer score gap, and `outer_informed_decisions=k`), `points_lost:` (the exact split of `100 − score` into detection `100·(1−F1)`, dates `15·F1·(1−D)` and capacity `15·F1·(1−P)`, with the largest named; it picks the Step 2.5-E branch), `dates:` (date accuracy per regime), `regime_confusion:`, `selection:` (how often each inner-CV choice was made). These lines are AIL-derived: they stay with the team and never go into an agent session (organizer answer 6). The final model is always fit on all labelled customers. `--report-dir` writes the repeat-0 out-of-fold table (`oof_repeat0.csv`) and selection records. A model trained on real data goes to a private path outside this repository; it reaches the NW_26 repository only through the export below (`## Submission export`).
@@ -58,6 +58,8 @@ Option switches for single-change experiments: `--no-e1e2` disables the E1/E2 op
 `inner=` is the mean inner-CV score of the final selected configuration over the outer fits, and `gap=` is `inner` minus the nested score. After the capacity model, κ and the date rule are chosen, the decision threshold is rescored once on those final inner out-of-fold outputs (same grid, same tie-breaking); `threshold_initial`/`inner_score_initial` in the selection records keep the pre-rescoring values. The gap is a warning signal, not a measure of overfitting: inner and outer scores come from different customer sets and training sizes. A gap above about 5 points calls for a look at selection stability (the `selection:` line); it proves nothing alone.
 
 Dates come from one of three regimes: `event` (detected changepoint + learned offset), `present_at_start` (PV already present when data starts: first date − learned lag), `insufficient` (weak candidate or first date, chosen by inner CV).
+
+`--split-dir DIR` (optional) first splits `--timeseries` by customer: the unique customer ids are shuffled with `--split-seed` (default 0), a `--split-frac` share (default 0.75, rounded) goes to `DIR/training.csv` and the rest to `DIR/test.csv`, each file holding every row of its customers as text (same separator and columns, leading zeros kept; rows with an empty id go to neither). Training, `--cv` included, then runs on `training.csv` only: labelled and extension customers in `test.csv` are dropped from `--labels`/`--ext-labels`, and `--unlabelled` excludes every customer of the original input. It prints one `split:` line with counts. `DIR` must be outside the repository. Score the held-out customers by running inference on `DIR/test.csv` with the saved model.
 
 ### Shared-fold comparison
 
