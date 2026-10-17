@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from pvdetect.scoring import extension_bonus, main_score
+from pvdetect.scoring import bootstrap_weights, extension_bonus, main_score, score_components, weighted_scores
 
 REGIMES = ("event", "present_at_start", "insufficient")
 
@@ -132,19 +132,15 @@ def regime_stats(pred: pd.DataFrame, truth: pd.DataFrame) -> dict:
     return {"by_regime": stats, "confusion": confusion}
 
 
-def bootstrap_ci(pred: pd.DataFrame, truth: pd.DataFrame, B: int = 1000, seed: int = 0) -> tuple[float, float]:
-    """90% customer-bootstrap interval of the main score (uncertainty description only)."""
-    rng = np.random.default_rng(seed)
+def bootstrap_ci(preds: list[pd.DataFrame], truth: pd.DataFrame, B: int = 1000, seed: int = 0) -> tuple[float, float]:
+    """90% customer-bootstrap interval of the main score averaged over repeats (uncertainty description only).
+
+    Each draw resamples the truth customers once, scores every repeat's predictions on that resample and
+    averages the repeat scores; with one repeat this is the plain customer bootstrap."""
     t = truth.reset_index(drop=True)
-    p = pred.set_index("customer_id").loc[t["customer_id"]].reset_index()
-    n = len(t)
-    scores = []
-    for _ in range(B):
-        idx = rng.integers(0, n, n)
-        tt = t.iloc[idx].assign(customer_id=[f"b{i}" for i in range(n)])
-        pp = p.iloc[idx].assign(customer_id=[f"b{i}" for i in range(n)])
-        scores.append(main_score(pp, tt)["score"])
-    return float(np.quantile(scores, 0.05)), float(np.quantile(scores, 0.95))
+    W = bootstrap_weights(len(t), B, seed)
+    draws = np.mean([weighted_scores(W, score_components(p, t)) for p in preds], axis=0)
+    return float(np.quantile(draws, 0.05)), float(np.quantile(draws, 0.95))
 
 
 @dataclass
@@ -191,8 +187,8 @@ def nested_cv(
             pooled_ext = pd.concat([e for e in exts if len(e)], ignore_index=True) if any(len(e) for e in exts) else exts[0]
             res.ext_scores.append(extension_bonus(pooled_ext, ext_labels))
     if bootstrap and res.oof:
-        truth0 = labels[labels["customer_id"].isin(res.oof[0]["customer_id"])]
-        res.ci90 = bootstrap_ci(res.oof[0], truth0, B=bootstrap)
+        scored = set().union(*(set(p["customer_id"]) for p in res.oof))
+        res.ci90 = bootstrap_ci(res.oof, labels[labels["customer_id"].isin(scored)], B=bootstrap)
     return res
 
 

@@ -316,7 +316,7 @@ def generate_customer(spec: CustomerSpec, seed: int, variant: Literal["A", "B"] 
 - `NestedResult` fields:
   - `repeat_scores`;
   - `mean` and `sd`;
-  - `ci90`: 1000 customer-bootstrap resamples (`default_rng(0)`) of the repeat-0 pooled predictions. This describes uncertainty only; it never decides anything;
+  - `ci90`: 1000 customer-bootstrap resamples (`default_rng(0)`) pooled over all repeats: each draw resamples the customers once and averages every repeat's score on them (protocol v2; repeat 0 only before). This describes uncertainty only; it never decides anything;
   - `oof`;
   - `fit_infos` (selection records).
 
