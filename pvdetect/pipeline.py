@@ -188,6 +188,13 @@ def capacity_log(cap: dict, objects: dict, F: pd.DataFrame, names: list[str], ki
     return out
 
 
+def apply_cap_band(kwp: np.ndarray, band: dict | None) -> np.ndarray:
+    """`cap_ceiling`: capacities (before κ) outside the fit's learned [lo, hi] band become its fallback."""
+    if not band:
+        return kwp
+    return np.where((kwp < band["lo"]) | (kwp > band["hi"]), band["fallback"], kwp)
+
+
 def to_kwp(log_kwp: np.ndarray, kappa: float, fallback: float) -> np.ndarray:
     with np.errstate(over="ignore", invalid="ignore"):
         k = np.clip(kappa * np.exp(log_kwp), 0.5, 500)
@@ -199,13 +206,14 @@ def regime_date(
 ) -> dt.date | None:
     if cd is None:
         return None
+    shift = dt.timedelta(days=(date_params.get("date_bias") or {}).get(regime, 0))  # `date_debias`
     if regime == "event":
-        return cp.date + dt.timedelta(days=date_params["offset_event"])
+        return cp.date + dt.timedelta(days=date_params["offset_event"]) - shift
     if regime == "present_at_start":
-        return cd.first_date - dt.timedelta(days=date_params["start_lag"])
+        return cd.first_date - dt.timedelta(days=date_params["start_lag"]) - shift
     if rule == "weak_candidate" and cp is not None and cp.weak_date is not None:
-        return cp.weak_date
-    return cd.first_date
+        return cp.weak_date - shift
+    return cd.first_date - shift
 
 
 def regimes_and_dates(table: FeatureTable, ids: list[str], F: pd.DataFrame, cps: dict, date_params: dict, rule: str):
@@ -235,7 +243,10 @@ def predict(model: dict, table: FeatureTable, ids: list[str]) -> tuple[pd.DataFr
     weekly = customer_scores(clf["weekly"], table, ids, clim) if "weekly" in clf else None
     prob = classifier_proba(clf, objects, F, model["feature_names"], weekly=weekly)
     cap = model["capacity"]
-    kwp = to_kwp(capacity_log(cap, objects, F, model["capacity_feature_names"]), cap["kappa"], cap["fallback_kwp"])
+    log_kwp = capacity_log(cap, objects, F, model["capacity_feature_names"])
+    if cap.get("band"):  # as scored in inner CV: band on the clipped κ=1 capacity, then κ and the clip
+        log_kwp = np.log(apply_cap_band(to_kwp(log_kwp, 1.0, cap["fallback_kwp"]), cap["band"]))
+    kwp = to_kwp(log_kwp, cap["kappa"], cap["fallback_kwp"])
     regimes, dates = regimes_and_dates(table, ids, F, cps, model["date"], model["date"]["insufficient_rule"])
     rows = []
     for i, cid in enumerate(ids):

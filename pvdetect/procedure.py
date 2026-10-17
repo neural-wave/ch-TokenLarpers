@@ -23,6 +23,7 @@ from pvdetect.model import CURRENT_VERSION, fit_logreg, fit_ridge, standardize_p
 from pvdetect.pipeline import (
     SIGNED_SHARE,
     FeatureTable,
+    apply_cap_band,
     capacity_log,
     capacity_matrix,
     classifier_proba,
@@ -56,16 +57,30 @@ START_LAG_MIN_N = 3  # fewer present-at-start gaps: 0 (today) or, with `offset_t
 # Optional inner-CV options: E1 persistence block, E2 `avg` classifier, schedule-robust feature block,
 # the weekly-evidence head (`weekly`/`avg_weekly` classifiers), the logreg C choice (`ctune`), the
 # score-matched date offsets (`offset_tri`), the strict short-series detection rule (`recur_strict`) and
-# the sunshine-coupling feature block (`sun`).
-# Without e1/e2/weekly/ctune/offset_tri/recur_strict the procedure is exactly the pre-E1/E2 one
-# (`train.py --no-e1e2 --no-weekly --no-ctune --no-offset-tri --no-recur-strict`); schedule and sun are opt-in.
+# the sunshine-coupling feature block (`sun`), the residual date-bias correction (`date_debias`) and the
+# learned capacity band (`cap_ceiling`).
+# Without e1/e2/weekly/ctune/offset_tri/recur_strict/date_debias/cap_ceiling the procedure is exactly the
+# pre-E1/E2 one (`train.py --no-e1e2 --no-weekly --no-ctune --no-offset-tri --no-recur-strict
+# --no-date-debias --no-cap-ceiling`, plus `--no-recent --no-smallpv`); schedule and sun are opt-in.
 # Recall-targeted feature blocks (missed PV): `recent` (tail evidence against the same weeks of earlier years and
 # the customer's own earlier level) and `smallpv` (scale-free midday deficit against night/evening load).
 # Both are in the default pool; `train.py --no-recent --no-smallpv` removes them.
 ALL_OPTIONS = frozenset(
-    {"e1", "e2", "schedule", "weekly", "ctune", "offset_tri", "recur_strict", "sun", "recent", "smallpv"}
+    {
+        "e1", "e2", "schedule", "weekly", "ctune", "offset_tri", "recur_strict", "sun", "recent", "smallpv",
+        "date_debias", "cap_ceiling",
+    }
 )
-DEFAULT_OPTIONS = frozenset({"e1", "e2", "weekly", "ctune", "offset_tri", "recur_strict", "recent", "smallpv"})
+DEFAULT_OPTIONS = frozenset(
+    {"e1", "e2", "weekly", "ctune", "offset_tri", "recur_strict", "recent", "smallpv", "date_debias", "cap_ceiling"}
+)
+REGIMES = ("event", "present_at_start", "insufficient")
+DEBIAS_MIN_N = 3  # inner OOF true positives of a regime needed for its bias; fewer: no shift
+DEBIAS_CAP = 365
+# `cap_ceiling` band from the fit's labelled kWp: [q05 / margin, q95 × margin]; outside it, the training median.
+CAP_BAND_Q = 0.05
+CAP_BAND_MARGIN = 1.5
+CAP_BAND_MIN_N = 3
 LOGREG_C = 0.5  # the default; another C of C_OPTIONS only by the margin rule on the logreg path
 C_OPTIONS = (0.1, 0.5, 2.0)
 WEEKLY_KINDS = ("weekly", "avg_weekly")
@@ -107,6 +122,7 @@ class Components:
     objects: dict
     logreg_C: float = LOGREG_C
     recur_strict: bool = False
+    cap_band: dict | None = None
 
 
 def _last_valid(table: FeatureTable, cid: str) -> pd.Timestamp | None:
@@ -114,6 +130,31 @@ def _last_valid(table: FeatureTable, cid: str) -> pd.Timestamp | None:
     if cd is None or cd.n_valid == 0:
         return None
     return cd.daily.index[cd.daily["valid"].to_numpy()][-1]
+
+
+def fit_cap_band(kwp: np.ndarray) -> dict | None:
+    """`cap_ceiling` band from labelled kWp: a learned ceiling q95 × margin (and floor q05 / margin); the
+    robust fallback is the median. None with fewer than CAP_BAND_MIN_N positive values."""
+    k = np.asarray(kwp, float)
+    k = k[np.isfinite(k) & (k > 0)]
+    if k.size < CAP_BAND_MIN_N:
+        return None
+    return {
+        "lo": float(np.quantile(k, CAP_BAND_Q) / CAP_BAND_MARGIN),
+        "hi": float(np.quantile(k, 1 - CAP_BAND_Q) * CAP_BAND_MARGIN),
+        "fallback": float(np.median(k)),
+    }
+
+
+def regime_bias(err: np.ndarray, regimes: np.ndarray, mask: np.ndarray) -> dict:
+    """Per-regime median signed date error (days, predicted − labelled) over `mask`; 0 for a regime with
+    fewer than DEBIAS_MIN_N finite errors; rounded and clipped to ±DEBIAS_CAP."""
+    out = {}
+    for r in REGIMES:
+        e = err[mask & (regimes == r) & np.isfinite(err)]
+        b = float(np.median(e)) if e.size >= DEBIAS_MIN_N else 0.0
+        out[r] = int(round(float(np.clip(b, -DEBIAS_CAP, DEBIAS_CAP))))
+    return out
 
 
 def _start_lag_tri(gaps: list[int]) -> int:
@@ -221,7 +262,8 @@ def _fit_components(
         reg = CatBoostRegressor(loss_function="RMSE", **CB_PARAMS)
         reg.fit(F.loc[pos, cb_names].to_numpy(float), np.log(kwp[pos]))
         objects["catboost_cap"] = reg
-    return Components(clim, F, cps, date_params, logreg, ridge, ridge_export, fallback, objects, C, recur_strict)
+    band = fit_cap_band(kwp[pos])
+    return Components(clim, F, cps, date_params, logreg, ridge, ridge_export, fallback, objects, C, recur_strict, band)
 
 
 def _climatology(
@@ -274,7 +316,7 @@ def _inner_oof(
     from pvdetect.embedding import fit_projection
 
     rows = []
-    for tr, va in splits:
+    for fold, (tr, va) in enumerate(splits):
         projection = fit_projection(raw, tr) if embedding is not None else None
         comp = _fit_components(
             table,
@@ -321,6 +363,7 @@ def _inner_oof(
                 extra[f"p_logreg_C{c}"] = classifier_proba({"logreg": lr}, {}, Fva, names, "logreg")
         if weekly:
             extra["p_weekly"] = customer_scores(fit_head(table, lab, tr, comp.clim), table, va, comp.clim)
+        band = comp.cap_band or {"lo": np.nan, "hi": np.nan, "fallback": np.nan}
         for i, cid in enumerate(va):
             rows.append(
                 {
@@ -333,6 +376,10 @@ def _inner_oof(
                     "date_weak": d_weak[i],
                     "date_first": d_first[i],
                     **{k: v[i] for k, v in extra.items()},
+                    "fold": fold,
+                    "cap_lo": band["lo"],
+                    "cap_hi": band["hi"],
+                    "cap_fb": band["fallback"],
                 }
             )
     oof = pd.DataFrame(rows).set_index("customer_id").loc[train_ids]
@@ -620,6 +667,68 @@ def _choose_offset_tri(oof: pd.DataFrame, sel: dict, avg: bool = True) -> tuple[
     return (*cand, info) if adopt else (base, sel, info)
 
 
+def _debias_oof(oof: pd.DataFrame, sel: dict) -> tuple[pd.DataFrame, dict]:
+    """Dates of the inner OOF shifted by the per-regime bias of the true positives (at the selection's
+    classifier and threshold, final date rule). Cross-fitted: each inner validation fold is shifted by the
+    bias of the other folds' rows, so a customer's own label never moves its date. Also returns the bias
+    over all rows (the fit's training customers), used by the final model."""
+    t_pv = oof["t_pv"].to_numpy(bool)
+    tp = t_pv & (_proba(oof, sel["classifier"]) >= sel["threshold"])
+    dates = oof["date_first"] if sel["insufficient_rule"] == "first_date" else oof["date_weak"]
+    err = _err_days(dates, oof["t_date"].to_numpy("datetime64[ns]"))
+    regimes = oof["regime"].to_numpy()
+    folds = oof["fold"].to_numpy()
+    shift = np.zeros(len(oof))
+    for k in np.unique(folds):
+        bias = regime_bias(err, regimes, tp & (folds != k))
+        rows = folds == k
+        shift[rows] = [bias[r] for r in regimes[rows]]
+    delta = pd.to_timedelta(shift, unit="D")
+    out = oof.assign(
+        date_weak=pd.to_datetime(oof["date_weak"]) - delta, date_first=pd.to_datetime(oof["date_first"]) - delta
+    )
+    return out, regime_bias(err, regimes, tp)
+
+
+def _choose_date_debias(oof: pd.DataFrame, sel: dict, avg: bool = True) -> tuple[pd.DataFrame, dict, dict, dict | None]:
+    """`date_debias` on the selected inner OOF, adopted by the Step 11 rule. Returns (OOF, selection,
+    record, per-regime bias for the final model or None)."""
+    if "fold" not in oof.columns:  # an inner OOF built without fold ids (test stubs)
+        return oof, sel, {"date_debias": "off", "date_debias_disabled_reason": "inner OOF has no fold ids"}, None
+    c_oof, bias = _debias_oof(oof, sel)
+    c_sel = _select(c_oof, avg)
+    c_sel["inner_score"] = _full_inner_score(c_oof, c_sel)
+    adopt, boot = _adopt((oof, sel), (c_oof, c_sel))
+    info = {
+        "date_debias": "on" if adopt else "off",
+        "date_debias_options": {"off": sel["inner_score"], "on": c_sel["inner_score"], "bootstrap_p": boot, "bias": bias},
+    }
+    return (c_oof, c_sel, info, bias) if adopt else (oof, sel, info, None)
+
+
+def _band_oof(oof: pd.DataFrame) -> pd.DataFrame:
+    """Inner OOF capacities with each fold's learned band applied (`cap_lo`/`cap_hi`/`cap_fb`, fitted on
+    that fold's inner-train labels)."""
+    band = {"lo": oof["cap_lo"].to_numpy(float), "hi": oof["cap_hi"].to_numpy(float), "fallback": oof["cap_fb"].to_numpy(float)}
+    # folds without a band carry NaN bounds: both comparisons are False there, the capacity stays
+    return oof.assign(**{c: apply_cap_band(oof[c].to_numpy(float), band) for c in ("kwp_ridge", "kwp_catboost")})
+
+
+def _choose_cap_ceiling(oof: pd.DataFrame, sel: dict, avg: bool = True) -> tuple[pd.DataFrame, dict, dict]:
+    """`cap_ceiling` on the selected inner OOF, adopted by the Step 11 rule."""
+    if not {"cap_lo", "cap_hi", "cap_fb"} <= set(oof.columns):  # an inner OOF built without fold bands
+        return oof, sel, {"cap_ceiling": "off", "cap_ceiling_disabled_reason": "inner OOF has no fold bands"}
+    c_oof = _band_oof(oof)
+    c_sel = _select(c_oof, avg)
+    c_sel["inner_score"] = _full_inner_score(c_oof, c_sel)
+    adopt, boot = _adopt((oof, sel), (c_oof, c_sel))
+    info = {
+        "cap_ceiling": "on" if adopt else "off",
+        "cap_ceiling_options": {"off": sel["inner_score"], "on": c_sel["inner_score"], "bootstrap_p": boot},
+    }
+    return (c_oof, c_sel, info) if adopt else (oof, sel, info)
+
+
 def _choose_recur_strict(
     table, labels, lab, train_ids, splits, names, cap_names, oof, sel, avg=True, C=LOGREG_C, weekly=False, dkw=None
 ):
@@ -849,6 +958,16 @@ def fit(
         labeller = None
     else:
         pseudo_info["pseudo_disabled_reason"] = "inner CV is disabled"
+    # Output corrections on the selected inner OOF, after every option that refits on new inner OOFs.
+    debias_info = {"date_debias": "off"} if "date_debias" in options else {}
+    band_info = {"cap_ceiling": "off"} if "cap_ceiling" in options else {}
+    date_bias = None
+    if option_oof is not None:
+        if "date_debias" in options:
+            option_oof, option_sel, debias_info, date_bias = _choose_date_debias(option_oof, option_sel, avg)
+        if "cap_ceiling" in options:
+            option_oof, option_sel, band_info = _choose_cap_ceiling(option_oof, option_sel, avg)
+        sel = option_sel
     comparison_sel = option_sel
     raw = None
     embedding_projection = None
@@ -877,6 +996,12 @@ def fit(
                     raw=raw,
                 )
                 emb_sel = _select(emb_oof, avg)
+                if date_bias is not None:  # the adopted corrections, cross-fitted on the candidate's OOF
+                    emb_oof, emb_bias = _debias_oof(emb_oof, emb_sel)
+                if band_info.get("cap_ceiling") == "on":
+                    emb_oof = _band_oof(emb_oof)
+                if date_bias is not None or band_info.get("cap_ceiling") == "on":
+                    emb_sel = _select(emb_oof, avg)
                 emb_sel["inner_score"] = _full_inner_score(emb_oof, emb_sel)
                 emb_bootstrap = _paired_bootstrap_stability(option_oof, option_sel, emb_oof, emb_sel)
             else:
@@ -900,6 +1025,8 @@ def fit(
             block = "embedding"
             sel = emb_sel
             names = emb_names
+            if date_bias is not None:
+                date_bias = emb_bias
         else:
             embedding_projection = None
     else:
@@ -951,9 +1078,13 @@ def fit(
     if "recur_strict" in options:  # inference detects with the same rule as this fit
         date["recur_strict"] = comp.recur_strict
     sel.update(offset_event=date["offset_event"], start_lag=date["start_lag"], contrast_cut=date["contrast_cut"])
+    if date_bias is not None:  # inference shifts each regime's date by the fit's inner OOF bias
+        date["date_bias"] = date_bias
     sel.update(c_info)
     sel.update(tri_info)
     sel.update(strict_info)
+    sel.update(debias_info)
+    sel.update(band_info)
     sel["embedding_bootstrap_p"] = emb_bootstrap
     if block == "embedding":
         sel["feature_block"] = "embedding"
@@ -987,6 +1118,7 @@ def fit(
             "catboost_file": "catboost_cap.cbm" if sel["capacity"] == "catboost" else None,
             "kappa": sel["kappa"],
             "fallback_kwp": comp.fallback,
+            **({"band": comp.cap_band} if band_info.get("cap_ceiling") == "on" and comp.cap_band else {}),
         },
         "date": date,
         "selection": sel,

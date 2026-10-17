@@ -10,6 +10,7 @@ import pytest
 from pvdetect.evaluation import outer_splits
 from pvdetect.model import save_model
 from pvdetect.pipeline import build_feature_table, predict
+from pvdetect import procedure
 from pvdetect.procedure import DEFAULT_OPTIONS, fit
 from pvdetect.synthetic import generate_dataset
 from tests.helpers import as_loaded
@@ -35,6 +36,29 @@ def test_flipping_held_out_labels_changes_nothing_in_their_fold(data, options):
     """Any cache, climatology or selection fitted on held-out labels would change these predictions."""
     table, labels = data
     train_ids, test_ids = outer_splits(labels, repeats=1, folds=3)[0][0]
+    flipped = labels.copy()
+    for x in test_ids:
+        row = flipped["customer_id"] == x
+        was_pv = bool(flipped.loc[row, "pv_installed"].iloc[0])
+        flipped.loc[row, "pv_installed"] = not was_pv
+        flipped.loc[row, "pv_installation_date"] = pd.NaT if was_pv else pd.Timestamp("2023-05-01")
+        flipped.loc[row, "pv_capacity_kwp"] = np.nan if was_pv else 7.5
+    a = _fold_predictions(table, labels, train_ids, test_ids, options)
+    b = _fold_predictions(table, flipped, train_ids, test_ids, options)
+    pdt.assert_frame_equal(a, b)
+
+
+def test_label_flip_with_date_debias_and_cap_ceiling_forced_on(data, monkeypatch):
+    """Every candidate adopted (margin and bootstrap rule disabled), so the per-regime date bias and the
+    learned capacity band are both in the model; flipping held-out labels still changes nothing."""
+    monkeypatch.setattr(procedure, "CLASSIFIER_MARGIN", -np.inf)
+    monkeypatch.setattr(procedure, "BOOTSTRAP_MIN", 0.0)
+    table, labels = data
+    options = frozenset({"date_debias", "cap_ceiling"})
+    train_ids, test_ids = outer_splits(labels, repeats=1, folds=3)[0][0]
+    model = fit(table, labels, train_ids, options=options)
+    assert model["selection"]["date_debias"] == model["selection"]["cap_ceiling"] == "on"
+    assert "date_bias" in model["date"] and "band" in model["capacity"]
     flipped = labels.copy()
     for x in test_ids:
         row = flipped["customer_id"] == x
