@@ -17,6 +17,8 @@ from typing import Any, Iterable, Iterator, Mapping, Collection
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from .windows import WindowBatch, WindowConfig, build_windows
@@ -168,16 +170,25 @@ class EpochSource:
             if missing: raise ValueError(f"canonical source missing columns: {sorted(missing)}")
 
     def _find_overlap(self, ids: Collection[str]) -> set[str]:
-        wanted = set(map(str, ids)); found: set[str] = set()
-        for batch in self._iter_batches(["customer_id"]):
-            found.update(set(map(str, batch.column(0).to_pylist())) & wanted)
-            if found == wanted: break
+        if not ids: return set()
+        wanted_set = set(map(str, ids))
+        wanted_arr = pa.array(sorted(wanted_set), type=pa.string())
+        found: set[str] = set()
+        for path in self.paths:
+            for batch in pq.ParquetFile(path).iter_batches(columns=["customer_id"], batch_size=262144):
+                col = batch.column(0)
+                matches = pc.is_in(col, value_set=wanted_arr)
+                if pc.any(matches).as_py():
+                    matched = pc.unique(col.filter(matches)).to_pylist()
+                    found.update(matched)
+                    if len(found) == len(wanted_set):
+                        return found
         return found
 
     def _iter_batches(self, columns: list[str] | None = None) -> Iterator[Any]:
         selected = columns or ["customer_id", "timestamp_epoch", "energy_kwh", "value_status"]
         for path in self.paths:
-            yield from pq.ParquetFile(path).iter_batches(columns=selected, batch_size=8192)
+            yield from pq.ParquetFile(path).iter_batches(columns=selected, batch_size=262144)
 
     def _ensure_raw_shards(self) -> dict[str, tuple[Path, ...]]:
         if self._raw_parts is not None: return self._raw_parts
@@ -190,15 +201,28 @@ class EpochSource:
                     self._raw_parts = {str(k): tuple(Path(x) for x in v) for k, v in payload["parts"].items()}
                     return self._raw_parts
             except (OSError, ValueError, KeyError, TypeError): pass
-        parts: dict[str, list[Path]] = {}; part_no = 0
-        for batch in self._iter_batches():
-            frame = pd.DataFrame({name: batch.column(i).to_pylist() for i, name in enumerate(["customer_id", "timestamp_epoch", "energy_kwh", "value_status"])})
-            frame["customer_id"] = frame["customer_id"].astype(str)
-            for customer, group in frame.groupby("customer_id", sort=False):
-                bucket = root / hashlib.sha256(customer.encode()).hexdigest(); bucket.mkdir(exist_ok=True)
-                part = bucket / f"part-{part_no:09d}.parquet"; group.to_parquet(part, index=False)
-                parts.setdefault(customer, []).append(part)
-            part_no += 1
+        parts: dict[str, list[Path]] = {}
+        writers: dict[str, pq.ParquetWriter] = {}
+        selected = ["customer_id", "timestamp_epoch", "energy_kwh", "value_status"]
+        try:
+            for path in self.paths:
+                pf = pq.ParquetFile(path)
+                for batch in pf.iter_batches(columns=selected, batch_size=262144):
+                    table = pa.Table.from_batches([batch])
+                    cids = pc.unique(table["customer_id"]).to_pylist()
+                    for cid in cids:
+                        cid_str = str(cid)
+                        sub = table.filter(pc.equal(table["customer_id"], cid))
+                        if cid_str not in writers:
+                            bucket = root / hashlib.sha256(cid_str.encode()).hexdigest()
+                            bucket.mkdir(exist_ok=True)
+                            p = bucket / "part.parquet"
+                            writers[cid_str] = pq.ParquetWriter(p, sub.schema)
+                            parts[cid_str] = [p]
+                        writers[cid_str].write_table(sub)
+        finally:
+            for w in writers.values():
+                w.close()
         payload = {"source_bytes": self.source_bytes_sha256, "manifest": self.manifest_sha256, "parts": {k: [str(p) for p in v] for k, v in parts.items()}}
         marker.write_text(json.dumps(payload, sort_keys=True))
         self._raw_parts = {k: tuple(v) for k, v in parts.items()}
