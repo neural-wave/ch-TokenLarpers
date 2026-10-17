@@ -100,7 +100,7 @@ def test_schedule_block_follows_inner_cv(data, monkeypatch, tmp_path, prefer_on)
     table, labels = data
     seen = []
 
-    def stub(table, labels, lab, train_ids, splits, names, cap_names, setting=procedure.BASE_SETTING):
+    def stub(table, labels, lab, train_ids, splits, names, cap_names, setting=procedure.BASE_SETTING, **_):
         seen.append((list(names), list(cap_names), len(splits)))
         t = lab.loc[train_ids]
         on = t["pv_installed"].to_numpy(float)
@@ -108,7 +108,8 @@ def test_schedule_block_follows_inner_cv(data, monkeypatch, tmp_path, prefer_on)
 
     monkeypatch.setattr(procedure, "_inner_oof", stub)
     ids = labels["customer_id"].tolist()
-    model = fit(table, labels, ids, options=procedure.DEFAULT_OPTIONS | {"schedule"})
+    options = procedure.DEFAULT_OPTIONS - {"weekly", "ctune"} | {"schedule"}  # the stub scores no weekly head / C
+    model = fit(table, labels, ids, options=options)
     sel = model["selection"]
     base = feature_names(model["export_enabled"])
     assert [s[0] for s in seen] == [base, base + ["summer_suppressed_week_frac"], base + [SCHED]]
@@ -130,7 +131,7 @@ def test_schedule_runs_without_e1e2(data, monkeypatch):
     table, labels = data
     seen = []
 
-    def stub(table, labels, lab, train_ids, splits, names, cap_names, setting=procedure.BASE_SETTING):
+    def stub(table, labels, lab, train_ids, splits, names, cap_names, setting=procedure.BASE_SETTING, **_):
         seen.append(list(names))
         t = lab.loc[train_ids]
         on = t["pv_installed"].to_numpy(float)
@@ -170,7 +171,7 @@ def test_fit_without_e1e2_skips_both_options(data, monkeypatch):
     table, labels = data
     seen = []
 
-    def stub(table, labels, lab, train_ids, splits, names, cap_names, setting=procedure.BASE_SETTING):
+    def stub(table, labels, lab, train_ids, splits, names, cap_names, setting=procedure.BASE_SETTING, **_):
         seen.append(list(names))
         t = lab.loc[train_ids]
         return _oof(t, *_split_probs(t["pv_installed"].to_numpy(bool), 2))

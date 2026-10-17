@@ -20,6 +20,7 @@ from pvdetect.features import (
 from pvdetect.io import LoadedTimeseries, day_matrix
 from pvdetect.model import linear_score, sigmoid
 from pvdetect.season import Climatology
+from pvdetect.weekly import customer_scores
 
 if TYPE_CHECKING:
     from pvdetect.unlabelled import UnlabelledPrior
@@ -101,14 +102,26 @@ def capacity_matrix(F: pd.DataFrame, names: list[str]) -> np.ndarray:
     return X
 
 
-def classifier_proba(clf: dict, objects: dict, F: pd.DataFrame, names: list[str], kind: str | None = None) -> np.ndarray:
-    """P(PV); `avg` (E2) is the mean of the logreg and CatBoost probabilities."""
+def classifier_proba(
+    clf: dict,
+    objects: dict,
+    F: pd.DataFrame,
+    names: list[str],
+    kind: str | None = None,
+    weekly: np.ndarray | None = None,
+) -> np.ndarray:
+    """P(PV); `avg` (E2) is the mean of the logreg and CatBoost probabilities; `weekly` kinds need the
+    weekly head's customer scores (`weekly`): `weekly` is that score, `avg_weekly` its mean with logreg."""
     kind = kind or clf["kind"]
+    if kind == "weekly":
+        return weekly
     X = F[names].to_numpy(float)
     if kind == "logreg":
         return sigmoid(linear_score(clf["logreg"], X))
     if kind == "avg":
         return (sigmoid(linear_score(clf["logreg"], X)) + objects["catboost_clf"].predict_proba(X)[:, 1]) / 2
+    if kind == "avg_weekly":
+        return (sigmoid(linear_score(clf["logreg"], X)) + weekly) / 2
     return objects["catboost_clf"].predict_proba(X)[:, 1]
 
 
@@ -162,7 +175,8 @@ def predict(model: dict, table: FeatureTable, ids: list[str]) -> tuple[pd.DataFr
     objects = model.get("_objects", {})
     F, cps = compute_features(table, ids, clim)
     clf = model["classifier"]
-    prob = classifier_proba(clf, objects, F, model["feature_names"])
+    weekly = customer_scores(clf["weekly"], table, ids, clim) if "weekly" in clf else None
+    prob = classifier_proba(clf, objects, F, model["feature_names"], weekly=weekly)
     cap = model["capacity"]
     kwp = to_kwp(capacity_log(cap, objects, F, model["capacity_feature_names"]), cap["kappa"], cap["fallback_kwp"])
     regimes, dates = regimes_and_dates(table, ids, F, cps, model["date"], model["date"]["insufficient_rule"])

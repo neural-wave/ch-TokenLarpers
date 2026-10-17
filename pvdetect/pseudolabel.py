@@ -1,9 +1,10 @@
 """Pseudo-labelling (one round of self-training) on the unlabelled pool: a Tier A detection option.
 
 Per fit, the classifier chosen so far scores the pool under that fit's climatology; confident pool
-customers become weighted pseudo-examples and ONLY the classifiers are refit. Climatology, capacity and
-date parameters keep coming from the labelled customers alone (pseudo-labels carry no dates or kWp).
-Pool customers that are not confident are left out: unlabelled is never treated as negative.
+customers become weighted pseudo-examples and ONLY the logreg/CatBoost classifiers are refit (at the
+fit's logreg C). Climatology, capacity, date parameters and the weekly head keep coming from the
+labelled customers alone (pseudo-labels carry no dates or kWp). Pool customers that are not confident
+are left out: unlabelled is never treated as negative.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import pandas as pd
 
 from pvdetect import procedure
 from pvdetect.pipeline import FeatureTable, classifier_proba, compute_features
+from pvdetect.weekly import customer_scores, fit_head
 
 POS_PROB = 0.95
 NEG_PROB = 0.05
@@ -22,12 +24,16 @@ CLASS_CAP = 3  # pseudo-examples per class ≤ CLASS_CAP × the fit's labelled c
 WEIGHT = 0.5  # sample weight of a pseudo-example (labelled customers weigh 1)
 
 
+def _pool_view(table: FeatureTable) -> FeatureTable:
+    """The pool as a feature table; its label-free caches live apart from the labelled customers' ones."""
+    pool = table.unlabelled_pool
+    return FeatureTable(ids=list(pool), customers=pool, cache=table.cache.setdefault("unlabelled_pool", {}))
+
+
 def pool_features(table: FeatureTable, clim) -> pd.DataFrame:
     """Pool features under one fit's climatology; only the label-free part is cached (separately)."""
-    pool = table.unlabelled_pool
-    ids = list(pool)
-    view = FeatureTable(ids=ids, customers=pool, cache=table.cache.setdefault("unlabelled_pool", {}))
-    return compute_features(view, ids, clim)[0]
+    view = _pool_view(table)
+    return compute_features(view, view.ids, clim)[0]
 
 
 def pick_pseudo(prob: np.ndarray, max_pos: int, max_neg: int) -> tuple[np.ndarray, np.ndarray]:
@@ -42,14 +48,19 @@ def pick_pseudo(prob: np.ndarray, max_pos: int, max_neg: int) -> tuple[np.ndarra
 
 def with_pseudo(table: FeatureTable, lab: pd.DataFrame, ids: list[str], names: list[str], comp, kind: str):
     """`comp` with logreg and CatBoost refit on its labelled `ids` plus pseudo-labels from its `kind`
-    classifier, and the (positive, negative) pseudo counts. Unchanged when nothing qualifies."""
+    classifier, and the (positive, negative) pseudo counts. Unchanged when nothing qualifies. Weekly kinds
+    score the pool with the weekly head of the same labelled `ids` and climatology."""
     y = lab.loc[ids, "pv_installed"].to_numpy(bool)
     if y.all() or not y.any():
         return comp, (0, 0)
     Fp = pool_features(table, comp.clim)
-    if kind != "logreg" and "catboost_clf" not in comp.objects:  # as `_inner_oof`: CatBoost needs both classes
+    if kind in ("catboost", "avg") and "catboost_clf" not in comp.objects:  # as `_inner_oof`: needs both classes
         kind = "logreg"
-    prob = classifier_proba({"logreg": comp.logreg}, comp.objects, Fp, names, kind)
+    weekly = None
+    if kind in procedure.WEEKLY_KINDS:
+        view = _pool_view(table)
+        weekly = customer_scores(fit_head(table, lab, ids, comp.clim), view, view.ids, comp.clim)
+    prob = classifier_proba({"logreg": comp.logreg}, comp.objects, Fp, names, kind, weekly=weekly)
     pos, neg = pick_pseudo(prob, CLASS_CAP * int(y.sum()), CLASS_CAP * int((~y).sum()))
     if pos.size + neg.size == 0:
         return comp, (0, 0)
@@ -57,11 +68,13 @@ def with_pseudo(table: FeatureTable, lab: pd.DataFrame, ids: list[str], names: l
     X = np.vstack([comp.F[names].to_numpy(float), Xp[pos], Xp[neg]])
     yy = np.concatenate([y, np.ones(pos.size, bool), np.zeros(neg.size, bool)])
     w = np.concatenate([np.ones(y.size), np.full(pos.size + neg.size, WEIGHT)])
-    logreg, objects = procedure._fit_classifiers(X, yy, ("logreg", "catboost"), w)
+    logreg, objects = procedure._fit_classifiers(X, yy, ("logreg", "catboost"), w, C=comp.logreg_C)
     return replace(comp, logreg=logreg, objects={**comp.objects, **objects}), (int(pos.size), int(neg.size))
 
 
-def choose_pseudo(table, labels, lab, train_ids, splits, names, cap_names, setting, oof, sel, avg=True):
+def choose_pseudo(
+    table, labels, lab, train_ids, splits, names, cap_names, setting, oof, sel, avg=True, C=procedure.LOGREG_C, weekly=False
+):
     """pseudo ∈ {off, on} on the same inner splits, after every other selection; adopted by the Step 11 rule.
 
     Returns the selection to use and the record for `selection` (aggregate counts only)."""
@@ -72,7 +85,9 @@ def choose_pseudo(table, labels, lab, train_ids, splits, names, cap_names, setti
         counts.append(n)
         return comp
 
-    c_oof = procedure._inner_oof(table, labels, lab, train_ids, splits, names, cap_names, setting, refit=refit)
+    c_oof = procedure._inner_oof(
+        table, labels, lab, train_ids, splits, names, cap_names, setting, refit=refit, C=C, weekly=weekly
+    )
     cand = procedure._select(c_oof, avg)
     adopt, boot = procedure._adopt((oof, sel), (c_oof, cand))
     info = {

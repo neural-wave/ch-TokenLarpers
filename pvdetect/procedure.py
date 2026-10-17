@@ -31,6 +31,7 @@ from pvdetect.selection import (
     pick_threshold,
     threshold_scores,
 )
+from pvdetect.weekly import customer_scores, fit_head
 
 CLASSIFIER_MARGIN = 2.0
 BOOTSTRAP_MIN = 0.8
@@ -40,10 +41,15 @@ BASE_SETTING = ("labelled_nonpv", "none")  # (climatology, evidence_scale); the 
 # Labelled commissioning dates may lag the visible onset by months.
 OFFSET_ERROR_WINDOW = 180
 OFFSET_CAP = 120
-# Optional inner-CV options: E1 persistence block, E2 `avg` classifier, schedule-robust feature block.
-# Without e1/e2 the procedure is exactly the pre-E1/E2 one (`train.py --no-e1e2`); schedule is opt-in.
-ALL_OPTIONS = frozenset({"e1", "e2", "schedule"})
-DEFAULT_OPTIONS = frozenset({"e1", "e2"})
+# Optional inner-CV options: E1 persistence block, E2 `avg` classifier, schedule-robust feature block,
+# the weekly-evidence head (`weekly`/`avg_weekly` classifiers) and the logreg C choice (`ctune`).
+# Without e1/e2/weekly/ctune the procedure is exactly the pre-E1/E2 one (`train.py --no-e1e2 --no-weekly
+# --no-ctune`); schedule is opt-in.
+ALL_OPTIONS = frozenset({"e1", "e2", "schedule", "weekly", "ctune"})
+DEFAULT_OPTIONS = frozenset({"e1", "e2", "weekly", "ctune"})
+LOGREG_C = 0.5  # the default; another C of C_OPTIONS only by the margin rule on the logreg path
+C_OPTIONS = (0.1, 0.5, 2.0)
+WEEKLY_KINDS = ("weekly", "avg_weekly")
 
 CB_PARAMS = dict(
     iterations=300,
@@ -80,6 +86,7 @@ class Components:
     ridge_export: dict | None
     fallback: float
     objects: dict
+    logreg_C: float = LOGREG_C
 
 
 def _last_valid(table: FeatureTable, cid: str) -> pd.Timestamp | None:
@@ -120,7 +127,7 @@ def fit_date_params(table: FeatureTable, lab: pd.DataFrame, ids: list[str], F: p
 
 
 def _fit_classifiers(
-    X: np.ndarray, y: np.ndarray, clf_kinds: tuple[str, ...], weight: np.ndarray | None = None
+    X: np.ndarray, y: np.ndarray, clf_kinds: tuple[str, ...], weight: np.ndarray | None = None, C: float = LOGREG_C
 ) -> tuple[dict | None, dict]:
     """(logreg params or None, {"catboost_clf": model} when fitted); `weight` is a per-row sample weight."""
     from catboost import CatBoostClassifier
@@ -130,7 +137,7 @@ def _fit_classifiers(
     logreg = None
     if "logreg" in clf_kinds:
         logreg = (
-            fit_logreg(X, y, C=0.5, sample_weight=weight) if both else _constant_linear(X, 50.0 if y.all() else -50.0)
+            fit_logreg(X, y, C=C, sample_weight=weight) if both else _constant_linear(X, 50.0 if y.all() else -50.0)
         )
     if "catboost" in clf_kinds and both:
         cb = CatBoostClassifier(auto_class_weights="Balanced", **CB_PARAMS)
@@ -148,6 +155,7 @@ def _fit_components(
     clf_kinds: tuple[str, ...],
     cap_kinds: tuple[str, ...],
     setting: tuple[str, str] = BASE_SETTING,
+    C: float = LOGREG_C,
 ) -> Components:
     from catboost import CatBoostRegressor
 
@@ -158,7 +166,7 @@ def _fit_components(
     clim = _climatology(table, nonpv, dates, setting)
     F, cps = compute_features(table, ids, clim)
     date_params = fit_date_params(table, lab, ids, F, cps)
-    logreg, objects = _fit_classifiers(F[names].to_numpy(float), y, clf_kinds)
+    logreg, objects = _fit_classifiers(F[names].to_numpy(float), y, clf_kinds, C=C)
     kwp = sub["pv_capacity_kwp"].to_numpy(float)
     pos = y & np.isfinite(kwp) & (kwp > 0)
     fallback = float(np.median(kwp[pos])) if pos.any() else 5.0
@@ -175,7 +183,7 @@ def _fit_components(
         reg = CatBoostRegressor(loss_function="RMSE", **CB_PARAMS)
         reg.fit(F.loc[pos, cb_names].to_numpy(float), np.log(kwp[pos]))
         objects["catboost_cap"] = reg
-    return Components(clim, F, cps, date_params, logreg, ridge, ridge_export, fallback, objects)
+    return Components(clim, F, cps, date_params, logreg, ridge, ridge_export, fallback, objects, C)
 
 
 def _climatology(table: FeatureTable, nonpv: list[str], pv_dates: dict, setting: tuple[str, str]) -> Climatology:
@@ -192,13 +200,29 @@ def _climatology(table: FeatureTable, nonpv: list[str], pv_dates: dict, setting:
 
 
 def _inner_oof(
-    table, labels, lab, train_ids, splits, names, cap_names, setting=BASE_SETTING, refit=None
+    table,
+    labels,
+    lab,
+    train_ids,
+    splits,
+    names,
+    cap_names,
+    setting=BASE_SETTING,
+    refit=None,
+    *,
+    C=LOGREG_C,
+    alt_cs=(),
+    weekly=False,
 ) -> pd.DataFrame:
-    """Pooled inner OOF outputs; `refit(comp, tr)` may replace the classifiers only (pseudo-labelling)."""
+    """Pooled inner OOF outputs; `refit(comp, tr)` may replace the classifiers only (pseudo-labelling).
+
+    `C` is the logreg C; `alt_cs` adds `p_logreg_C{c}` columns (logreg refit at other C on the same
+    features, without `refit`); `weekly` adds `p_weekly`, the customer score of a weekly head trained on
+    the inner-train customers' windows under that split's climatology."""
     rows = []
     for tr, va in splits:
         comp = _fit_components(
-            table, lab, tr, names, cap_names, ("logreg", "catboost"), ("ridge", "catboost"), setting
+            table, lab, tr, names, cap_names, ("logreg", "catboost"), ("ridge", "catboost"), setting, C
         )
         if refit is not None:
             comp = refit(comp, tr)
@@ -216,6 +240,14 @@ def _inner_oof(
         )
         regimes, d_weak = regimes_and_dates(table, va, Fva, cps_va, comp.date_params, "weak_candidate")
         _, d_first = regimes_and_dates(table, va, Fva, cps_va, comp.date_params, "first_date")
+        extra = {}
+        if alt_cs:
+            X_tr, y_tr = comp.F[names].to_numpy(float), lab.loc[tr, "pv_installed"].to_numpy(bool)
+            for c in alt_cs:
+                lr, _ = _fit_classifiers(X_tr, y_tr, ("logreg",), C=c)
+                extra[f"p_logreg_C{c}"] = classifier_proba({"logreg": lr}, {}, Fva, names, "logreg")
+        if weekly:
+            extra["p_weekly"] = customer_scores(fit_head(table, lab, tr, comp.clim), table, va, comp.clim)
         for i, cid in enumerate(va):
             rows.append(
                 {
@@ -227,6 +259,7 @@ def _inner_oof(
                     "regime": regimes[i],
                     "date_weak": d_weak[i],
                     "date_first": d_first[i],
+                    **{k: v[i] for k, v in extra.items()},
                 }
             )
     oof = pd.DataFrame(rows).set_index("customer_id").loc[train_ids]
@@ -253,14 +286,18 @@ def _p_mean(ape: np.ndarray) -> float:
 
 
 def _proba(oof: pd.DataFrame, kind: str) -> np.ndarray:
-    """Inner OOF probabilities of a classifier option; `avg` (E2) is the mean of logreg and CatBoost."""
+    """Inner OOF probabilities of a classifier option; `avg` (E2) is the mean of logreg and CatBoost,
+    `avg_weekly` the mean of logreg and the weekly head's customer score."""
     if kind == "avg":
         return (oof["p_logreg"].to_numpy(float) + oof["p_catboost"].to_numpy(float)) / 2
+    if kind == "avg_weekly":
+        return (oof["p_logreg"].to_numpy(float) + oof["p_weekly"].to_numpy(float)) / 2
     return oof[f"p_{kind}"].to_numpy(float)
 
 
 def _select(oof: pd.DataFrame, avg: bool = True) -> dict:
-    """Tier A choices from pooled inner OOF predictions."""
+    """Tier A choices from pooled inner OOF predictions. The weekly candidates take part when the inner
+    OOF carries weekly-head scores (`p_weekly`, option `weekly`)."""
     t_pv = oof["t_pv"].to_numpy(bool)
     t_dates = oof["t_date"].to_numpy("datetime64[ns]")
     err = _err_days(oof["date_weak"], t_dates)
@@ -283,6 +320,17 @@ def _select(oof: pd.DataFrame, avg: bool = True) -> dict:
             boot_avg = bootstrap_prob_better(_proba(oof, clf_kind), thr, p_avg, t_avg, t_pv, err, ape_r)
             if boot_avg >= BOOTSTRAP_MIN:
                 clf_kind, thr = "avg", t_avg
+    # Weekly-evidence head: `weekly`, then `avg_weekly`, each against the current winner by the same rule.
+    boot_weekly: dict = {}
+    if "p_weekly" in oof.columns:
+        for kind in WEEKLY_KINDS:
+            p_k = _proba(oof, kind)
+            t_k, scores[kind] = pick_threshold(threshold_scores(p_k, t_pv, err, ape_r))
+            boot_weekly[kind] = None
+            if scores[kind] - scores[clf_kind] >= CLASSIFIER_MARGIN:
+                boot_weekly[kind] = bootstrap_prob_better(_proba(oof, clf_kind), thr, p_k, t_k, t_pv, err, ape_r)
+                if boot_weekly[kind] >= BOOTSTRAP_MIN:
+                    clf_kind, thr = kind, t_k
     prob = _proba(oof, clf_kind)
     tp = t_pv & (prob >= thr)
     true_k = oof["t_kwp"].to_numpy(float)
@@ -327,7 +375,49 @@ def _select(oof: pd.DataFrame, avg: bool = True) -> dict:
     }
     if not avg:  # the pre-E2 selection record, key for key
         del out["inner_score_avg"], out["bootstrap_p_avg"]
+    for kind in boot_weekly:
+        out[f"inner_score_{kind}"] = scores[kind]
+        out[f"bootstrap_p_{kind}"] = boot_weekly[kind]
     return out
+
+
+def _choose_logreg_c(oof: pd.DataFrame, sel: dict, avg: bool = True) -> tuple[float, pd.DataFrame, dict, dict]:
+    """Logreg C on the first inner OOF (it carries `p_logreg_C{c}` for every other C of C_OPTIONS).
+
+    The default C stays unless another C's logreg path (threshold-picked inner score of the logreg
+    probabilities) beats it by CLASSIFIER_MARGIN with bootstrap ≥ BOOTSTRAP_MIN; among such Cs the best
+    score wins (ties: C_OPTIONS order). Dates, capacities and the other classifiers do not depend on the
+    logreg C, so the chosen C's inner OOF is this one with `p_logreg` replaced; the selection is rerun on it.
+    Returns (C, inner OOF without the extra columns, selection, record)."""
+    t_pv = oof["t_pv"].to_numpy(bool)
+    err = _err_days(oof["date_weak"], oof["t_date"].to_numpy("datetime64[ns]"))
+    ape_r = ape_array(oof["kwp_ridge"].to_numpy(float), oof["t_kwp"].to_numpy(float))
+    cols = {c: "p_logreg" if c == LOGREG_C else f"p_logreg_C{c}" for c in C_OPTIONS}
+    picks = {c: pick_threshold(threshold_scores(oof[col].to_numpy(float), t_pv, err, ape_r)) for c, col in cols.items()}
+    t_base, s_base = picks[LOGREG_C]
+    best, boots = LOGREG_C, {}
+    for c in C_OPTIONS:
+        if c == LOGREG_C:
+            continue
+        t_c, s_c = picks[c]
+        boots[c] = None
+        if s_c - s_base >= CLASSIFIER_MARGIN:
+            p_base, p_c = oof["p_logreg"].to_numpy(float), oof[cols[c]].to_numpy(float)
+            boots[c] = bootstrap_prob_better(p_base, t_base, p_c, t_c, t_pv, err, ape_r)
+            if boots[c] >= BOOTSTRAP_MIN and (best == LOGREG_C or s_c > picks[best][1]):
+                best = c
+    extra = [cols[c] for c in C_OPTIONS if c != LOGREG_C]
+    oof = oof.assign(p_logreg=oof[cols[best]]).drop(columns=extra)
+    if best != LOGREG_C:
+        sel = _select(oof, avg)
+    info = {
+        "logreg_C": best,
+        "logreg_C_options": {
+            **{str(c): picks[c][1] for c in C_OPTIONS},
+            "bootstrap_p": {str(c): b for c, b in boots.items()},
+        },
+    }
+    return best, oof, sel, info
 
 
 def _final_outputs(oof: pd.DataFrame, sel: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -349,7 +439,9 @@ def _adopt(base: tuple[pd.DataFrame, dict], cand: tuple[pd.DataFrame, dict]) -> 
     return boot >= BOOTSTRAP_MIN, boot
 
 
-def _choose_unlabelled(table, labels, lab, train_ids, splits, names, cap_names, oof, sel, avg=True):
+def _choose_unlabelled(
+    table, labels, lab, train_ids, splits, names, cap_names, oof, sel, avg=True, C=LOGREG_C, weekly=False
+):
     """Climatology first, then evidence_scale on top; every option on the same inner splits."""
     prior = table.unlabelled
     setting, cur = BASE_SETTING, (oof, sel)
@@ -357,7 +449,9 @@ def _choose_unlabelled(table, labels, lab, train_ids, splits, names, cap_names, 
     options: dict = {}
 
     def evaluate(cand_setting):
-        c_oof = _inner_oof(table, labels, lab, train_ids, splits, names, cap_names, cand_setting)
+        c_oof = _inner_oof(
+            table, labels, lab, train_ids, splits, names, cap_names, cand_setting, C=C, weekly=weekly
+        )
         return c_oof, _select(c_oof, avg)
 
     if prior.passed:
@@ -390,10 +484,12 @@ def _choose_unlabelled(table, labels, lab, train_ids, splits, names, cap_names, 
     return setting, cur[0], cur[1], {**settings, **info, "unlabelled_options": options}
 
 
-def _choose_feature_block(table, labels, lab, train_ids, splits, export, cap_names, setting, oof, sel, avg=True):
+def _choose_feature_block(
+    table, labels, lab, train_ids, splits, export, cap_names, setting, oof, sel, avg=True, C=LOGREG_C, weekly=False
+):
     """E1 persistence block (classifier only) on the same inner splits, adopted by the Step 11 rule."""
     names, cand_names = feature_names(export), feature_names(export, persistence=True)
-    c_oof = _inner_oof(table, labels, lab, train_ids, splits, cand_names, cap_names, setting)
+    c_oof = _inner_oof(table, labels, lab, train_ids, splits, cand_names, cap_names, setting, C=C, weekly=weekly)
     cand = (c_oof, _select(c_oof, avg))
     adopt, boot = _adopt((oof, sel), cand)
     info = {
@@ -403,10 +499,12 @@ def _choose_feature_block(table, labels, lab, train_ids, splits, export, cap_nam
     return (cand_names, *cand, info) if adopt else (names, oof, sel, info)
 
 
-def _choose_schedule(table, labels, lab, train_ids, splits, names, cap_names, setting, oof, sel, avg=True):
+def _choose_schedule(
+    table, labels, lab, train_ids, splits, names, cap_names, setting, oof, sel, avg=True, C=LOGREG_C, weekly=False
+):
     """Schedule-robust block (classifier only) on top of the current names, same inner splits and rule."""
     cand_names = names + list(SCHEDULE_FEATURES)
-    c_oof = _inner_oof(table, labels, lab, train_ids, splits, cand_names, cap_names, setting)
+    c_oof = _inner_oof(table, labels, lab, train_ids, splits, cand_names, cap_names, setting, C=C, weekly=weekly)
     cand = (c_oof, _select(c_oof, avg))
     adopt, boot = _adopt((oof, sel), cand)
     info = {
@@ -427,35 +525,40 @@ def fit(
     if not options <= ALL_OPTIONS:
         raise ValueError(f"unknown options: {sorted(options - ALL_OPTIONS)}")
     avg = "e2" in options
+    weekly = "weekly" in options
     lab = labels.set_index("customer_id")
     export = export_enabled_for(table, train_ids)
     names = feature_names(export)
     cap_names = capacity_feature_names(export)
     splits = inner_splits(labels, train_ids) if inner else []
     setting, unl_info = BASE_SETTING, {}
+    C, c_info = LOGREG_C, ({"logreg_C": LOGREG_C} if "ctune" in options else {})
     feat_info = {"feature_block": "base"} if "e1" in options else {}
     sched_info = {"schedule_block": "off"} if "schedule" in options else {}
     pseudo_info = {"pseudo": "off"} if table.unlabelled_pool else {}
     if splits:
-        oof = _inner_oof(table, labels, lab, train_ids, splits, names, cap_names)
+        alt_cs = tuple(c for c in C_OPTIONS if c != LOGREG_C) if "ctune" in options else ()
+        oof = _inner_oof(table, labels, lab, train_ids, splits, names, cap_names, alt_cs=alt_cs, weekly=weekly)
         sel = _select(oof, avg)
+        if alt_cs:
+            C, oof, sel, c_info = _choose_logreg_c(oof, sel, avg)
         if table.unlabelled is not None:
             setting, oof, sel, unl_info = _choose_unlabelled(
-                table, labels, lab, train_ids, splits, names, cap_names, oof, sel, avg
+                table, labels, lab, train_ids, splits, names, cap_names, oof, sel, avg, C, weekly
             )
         if "e1" in options:
             names, oof, sel, feat_info = _choose_feature_block(
-                table, labels, lab, train_ids, splits, export, cap_names, setting, oof, sel, avg
+                table, labels, lab, train_ids, splits, export, cap_names, setting, oof, sel, avg, C, weekly
             )
         if "schedule" in options:
             names, oof, sel, sched_info = _choose_schedule(
-                table, labels, lab, train_ids, splits, names, cap_names, setting, oof, sel, avg
+                table, labels, lab, train_ids, splits, names, cap_names, setting, oof, sel, avg, C, weekly
             )
         if table.unlabelled_pool:
             from pvdetect.pseudolabel import choose_pseudo  # pseudolabel imports this module
 
             sel, pseudo_info = choose_pseudo(
-                table, labels, lab, train_ids, splits, names, cap_names, setting, oof, sel, avg
+                table, labels, lab, train_ids, splits, names, cap_names, setting, oof, sel, avg, C, weekly
             )
     else:
         sel = {
@@ -472,7 +575,7 @@ def fit(
             unl_info = {"climatology": setting[0], "evidence_scale": setting[1]}
     labeller = pseudo_info.get("pseudo_labeller")
     clf_kinds = ("logreg", "catboost") if sel["classifier"] == "avg" or labeller else ("logreg", sel["classifier"])
-    comp = _fit_components(table, lab, train_ids, names, cap_names, clf_kinds, (sel["capacity"],), setting)
+    comp = _fit_components(table, lab, train_ids, names, cap_names, clf_kinds, (sel["capacity"],), setting, C)
     if labeller:
         from pvdetect.pseudolabel import final_pseudo
 
@@ -484,6 +587,7 @@ def fit(
         sel["capacity"] = "ridge"
     date = {**comp.date_params, "insufficient_rule": sel["insufficient_rule"]}
     sel.update(offset_event=date["offset_event"], start_lag=date["start_lag"], contrast_cut=date["contrast_cut"])
+    sel.update(c_info)
     sel.update(unl_info)
     sel.update(feat_info)
     sel.update(sched_info)
@@ -494,6 +598,8 @@ def fit(
         objects["catboost_clf"] = comp.objects["catboost_clf"]
     if sel["capacity"] == "catboost":
         objects["catboost_cap"] = comp.objects["catboost_cap"]
+    # the weekly head is fitted on the labelled customers only (pseudo-labels refit the logreg/CatBoost only)
+    head = {"weekly": fit_head(table, lab, train_ids, comp.clim)} if sel["classifier"] in WEEKLY_KINDS else {}
     return {
         "version": CURRENT_VERSION,
         "feature_names": names,
@@ -503,8 +609,9 @@ def fit(
         "classifier": {
             "kind": sel["classifier"],
             "threshold": sel["threshold"],
-            "logreg": comp.logreg if sel["classifier"] in ("logreg", "avg") else None,
+            "logreg": comp.logreg if sel["classifier"] in ("logreg", "avg", "avg_weekly") else None,
             "catboost_file": "catboost_clf.cbm" if uses_cb else None,
+            **head,
         },
         "capacity": {
             "kind": sel["capacity"],
