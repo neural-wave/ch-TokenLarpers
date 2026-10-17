@@ -126,3 +126,25 @@ def test_fit_is_deterministic(data, tmp_path):
     save_model(fit(table, labels, ids), tmp_path / "a" / "model.json")
     save_model(fit(table, labels, ids), tmp_path / "b" / "model.json")
     assert json.loads((tmp_path / "a" / "model.json").read_text()) == json.loads((tmp_path / "b" / "model.json").read_text())
+
+
+def test_label_flip_with_onset_first_and_tail_guard_forced_on(data, monkeypatch):
+    """onset_first and tail_guard forced on (margin/bootstrap disabled); flipping held-out labels changes nothing."""
+    monkeypatch.setattr(procedure, "CLASSIFIER_MARGIN", -np.inf)
+    monkeypatch.setattr(procedure, "BOOTSTRAP_MIN", 0.0)
+    table, labels = data
+    options = frozenset({"onset_first", "tail_guard"})
+    train_ids, test_ids = outer_splits(labels, repeats=1, folds=3)[0][0]
+    model = fit(table, labels, train_ids, options=options)
+    assert model["selection"]["onset_first"] == "on"
+    assert model["selection"]["tail_guard"] == "on"
+    flipped = labels.copy()
+    for x in test_ids:
+        row = flipped["customer_id"] == x
+        was_pv = bool(flipped.loc[row, "pv_installed"].iloc[0])
+        flipped.loc[row, "pv_installed"] = not was_pv
+        flipped.loc[row, "pv_installation_date"] = pd.NaT if was_pv else pd.Timestamp("2023-05-01")
+        flipped.loc[row, "pv_capacity_kwp"] = np.nan if was_pv else 7.5
+    a = _fold_predictions(table, labels, train_ids, test_ids, options)
+    b = _fold_predictions(table, flipped, train_ids, test_ids, options)
+    pdt.assert_frame_equal(a, b)
