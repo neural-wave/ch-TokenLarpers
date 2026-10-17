@@ -82,10 +82,13 @@ def main(argv: list[str] | None = None) -> int:
             res = nested_cv(fit, predict, table, labels, splits, ext_labels=ext_labels)
             k = count_decisions(REPO / "DECISIONS.md")
             biased = " selection-biased" if k > 0 else ""
+            inner_scores = [x["inner_score"] for x in res.fit_infos if np.isfinite(x.get("inner_score", np.nan))]
+            inner = float(np.mean(inner_scores)) if inner_scores else float("nan")
             print(
                 f"nested: score={res.mean('score'):.2f}±{res.sd('score'):.2f} "
                 f"ci90=[{res.ci90[0]:.2f},{res.ci90[1]:.2f}] f1={res.mean('f1'):.3f} "
-                f"D={res.mean('D'):.3f} P={res.mean('P'):.3f} outer_informed_decisions={k}{biased}"
+                f"D={res.mean('D'):.3f} P={res.mean('P'):.3f} inner={_fmt(inner, 2)} gap={_fmt(inner - res.mean('score'), 2)} "
+                f"outer_informed_decisions={k}{biased}"
             )
             by = {r: [x["by_regime"][r] for x in res.regimes] for r in REGIMES}
             print(

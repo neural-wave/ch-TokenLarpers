@@ -252,6 +252,7 @@ def _select(oof: pd.DataFrame) -> dict:
         "threshold": thr,
         "inner_score_logreg": s_lr,
         "inner_score_catboost": s_cb,
+        "inner_score": s_cb if clf_kind == "catboost" else s_lr,
         "bootstrap_p": boot,
         "capacity": cap_kind,
         "inner_P_ridge": P_r,
@@ -270,10 +271,18 @@ def fit(table: FeatureTable, labels: pd.DataFrame, train_ids: list[str], *, inne
     if splits:
         sel = _select(_inner_oof(table, labels, lab, train_ids, splits, names, cap_names))
     else:
-        sel = {"classifier": "logreg", "threshold": 0.5, "capacity": "ridge", "kappa": 1.0, "insufficient_rule": "weak_candidate"}
+        sel = {
+            "classifier": "logreg",
+            "threshold": 0.5,
+            "capacity": "ridge",
+            "kappa": 1.0,
+            "insufficient_rule": "weak_candidate",
+            "inner_score": float("nan"),
+        }
     comp = _fit_components(table, lab, train_ids, names, cap_names, ("logreg", sel["classifier"]), (sel["capacity"],))
     if sel["classifier"] == "catboost" and "catboost_clf" not in comp.objects:
         sel["classifier"] = "logreg"
+        sel["inner_score"] = sel["inner_score_logreg"]
     if sel["capacity"] == "catboost" and "catboost_cap" not in comp.objects:
         sel["capacity"] = "ridge"
     date = {**comp.date_params, "insufficient_rule": sel["insufficient_rule"]}
