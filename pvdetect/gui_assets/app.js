@@ -525,6 +525,40 @@
     ];
   }
 
+  // Single-look lock-box result saved by `pvdetect.lockbox open` next to the configured model (aggregates only).
+  function lockboxCard(lb) {
+    const n = (v, d = 2) => (v === null || v === undefined ? "–" : Number(v).toFixed(d));
+    const ci = lb.ci90 || [];
+    const nested = lb.nested || {};
+    const nci = nested.ci90 || [];
+    const where = {
+      inside: ["inside the nested CI", "c-mint"],
+      above: ["above the nested CI", "c-mint"],
+      below: ["below the nested CI · possible overfitting", "c-orange"],
+    }[lb.vs_nested] || ["no nested CI recorded", "c-muted"];
+    const forced = lb.forced || lb.forced_overrides > 0 || lb.code_changed_since_freeze;
+    const tag = lb.forced
+      ? `Forced re-open · look ${lb.opens} · recorded`
+      : lb.forced_overrides > 0
+        ? `Single look · ${lb.forced_overrides} forced override(s) recorded`
+        : lb.code_changed_since_freeze
+          ? "Single look · code changed after freeze"
+          : "Single look · opened once";
+    const about = `The frozen run (${lb.run}) scored once on the sealed lock-box customers it never saw: ${lb.customers} customers, ${lb.pv} with PV. The 90% interval resamples those customers (2000 draws). Compared with the nested cross-validation interval of the same run on the development customers; the result changes nothing about the submitted model.`;
+    return [
+      h("hr"),
+      h(
+        "div",
+        { className: "wcard" },
+        h("div", { className: "wcard-top" }, info(about), h("span", { className: "wcard-label" }, icon("lock", 28), "Lock-box · single look")),
+        h("div", { className: "wcard-row" }, fig(n(lb.score, 1), `score · 90% CI ${n(ci[0], 1)}–${n(ci[1], 1)}`, "c-mint"), fig(n(lb.f1, 3), `F1 · n ${lb.customers ?? "–"}`, "c-mint", true)),
+        h("p", { className: "metric-line num" }, "Precision ", h("b", { text: n(lb.precision) }), " · recall ", h("b", { text: n(lb.recall) }), " · D ", h("b", { text: n(lb.D) }), " · P ", h("b", { text: n(lb.P) })),
+        h("p", { className: "metric-line num" }, `Nested CV ${n(nested.score, 1)} [${n(nci[0], 1)}, ${n(nci[1], 1)}] · lock-box `, h("b", { className: where[1], text: where[0] })),
+        h("span", { className: `tag-demo ${forced ? "c-orange" : ""}`, text: tag }),
+      ),
+    ];
+  }
+
   function renderSide() {
     const side = $("side");
     const job = state.job;
@@ -558,6 +592,8 @@
     } else if (dg) {
       nodes.push(h("hr"), h("p", { className: "metric-line", text: `Diagnosis unavailable: ${dg.reason}` }));
     }
+    const lb = state.session && state.session.lockbox;
+    if (lb) nodes.push(...lockboxCard(lb));
     if (saved) {
       nodes.push(
         ...evaluationCards(saved, {

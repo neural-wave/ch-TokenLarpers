@@ -299,6 +299,24 @@ def saved_evaluation(model_path: Path) -> dict | None:
     return {**{k: doc.get(k) for k in keep}, "stale": stale}
 
 
+def saved_lockbox(model_path: Path) -> dict | None:
+    """Single-look lock-box result (`pvdetect.lockbox open`) saved next to the configured model, if any.
+
+    Aggregates only; the lock-box predictions stay in the private protocol folder and are never served."""
+    from pvdetect.lockbox import RESULT_FILE, SCHEMA
+
+    try:
+        doc = json.loads((model_path.parent / RESULT_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(doc, dict) or doc.get("schema") != SCHEMA:
+        return None
+    keep = ("run", "opened_at", "opens", "forced", "forced_overrides", "code_changed_since_freeze", "customers", "pv",
+            "score", "ci90", "precision", "recall", "f1", "D", "P", "counts", "nested", "vs_nested", "decisions_used",
+            "decision_budget")
+    return {k: doc.get(k) for k in keep}
+
+
 def _display_name(raw: str | None) -> str | None:
     """Display-only file name: percent-decoded, no path parts or control characters, at most 120 characters."""
     if not raw:
@@ -496,6 +514,7 @@ class GuiServer:
                 "reason": reason,
             },
             "evaluation": saved_evaluation(self.model_path) if available else None,
+            "lockbox": saved_lockbox(self.model_path) if available else None,
             "labels": {"configured": self.labels_path is not None, "label": self.labels_path.name}
             if self.labels_path
             else {"configured": False, "label": None},

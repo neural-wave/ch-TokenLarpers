@@ -11,6 +11,7 @@ import inference
 import train
 from pvdetect import lockbox
 from pvdetect.evaluation import load_split_file, splits_from_fold_map
+from pvdetect.gui import saved_lockbox
 from pvdetect.io import load_labels
 from pvdetect.output import write_extensions, write_oof, write_predictions
 from pvdetect.synthetic import CustomerSpec, generate_customer, generate_dataset, write_dataset
@@ -221,6 +222,10 @@ def test_open_verifies_seal_looks_once_and_final_refits(tiny, fake_train, fake_i
     assert res["nested"]["ci90"] == [70.0, 90.0] and res["single_look"] is True
     assert not any(c in json.dumps(res) for c in tiny.ids)
     assert _state(tiny)["stage"] == "opened"
+    panel = saved_lockbox(model)
+    json.dumps(panel, allow_nan=False)
+    assert (panel["score"], panel["vs_nested"], panel["forced"], panel["customers"]) == (res["score"], "above", False, 4)
+    assert set(panel) <= set(res) and saved_lockbox(d / "final" / "model.json") is None
 
     with pytest.raises(SystemExit, match="already opened"):
         _lb("open", "--dir", d)
