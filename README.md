@@ -110,6 +110,36 @@ The script refuses a `PRIVATE_DIR` inside the repository (default `~/pvdetect_pr
 
 `pvdetect.compare` is the paired check for one pre-registered change: two out-of-fold files from the same splits (it refuses differing folds or coverage), per repeat and in total the confusion matrices, precision, recall, F1, D, P and score for both, the paired counts of customers that went wrong→right and right→wrong, and a customer bootstrap of the score difference with a 90 % interval and a verdict (`improvement`, `within_noise`, `worse`). Numbers reuse `pvdetect.diagnose`; the per-customer `changes.csv` goes only to the private `--out-dir`. Typical run: `TRAIN_FLAGS=--no-e1e2` and `TRAIN_FLAGS="--no-e1e2 --schedule"` into two private folders, then compare their `oof.csv`. Each comparison is a Tier B decision (one `DECISIONS.md` line).
 
+### Lock-box protocol (data holder)
+
+Evaluation protocol v2 (`docs/evaluation_lockbox_plan.md`): nested CV on 30 development customers, one sealed lock-box of 10 opened once, then a refit on all 40. The choices are pre-registered in `configs/lockbox.json` (seed 2026; 10 lock-box customers stratified by `pv_installed`; outer split seeds 17, 42, 100 with 5 folds; at most 3 comparisons). Paste one line at a time; `P` is a private folder outside the repository:
+
+```
+P=~/pvdetect_private/lockbox
+sh scripts/lockbox.sh seal --dir $P --energy ENERGY.csv --labels LABELS.csv
+sh scripts/lockbox.sh develop --dir $P base
+sh scripts/lockbox.sh develop --dir $P cand -- --schedule
+sh scripts/lockbox.sh compare --dir $P base cand
+sh scripts/lockbox.sh status --dir $P
+sh scripts/lockbox.sh freeze --dir $P base
+sh scripts/lockbox.sh open --dir $P
+sh scripts/lockbox.sh final --dir $P --energy ENERGY.csv --labels LABELS.csv
+python -m pvdetect.stability $P/final/model.json OLD/model.json UNLABELLED.csv
+python gui.py --model $P/runs/base/model.json
+```
+
+`scripts/lockbox.sh` runs `python -m pvdetect.lockbox` with the same interpreter choice as `train_and_launch.sh` (`PYTHON`, else `.venv/bin/python`, else `python3`). The state lives in `$P/state.json` (stage, timestamps, git commit, config hash, runs, decisions used, forced overrides); each stage refuses to run out of order and prints aggregate lines only.
+
+- `seal` (once per folder; refuses when `state.json` exists): stratified split of the customers into `dev.csv` / `lockbox.csv` (rows copied as text) with `dev_labels.csv` / `lockbox_labels.csv`; the shared outer split files `splits_s17.csv`, `splits_s42.csv`, `splits_s100.csv` (stratified 5-fold over the dev customers, built like `neuralwave_data.prepare`, usable as `train.py --folds` and by the hybrid arms); `seal.json` with the sha256 of the sorted lock-box ids, `lockbox.csv`, `lockbox_labels.csv` and the config. Prints counts only.
+- `develop NAME [--unlabelled U] [-- TRAIN_FLAGS]`: `train.py --cv` on the dev customers with the three split files, `--oof-out` and the model into `$P/runs/NAME/`, then `pvdetect.diagnose` on its out-of-fold file. Flags after `--` go to `train.py` (the protocol's own flags are refused). The `nested:` numbers are recorded. Refused after `freeze`.
+- `compare A B`: `pvdetect.compare` on the two runs' out-of-fold files into `$P/runs/B/compare_vs_A/`; uses one decision of the budget and prints the verdict and the `DECISIONS.md` line to add. Beyond the budget only with `--force`, which is recorded. Adopt a candidate only on `improvement`; once the budget is spent, freeze.
+- `freeze NAME`: records the git commit (and whether tracked files were modified), the run's flags and the hash of its model; prints the `git tag freeze-vN` command. No code change after this.
+- `open`: checks the seal hashes and the frozen model's hash, predicts `lockbox.csv` with the frozen run's model (fit on all dev customers) through `inference.run_inference`, scores it like `pvdetect.diagnose` with a 90 % customer-bootstrap interval (2000 draws) and states whether the score is inside, below or above the run's nested `ci90`. `lockbox_result.json` (aggregates only) goes to `$P` and next to the frozen model, where the GUI shows it as "Lock-box · single look"; the predictions stay in `$P/lockbox_predictions/`. A second `open` refuses unless `--force`, which is recorded and shown. Below the interval means possible overfitting: report it and still submit the frozen model; never re-tune on the lock-box. With 10 customers the interval is wide.
+- `final --energy E --labels L [--cv]`: after `open` (or with a recorded `--force`), refits the frozen run's flags on all customers into `$P/final/model.json` (`--cv` adds nested CV and its diagnosis) and prints the `scripts/export_submission.sh` command.
+- `status`: stage, runs with their nested scores, decisions used of the budget, lock-box opened or not.
+
+`python -m pvdetect.stability MODEL_A MODEL_B UNLABELLED [--pool 300]` is the label-free check of the report stage: it builds the same bounded unlabelled pool as pseudo-labelling (≥365 valid days, salted-hash choice), predicts it with both models and prints the predicted PV share of each, the number and share of customers whose decision flips, and the mean absolute change of the PV probability.
+
 ### Unlabelled pretraining and optional hybrid features
 
 Pretraining learns masked-patch reconstruction without PV labels. Supervised customer-level fitting remains necessary: the frozen encoder is not itself a PV classifier, date estimator or capacity estimator.
@@ -219,6 +249,7 @@ The terminal prints `PV detector GUI: http://127.0.0.1:PORT/`; the browser opens
 - **Analyze local CSV** uploads a file through the browser to a private temporary folder and runs it with the model configured at launch only. The demo model is never used for your file; without a configured model this action is disabled.
 - **Automatic diagnosis:** with `--labels` (`scripts/train_and_launch.sh` passes the training labels), every completed analysis is scored against the labels of the customers it contains, with the same aggregates as `pvdetect.diagnose`, shown at the top of the sidebar ("Diagnosis"). Customers without a label are left out and counted. On the customers the model was trained on the numbers are optimistic; the cross-validated panel below it is the honest estimate. The synthetic check is diagnosed against its known labels the same way.
 - **Model evaluation panel:** when `diagnosis.json` (written by `pvdetect.diagnose --out-dir`) sits next to the configured `model.json`, the sidebar shows it before any run: score and F1, points lost per part, precision/recall with false-alarm and missed counts, date D and error days, capacity P and the predicted/true ratio, the failure modes and the per-size breakdown. It is labelled out-of-fold or in-sample, and marked stale when the model file is newer. Only the aggregate file is read; `errors.csv` is never served.
+- **Lock-box panel:** when `lockbox_result.json` (written by `pvdetect.lockbox open`) sits next to the configured `model.json`, a "Lock-box · single look" card appears above the model evaluation panel: the lock-box score with its 90 % interval, F1, precision, recall, D and P, and whether the score is inside, below or above the run's nested interval. A forced re-open, any forced override or a code change after freeze is flagged in orange. Only the aggregate file is read; the lock-box predictions are never served.
 - Layout: header actions (Analyze CSV, Run synthetic check, download menu), a sidebar of run figures (customers, PV share, median/total capacity, date regimes, synthetic score, output checks, files, input quality), the selected customer's weekly/daily withdrawal or midday power with the estimated (and, for synthetic data, known) installation marker, a customer table with search and PV filter, and a before/after typical-day comparison (observed withdrawal, not seasonally adjusted). Times use the fixed UTC+1 day matrix of the model.
 - **Download** returns the exact `predictions.csv` and `pv_extensions_predictions.csv` written by `pvdetect.output`, byte-identical to the CLI for the same model and input.
 - **Clear session data** deletes uploads, outputs, synthetic data and the demo model; your original files, the configured model and downloaded files are untouched. Stopping the app deletes the session folder as well. A hard kill can leave the folder (`pvdetect-gui-*`) in the OS temp directory; it is not securely erased.

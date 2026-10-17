@@ -2,6 +2,8 @@
 
 Supersedes v3.2 and earlier. Repo: `neural-wave/ch-TokenLarpers`, branch `Jeffremm10/new-stack`. P1–P2 are implemented (tags `submit-v0`, `submit-v1`). Phase 2.5 steps A, A2, B1–B4, C1–C2, D (drafts), D-pub (wording), H (listed), X and X2 are implemented. v3.3 adds the merge audit and review round 6 (§0.4e), B4, X2, D-pub, the conditional challenger mapping with the research memo's preprocessing and reporting rules, and corrects E5, Step 21 and Step 22.
 
+Status note (2026-10-17, `main`): evaluation protocol v2 (`docs/evaluation_lockbox_plan.md`) is implemented and synthetic-verified: pre-registered `configs/lockbox.json`, stratified `split_by_customer`, `pvdetect.lockbox` / `scripts/lockbox.sh` (seal → develop / compare within the decision budget → freeze → open once → final), `ci90` pooled over all repeats, `pvdetect.stability`, and the GUI's single-look lock-box card. The real-data stages are run by the data holder (README, "Lock-box protocol"); no lock-box has been sealed or opened on real data by an agent.
+
 ## 0. Decisions and audit
 
 ### 0.1 User decision: no isolation gate

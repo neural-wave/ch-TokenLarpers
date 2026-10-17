@@ -1,6 +1,6 @@
 # Evaluation protocol v2: nested CV + sealed lock-box + full refit
 
-Status: plan. Builds on `docs/evaluation_protocol.md` (main) and the `pvdetect` nested CV; adds one sealed hold-out and a final refit. Standard references: nested CV for unbiased selection (Varma & Simon 2006), selection bias from repeated model comparison (Cawley & Talbot 2010), untouched hold-out = private leaderboard / lock-box.
+Status: implemented (synthetic-verified; real-data stages are run by the data holder). Commands: README, "Lock-box protocol (data holder)". Builds on `docs/evaluation_protocol.md` (main) and the `pvdetect` nested CV; adds one sealed hold-out and a final refit. Standard references: nested CV for unbiased selection (Varma & Simon 2006), selection bias from repeated model comparison (Cawley & Talbot 2010), untouched hold-out = private leaderboard / lock-box.
 
 ## Stages (one state file per private run directory; each stage refuses to run out of order)
 
@@ -14,14 +14,16 @@ Status: plan. Builds on `docs/evaluation_protocol.md` (main) and the `pvdetect` 
 | 5. Final refit | all 40 | Same frozen procedure, inner selection on 40; export with `scripts/export_submission.sh`; offline smoke. | submission model |
 | 6. Report | — | Nested estimate on the 30 (selection-biased, k decisions), lock-box score with CI (n = 10, single look), overfitting check (lock-box inside nested CI?), label-free stability on the unlabelled set (predicted PV share, flips vs previous model). | report table |
 
-## Code changes needed
+## Code changes (implemented)
 
-1. `pvdetect/lockbox.py` + `scripts/lockbox.sh` with subcommands `seal | develop NAME [TRAIN_FLAGS] | freeze | open | final`, state machine in `PRIVATE_DIR/state.json`, refuses out-of-order stages and second opening.
-2. Stratified split (current `split_by_customer` is unstratified: a random 10 of 40 can contain 3 or 8 PV customers). New `split_by_customer(..., labels=..., strata=...)`.
-3. Fold files for the 30 dev customers generated once at seal time (`--folds` already supported by `train.py` and main's evaluator), so pvdetect options and hybrid arms are compared on identical customer assignments.
-4. `ci90` over all repeats (currently repeat 0 only).
-5. `pvdetect.stability MODEL_A MODEL_B UNLABELLED`: predicted PV share and customer flips on the unlabelled set (label-free robustness check).
-6. GUI: lock-box result panel read from `lockbox_result.json` (aggregates only), marked "single look".
+1. `pvdetect/lockbox.py` + `scripts/lockbox.sh` with subcommands `seal | develop NAME [-- TRAIN_FLAGS] | compare A B | freeze NAME | open | final | status`, state machine in `PRIVATE_DIR/state.json`, refuses out-of-order stages, a tampered lock-box and a second opening (`--force` is recorded).
+2. Stratified split: `split_by_customer(..., labels=..., n_test=...)` allocates the test customers per `pv_installed` class (largest remainder, ≥1 per class on each side when possible). Only `pv_installed` is a stratum (`configs/lockbox.json`); install half-year and present-at-start are not stratified.
+3. Fold files for the dev customers generated once at seal time (`evaluation.stratified_fold_map`, the same construction as `neuralwave_data.labels.make_splits`), so pvdetect options and hybrid arms are compared on identical customer assignments.
+4. `ci90` pools all repeats: each draw resamples the customers once and averages every repeat's score.
+5. `pvdetect.stability MODEL_A MODEL_B UNLABELLED`: predicted PV share and customer flips on the unlabelled pool (label-free robustness check).
+6. GUI: lock-box result card read from `lockbox_result.json` (aggregates only), marked "single look".
+
+Implementation notes: the tool never writes to the repository, so `compare` prints the `DECISIONS.md` line to add and `freeze` prints the `git tag freeze-vN` command; `open` predicts with the frozen run's `model.json`, which `train.py` already fits on all dev customers after its nested CV; `seal.json` also hashes `lockbox_labels.csv`; the GUI result and `state.json` record forced overrides and a code change after freeze.
 
 ## Success / stop rules (pre-registered in stage 0)
 
