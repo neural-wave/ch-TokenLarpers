@@ -125,27 +125,20 @@ def concat_batches(batch_list: list[WindowBatch]) -> WindowBatch:
     )
 
 
-def aggregate_customer_score(probs: np.ndarray, dates: list[date]) -> float:
+def aggregate_customer_score(probs: np.ndarray, dates: list[date], k: int = 4) -> float:
     """High-inertia customer PV score from time series of window probabilities.
     
-    Uses 90th percentile of summer/spring probabilities to prevent 2-week vacations
-    or random winter anomalies from triggering false positives.
+    Uses the maximum rolling median over k consecutive windows (approx 12-14 days).
+    This detects sustained solar adoption while preventing single-week vacations
+    from triggering false alarms, and eliminates the structural blindspot for
+    late-calendar installations.
     """
     if len(probs) == 0:
         return 0.0
-    
-    # Solar season weights: months 4 through 9 (April - Sept) are peak solar in Switzerland
-    months = np.array([d.month for d in dates])
-    summer_mask = (months >= 4) & (months <= 9)
-    
-    if np.sum(summer_mask) >= 5:
-        # 90th percentile during solar season
-        score = float(np.percentile(probs[summer_mask], 90))
-    else:
-        # Fallback to full-year 90th percentile
-        score = float(np.percentile(probs, 90))
-    
-    return score
+    if len(probs) < k:
+        return float(np.max(probs))
+    rolling = [np.median(probs[i : i + k]) for i in range(len(probs) - k + 1)]
+    return float(np.max(rolling))
 
 
 def train_fold(

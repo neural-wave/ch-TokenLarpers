@@ -10,7 +10,7 @@ This document details the architecture, evaluation methodology, anti-overfitting
 |---|---:|---:|---:|---:|---:|---:|---:|
 | **1. Classical Baseline** (Midday/night ratios + Logistic Regression) | 0.652 | 0.682 | 0.667 | 46.69 | 15 | 8 | N/A |
 | **2. Pilot PatchTST** (Unsupervised pretraining + whole-customer pooling) | 0.737 | 0.636 | 0.683 | 47.81 | 14 | 5 | 0.012 |
-| **3. PatchTST Window Classifier** (Direct 7-day window supervision + $P_{90}$ aggregation) | **0.913** | **0.955** | **0.933** | **65.33** | **21** | **2** | **0.043** |
+| **3. PatchTST Window Classifier** (Rolling 4-window median aggregation) | **0.846** | **1.000** | **0.917** | **64.17** | **22** | **4** | **0.083** |
 
 *Evaluation Protocol: 5-fold customer-level cross-validation (GroupKFold). In every fold, 8 customers are strictly held out from training and preprocessing statistics. Per-customer predictions and artifacts are stored locally in gitignored directories (`artifacts_private/`).*
 
@@ -59,15 +59,22 @@ To avoid training on ambiguous transition states, windows are assigned physical 
 
 | Fold | Training F1 (32 Customers) | Validation F1 (8 Unseen Customers) | Validation Precision | Validation Recall | Generalization Gap |
 |---|---:|---:|---:|---:|---:|
-| **Fold 0** | 0.970 | **1.000** | 1.00 | 1.00 | +0.030 |
-| **Fold 1** | 1.000 | **0.889** | 1.00 | 0.80 | -0.111 |
-| **Fold 2** | 0.971 | **0.889** | 0.80 | 1.00 | -0.082 |
-| **Fold 3** | 0.971 | **0.889** | 0.80 | 1.00 | -0.082 |
-| **Fold 4** | 0.971 | **1.000** | 1.00 | 1.00 | +0.029 |
-| **Average**| **0.976** | **0.933** | **0.913** | **0.955** | **0.043 (4.3%)** |
+| **Fold 0** | 1.000 | **0.909** | 0.83 | 1.00 | -0.091 |
+| **Fold 1** | 1.000 | **1.000** | 1.00 | 1.00 | 0.000 |
+| **Fold 2** | 1.000 | **0.889** | 0.80 | 1.00 | -0.111 |
+| **Fold 3** | 1.000 | **1.000** | 1.00 | 1.00 | 0.000 |
+| **Fold 4** | 1.000 | **0.800** | 0.67 | 1.00 | -0.200 |
+| **Average**| **1.000** | **0.917** | **0.846** | **1.000** | **0.083 (8.3%)** |
 
-Across all 40 development customers, the model achieved **37 correct classifications, 2 false positives, and 1 false negative**.
+Across all 40 development customers, the model achieved **36 correct classifications, 4 false positives, and 0 missed PV systems (100% recall)**.
 
+### Resolution of the Late-Installation Blindspot
+Under the previous global 90th percentile aggregation rule, installations commissioned late in the observation history were diluted across years of pre-installation data, leading to a missed detection.
+
+By transitioning to a **rolling 4-window median rule** ($\approx 12$–$14$ consecutive days):
+* Sustained solar generation registers high confidence even if active for only a few weeks prior to the dataset end.
+* Temporary 1-to-2-week non-PV demand drops (e.g. holidays or vacations) remain filtered out.
+* **Recall improved from $95.5\%$ to $100.0\%$ (22 out of 22 PV installations detected).**
 ---
 
 ## 6. Critical Technical Limitations & Validation Audit
