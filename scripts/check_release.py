@@ -9,7 +9,11 @@ every file under DEST on the filesystem (not via git) and exits 1 when
 * any file, allowed ones included, contains a real customer identifier
   (``check_hygiene.ID_PATTERN``: the letters ``POD`` in any case, starting a
   word and immediately followed by digits);
-* an ``--allow`` path does not exist.
+* an ``--allow`` path does not exist;
+* an entry is a symlink (it would escape the audit: links are not followed,
+  so the check fails closed instead);
+* a path itself contains a real customer identifier (review plots, for
+  example, are named after customers); such paths are printed redacted.
 
 ``--allow`` paths are exact files relative to DEST in POSIX form (no
 wildcards, no directories); the export script generates them from
@@ -29,27 +33,50 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_hygiene import has_customer_identifier, is_data_path  # noqa: E402
 
 
-def tree_files(dest: Path) -> list[str]:
-    """Every file under dest as a POSIX path relative to it, skipping .git directories."""
-    files = []
+REDACTED = "<path containing a customer identifier>"
+
+
+def _id_in_path(path: str) -> bool:
+    return has_customer_identifier(path.encode("utf-8", "surrogateescape"))
+
+
+def tree_entries(dest: Path) -> tuple[list[str], list[str]]:
+    """(files, symlinks) under dest as POSIX paths relative to it, skipping .git directories.
+
+    Symlinks (to files or directories, dangling or not) are reported, never followed or opened.
+    """
+    files, links = [], []
     for root, dirs, names in os.walk(dest):
-        dirs[:] = sorted(d for d in dirs if d != ".git")
         rel_root = Path(root).relative_to(dest)
+        keep = []
+        for d in sorted(dirs):
+            if d == ".git":
+                continue
+            if (Path(root) / d).is_symlink():
+                links.append((rel_root / d).as_posix())
+            else:
+                keep.append(d)
+        dirs[:] = keep
         for name in sorted(names):
-            files.append((rel_root / name).as_posix())
-    return files
+            rel = (rel_root / name).as_posix()
+            (links if (Path(root) / name).is_symlink() else files).append(rel)
+    return files, links
 
 
 def check(dest: Path, allowed: set[str]) -> list[tuple[str, str]]:
-    """Return (reason, path) for every problem, missing allowed files first."""
+    """Return (reason, path) for every problem, missing allowed files first; identifier paths redacted."""
+    files, links = tree_entries(dest)
     offending = [("missing allowed file", p) for p in sorted(allowed) if not (dest / p).is_file()]
-    for path in tree_files(dest):
+    offending += [("symlink", p) for p in links]
+    for path in files:
+        if _id_in_path(path):
+            offending.append(("customer identifier in path", path))
         if path not in allowed and is_data_path(path):
             offending.append(("data file", path))
         with open(dest / path, "rb") as handle:
             if has_customer_identifier(handle.read()):
                 offending.append(("customer identifier", path))
-    return offending
+    return [(reason, REDACTED if _id_in_path(path) else path) for reason, path in offending]
 
 
 def _allow_path(value: str) -> str:

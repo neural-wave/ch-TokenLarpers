@@ -21,6 +21,9 @@ COMMIT=$1
 DEST=$2
 MODEL_DIR=${3:-}
 PY=${PYTHON:-python3}
+case $PY in  # the referenced-file listing runs inside DEST, so a relative interpreter path must be absolute
+    */*) PY=$(cd "$(dirname "$PY")" && pwd)/$(basename "$PY") ;;
+esac
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
 abort() {
@@ -33,7 +36,11 @@ REPO=$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel) || abort "scripts/ is not
 git -C "$REPO" rev-parse --quiet --verify "$COMMIT^{commit}" >/dev/null || abort "unknown commit: $COMMIT"
 mkdir -p "$DEST"
 DEST=$(cd "$DEST" && pwd)
-git -C "$REPO" archive "$COMMIT" | tar -x -C "$DEST" || abort "git archive of $COMMIT failed"
+TAR=$(mktemp "${TMPDIR:-/tmp}/export_submission.XXXXXX") || abort "could not create a temporary archive"
+trap 'rm -f "$TAR"' EXIT
+# A file, not a pipe: plain sh has no pipefail, so a failing git archive would go unnoticed.
+git -C "$REPO" archive --format=tar -o "$TAR" "$COMMIT" || abort "git archive of $COMMIT failed"
+tar -x -C "$DEST" -f "$TAR" || abort "extracting the archive of $COMMIT failed"
 
 set --
 if [ -n "$MODEL_DIR" ]; then

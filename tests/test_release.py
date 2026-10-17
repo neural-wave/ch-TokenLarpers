@@ -122,3 +122,26 @@ def test_release_missing_allowed_file_is_refused(tmp_path: Path):
     result = _release_check(dest, _RELEASE_ALLOW + ["artifacts/catboost_cap.cbm"])
     assert result.returncode == 1
     assert "artifacts/catboost_cap.cbm" in result.stdout
+
+
+def test_release_symlink_out_of_the_tree_is_refused(tmp_path: Path):
+    outside = tmp_path / "private"
+    outside.mkdir()
+    (outside / "energy.csv").write_text("customer_id;energy\nA;1\n", encoding="utf-8")
+    dest = _release_tree(tmp_path / "export")
+    (dest / "data").symlink_to(outside, target_is_directory=True)
+    (dest / "gone.txt").symlink_to(tmp_path / "missing.txt")
+    result = _release_check(dest)
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "symlink: data" in result.stdout and "symlink: gone.txt" in result.stdout
+
+
+def test_release_identifier_in_file_name_is_refused_without_echoing_it(tmp_path: Path):
+    dest = _release_tree(tmp_path)
+    identifier = "POD" + "12"
+    (dest / "review").mkdir()
+    (dest / "review" / f"{identifier}.png").write_bytes(b"\x89fabricated image\x00")
+    result = _release_check(dest)
+    assert result.returncode == 1
+    assert "customer identifier in path" in result.stdout
+    assert identifier not in result.stdout + result.stderr
