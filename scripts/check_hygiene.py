@@ -2,7 +2,7 @@
 """Refuse to commit organizer data or real customer identifiers.
 
 Datasets and unapproved derived artifacts must not enter git history. The
-user explicitly approved the exact four checksum-pinned encoder files below.
+user explicitly approved the exact checksum-pinned encoder and CNN files below.
 The check inspects files staged for
 commit (the default, used by the pre-commit hook), the working-tree copy of
 every tracked file (``--all``, used by CI and one-off audits) or explicit
@@ -41,6 +41,8 @@ PUBLISHED_ENCODERS = {
     "pretrained/small/encoder.json": "5c5d159219b1055b8417e73db7129f7a22b739d33d0f60a72375b0db7ff35d95",
     "pretrained/medium/encoder.pt": "e8bbcc4273ad7f3af72ccdd93093a8560a23729a8e86af0a7d8745ae266b2857",
     "pretrained/medium/encoder.json": "5cd05732b466dae1f28683081612583ff71ee97f9c76ad574da4dbde2146df03",
+    "pretrained/pv_presence/fraunhofer.pt": "55c68001718cf5a5932c9af5d99bd8e466229fc9ca1cc719dd3e44c26b34d08b",
+    "pretrained/pv_presence/model.json": "c5d845e08f687a98dc8a652829e0cd773787dd920a7cbf446ef4b7a851566e73",
 }
 
 

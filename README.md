@@ -44,7 +44,7 @@ software behavior, not real-world accuracy or absence of overfitting.
 
 ## Data hygiene
 
-Raw AIL inputs, private metrics, customer identifiers, optimizer checkpoints, and unapproved derived artifacts must not enter Git history. The user explicitly approved publication of the small and medium pretrained encoder pairs under `pretrained/`; the hygiene hook permits only those exact four checksum-pinned files. No general model/data-file exemption is enabled. AIL evaluation outputs remain data-holder-only, including aggregates shared with coding agents.
+Raw AIL inputs, private metrics, customer identifiers, optimizer checkpoints, and unapproved derived artifacts must not enter Git history. The user explicitly approved the small/medium pretrained encoder pairs and the CNN-only presence package under `pretrained/pv_presence/`; the hygiene hook permits only the exact checksum-pinned files in `scripts/check_hygiene.py`. No general model/data-file exemption is enabled. Evaluation files, logs and customer records are not included.
 
 Install the commit-time check once per clone:
 
@@ -84,7 +84,42 @@ Windows need ≥80% complete hours; installation-straddling weeks and undated po
 
 All three training stages weight each window by `N / (C * n_customer)`, giving each customer equal total base weight regardless of history length. Positive-class balancing uses the same customer-weighted class mass. Only labelled training customers train the CNN; unlabelled customers are not treated as negatives. Refit CNN weights **and** reselect the inner-CV threshold after these changes; previously fitted packages do not validate the new behavior. Date/capacity estimators are unchanged.
 
-When selected, the model saves `fraunhofer.pt` beside `model.json`; normal offline inference loads it, and `scripts/export_submission.sh` includes it through the model's artifact references. Training and inference select MPS when available, otherwise CPU. Checks use fabricated data only; this candidate has no competition-accuracy evidence. Real trained weights must remain outside this repository and use the private submission export.
+When selected, the model saves `fraunhofer.pt` beside `model.json`; normal offline inference loads it, and `scripts/export_submission.sh` includes it through the model's artifact references. Training and inference select MPS when available, otherwise CPU. Fabricated checks prove software behavior, not predictive accuracy. Except for the explicitly approved checksum-pinned CNN presence package below, real trained weights stay outside this repository and use the private submission export.
+
+### Reuse the fitted CNN without retraining
+
+`pretrained/pv_presence/model.json` and `fraunhofer.pt` contain the approved
+trained presence classifier and its fitted customer threshold. A normal clone
+includes both files. This is **not** a complete date/capacity inference model
+and must not be passed directly to `gui.py` or `inference.py`.
+
+```python
+from pvdetect.model import load_model
+from pvdetect.fraunhofer import fraunhofer_customer_scores
+
+presence = load_model("pretrained/pv_presence/model.json")
+# table is built with build_feature_table(load_timeseries(path)).
+scores = fraunhofer_customer_scores(
+    presence["_objects"]["fraunhofer"], table, table.ids
+)
+pv_present = scores >= presence["classifier"]["threshold"]
+```
+
+To attach this classifier to an existing fitted pipeline without changing its
+date/capacity estimators, replace only its `classifier` dictionary with
+`presence["classifier"].copy()` and set
+`model["_objects"]["fraunhofer"] = presence["_objects"]["fraunhofer"]`.
+Keep its other fitted components, then persist to a new folder with
+`save_model(model, path)`; this packages the CNN weights with that model.
+This recombination is a new pipeline configuration: the original evaluated
+score does not transfer automatically. Do not use this supervised checkpoint
+to produce held-out evidence for customers included in its training population.
+Nested CV must still train a separate CNN inside each training fold.
+
+The package intentionally excludes labels, customer identifiers, OOF
+predictions, evaluation scores, diagnosis, logs, optimizer state and fitted
+date/capacity parameters. Its manifest records the inference contract,
+training code revision and weight checksum.
 
 
 Dates and capacity (on by default): κ is re-chosen on the true positives at the final (rescored) threshold (`kappa_initial` keeps the first pass). Option `offset_tri` replaces the shrunk-median event offset and start lag by the integer offset that maximises the summed date score Σ max(0, 1 − |e − x|/30) (the scoring triangle), and lets one or two present-at-start training customers move the start lag partially (× n/(n+5)) instead of leaving it at 0. Option `recur_strict` requires persistence ≥ 0.75 before a changepoint counts as found when no ±1–3-year recurrence window fits inside the series (short histories), stored in the model so inference detects the same way. Both adopted only with the margin rule; `--no-offset-tri` and `--no-recur-strict` switch them off, so the full single-change baseline is `--no-e1e2 --no-weekly --no-ctune --no-offset-tri --no-recur-strict`. The dev generator gains `label_lag_60` (labelled date 30–90 days after the visible onset) and `meter_spikes` (isolated single-slot spikes); the holdout suite is unchanged.
