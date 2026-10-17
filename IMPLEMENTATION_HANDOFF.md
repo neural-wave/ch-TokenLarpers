@@ -1,6 +1,6 @@
-# AIL PV detection — implementation plan v3.2
+# AIL PV detection — implementation plan v3.3
 
-Supersedes v3.1, v3, v2 (`local://ail-pv-plan-v2.md`) and v1 (`local://ail-pv-milestone1-plan.md`). Repo: `neural-wave/ch-TokenLarpers`, branch `Jeffremm10/new-stack`. P1–P2 are implemented (tags `submit-v0`, `submit-v1`); Step 2.5-A is implemented (`51f6fb6`). v3.2 rewrites Phase 2.5 as the agreed pre-submission plan (review round 5).
+Supersedes v3.2 and earlier. Repo: `neural-wave/ch-TokenLarpers`, branch `Jeffremm10/new-stack`. P1–P2 are implemented (tags `submit-v0`, `submit-v1`). Phase 2.5 steps A, A2, B1–B3, C1–C2, D (drafts), H (listed), and X are implemented (merged from `Jeffremm10/new-stack-2`, head `10f44a2`). v3.3 adds the merge audit and review round 6 (§0.4e), fix B4, follow-ups X2, D-pub, the conditional challenger mapping, and corrects E5 and Step 22.
 
 ## 0. Decisions and audit
 
@@ -80,6 +80,26 @@ The user dropped the isolation gate (encrypted image, existence check, outside-r
 |7|Old commits with real identifiers stay in `ch-TokenLarpers` after a clean export|Correct|Repo stays private until the team decides; decision recorded (Step 2.5-A2)|
 |8|The inner–outer gap is a warning signal, not a measure|Agree|README wording in B2|
 |9|Organizer approval gates the export, so ask early and plan a fallback|Added in review|Step 2.5-H today, with a private-channel fallback; export rehearsed on synthetic data now (Step 2.5-X)|
+
+### 0.4e Merge audit of `new-stack-2` and review round 6 (applied in v3.3)
+
+Merge audit (fast-forward of 15 commits onto `b6c3d28`). Results:
+- 64 tests pass; `check_hygiene.py --all` passes.
+- Synthetic smoke: `--folds f0,f1 --oof-out` writes one row per customer per repeat, the folds match the split files, and the per-repeat scores average to the `nested:` score.
+- Export rehearsal: the export passes the release audit; network-blocked inference gives 13 lines and two identical runs; an extra `.csv` makes the audit fail.
+
+|#|Finding|Verdict|Resolution|
+|---|---|---|---|
+|1|`export_submission.sh` defaults `PYTHON` to `python3`, and listing referenced files imports `pvdetect.model`, which needs numpy, so the export aborts without a configured interpreter|Real; it fails closed, so nothing unsafe is produced|Step 2.5-X2: read the referenced files with the standard library only|
+|2|C3 (`paired_line` fold-assignment check) is not on `time-series-embeddings` (tip `5199b6d`)|Open|Owner: the `oof_contract` author; P3-matched comparisons are not valid until it lands|
+|3|`report/REPORT.md` states unverified real-data facts ("the labelled date lags the onset we can see") and synthetic results without the qualifier ("fixed most of it")|Real|Step 2.5-D-pub wording rules|
+|4|`REPORT.md` publicly discloses the hygiene incident|Team decision|Keep it only if the team agrees; otherwise state the hygiene controls without the incident (D-pub)|
+|5|`threshold` is chosen before the capacity model, κ and the insufficient-history date rule, and is never rescored (`_select`)|Correct: a consistency gap, not leakage|B4|
+|6|Step 22 zero-fills missing hours, which can manufacture the PV clipping signature|Correct|Step 22 now requires an explicit missing-value mask|
+|7|E5 adopted PatchTST by its matched outer score, contradicting §2|Correct; error introduced in v3.2|E5 reworded: matched results can only motivate admitting it to the inner option pool (logged)|
+|8|Choosing the E candidate from synthetic P is a synthetic-driven preference|Correct|The E mapping is conditional on P3 only|
+|9|Real-customer review plots must not appear in the video or report|Correct|D-pub: synthetic, clearly labelled visuals; real data as aggregate metrics only, if permitted|
+|10|aeon (MiniRocket) cannot install with the pinned `scipy==1.18.1`|Verified with `uv pip compile`|MiniRocket stays out of the submission environment|
 
 ### 0.5 Gaps found before review (kept from v2)
 
@@ -586,7 +606,7 @@ Deadline: everything published by **Sunday 11:00**. Rules for every step:
 
 |#|When|Work|Needs real data?|Owner|
 |---|---|---|---|---|
-|1|Today, first|A2 hygiene follow-ups, B fixes, D deliverable drafts, H organizer email, X export rehearsal on synthetic data|No|Agents/teammates; H by the user|
+|1|Today, first|A2 hygiene follow-ups, B fixes, D deliverable drafts, H organizer email, X export rehearsal on synthetic data — **done**; remaining: **B4**, **X2**, **D-pub** wording fixes, H actually sent, C3 (other branch)|No|Agents/teammates; H by the user|
 |2|In parallel, when the data holder is ready|**P3-baseline:** the existing pvdetect nested CV on the real 40 (its own splits), private, aggregates only|Yes|Data holder|
 |3|After 1|C shared-fold contract on pvdetect, then **P3-matched:** both pipelines on the same three split files|Build no; run yes|Agent builds; data holder runs|
 |4|After 2–3|E: only the improvement the real results point to|Build no; evaluate yes|Agent builds; data holder evaluates|
@@ -648,6 +668,23 @@ Delivered:
 **B3. Doc correction** (`docs/OVERVIEW.md` line 18):
 - Replace "a shoulder-hour deficit that maps to kWp" with "capacity from the midday pre-vs-post dip and a physics kWp estimate from the pre-install midday level and the width of the zero-reading window around solar noon".
 
+**B4. Rescore the threshold on the final downstream outputs** (`pvdetect/procedure.py` `_select`). A consistency fix, not a claimed accuracy gain.
+- **Current order** (unchanged up to this step):
+  1. choose classifier and threshold with ridge (κ = 1) capacities and weak-candidate dates;
+  2. choose capacity kind, κ and `insufficient_rule` at that threshold.
+- **New final step:** with the classifier, capacity kind, κ and `insufficient_rule` fixed, rescore the **same** threshold grid (`THRESHOLDS`) with the official score, using the final inner OOF outputs:
+  - dates: per-regime dates under the chosen `insufficient_rule` (`date_weak` or `date_first`);
+  - capacities: `kappa × kwp_<capacity kind>`.
+  - Pick with `pick_threshold`, keeping the same tie-breaking (smallest `|t−0.5|`, then higher `t`).
+- **One pass only.** No joint search and no loop back to re-choose κ or the capacity kind. Same customer folds, no new model or calibration.
+- **Recorded:** `inner_score` becomes the rescored score of the final configuration; the pre-rescoring values are kept as `threshold_initial` and `inner_score_initial`.
+- Every input to the rescoring is an inner OOF output whose learned parts (offsets, capacity models, climatology) were fit without that inner validation fold. This is already true in `_inner_oof`, so no change is needed there.
+- **Acceptance** (U, `tests/test_model.py`, hand-built inner OOF frame passed to `_select`; no fitting):
+  - A deterministic case where ridge capacities favour threshold `t1`, but after κ the final capacities favour `t2 ≠ t1` → `threshold == t2` and `threshold_initial == t1`.
+  - A case where nothing changes → `threshold == threshold_initial`.
+  - The label-flip leakage test and determinism test pass unchanged.
+- No claim of improved outer performance until the next logged real-data run.
+
 ### Step 2.5-C — Shared-fold contract on pvdetect (after A2/B; one scorer)
 
 The other branch already has the contract (`neuralwave_experiment/oof_contract.py`, commit `5199b6d`): split-file loading, the shared out-of-fold file, a scorer and a CLI. pvdetect only has to **produce** that file. **No second scorer is written.**
@@ -706,6 +743,23 @@ python -m neuralwave_experiment.oof_contract --labels <dev labels> <private>/pvd
   - neither `model.json` nor any `.cbm` byte string contains any training `customer_id`.
   - This is necessary but **not sufficient**. Step 2.5-G adds human review and organizer approval.
 
+### Step 2.5-D-pub — Publication rules for the report and video
+
+- **Visuals:** only synthetic, clearly labelled illustrations, e.g. "synthetic customer: detected installation" built from `pvdetect.synthetic` and `pvdetect.review`.
+  - **No private real-customer plots**, traces, dates or per-customer predictions, even unnamed.
+  - Real-data results appear only as aggregate metrics (`nested:`, `dates:`, `selection:`, the shared-fold summary), and only if the organizers' answers permit.
+- **Wording fixes in `report/REPORT.md`:**
+  - "The labelled date lags the onset we can see" becomes a hypothesis ("labels may lag the visible onset; the offset is learned"), until real results support it.
+  - Synthetic findings ("fixed most of it") say "on synthetic data".
+  - Real-data claims cite the aggregate line they come from.
+- **Hygiene incident:** keep the disclosure only if the team agrees; otherwise describe the controls (commit hook, release audit, private repo, clean export) without the incident.
+- **Human voice:** `guidelines.md` warns against "AI slop". Team members write the final report text in their own words; agent drafts are outlines only. The LLM-usage section must be confirmed by every member.
+- **Results honesty:** state the limits:
+  - 40 labelled customers;
+  - selection-biased estimate (`outer_informed_decisions`);
+  - capacity not uniquely identifiable from withdrawal data;
+  - synthetic benchmarks are not evidence of competition accuracy.
+
 ### Step 2.5-H — Organizer email (user, today)
 
 Ask in one message:
@@ -748,14 +802,57 @@ Record the answers in the README under "Organizer clarifications". Until answer 
 - a `.cbm` not on the allow list → exit 1;
 - a missing allowed file → exit 1.
 
+### Step 2.5-X2 — Export follow-ups (from the merge audit)
+
+- **`export_submission.sh`:** list the referenced files with the standard library only.
+  - Inline the logic of `pvdetect.model.referenced_files`: read `classifier.catboost_file` and `capacity.catboost_file` from `model.json`, keeping the existing path-safety checks.
+  - Then the default `python3` works and the export no longer depends on the environment.
+  - Keep the comment that this must mirror `referenced_files`, and add a U test asserting both return the same list for a model with both CatBoost files.
+- **Clean-environment rehearsal:** run the Step 2.5-X rehearsal once in a **fresh** venv created from the exported `requirements.txt` (not the dev `.venv`). Record the outcome as one line in the README status: pass/fail, Python version, elapsed seconds for `generate_dataset(20, seed=9)`.
+
 ### Step 2.5-E — Targeted improvement (only what the real results point to)
 
-**Pick by the largest points lost** in the P3 aggregates:
-- `70·(1 − f1)` → detection: E1 persistence feature, E2 probability averaging.
-- `15·f1·(1 − D)` → dates: onset/offset work. Read the per-regime `dates:` line first; B1 already widens the offset.
-- `15·f1·(1 − P)` → capacity: capacity-estimator work. Start from the capacity features and the κ/ridge-vs-CatBoost selection line.
+**Pick by the largest points lost** in the **P3 real-data aggregates only**. Synthetic benchmark terms never choose the candidate. Admit **one** challenger at a time:
+- `70·(1 − f1)` → detection:
+  - first E1 (persistence feature), then E2 (probability averaging);
+  - then, only if late installs or false negatives dominate the error review, a weekly-evidence head with persistence-based aggregation (see below);
+  - E5 last.
+- `15·f1·(1 − D)` → dates. Read the per-regime `dates:` line after B1.
+  - For `event` dates, a multichannel onset signal (deseasonalized midday level, daytime zero fraction, evening change, night change as confounder evidence) on the existing Binseg detector.
+  - Only then vary the cost or search method, one axis at a time.
+  - `present_at_start` dates are not recoverable by changepoint methods; only the learned `start_lag` applies.
+- `15·f1·(1 − P)` → capacity: counterfactual deficit features for `event`-regime customers.
+  - Estimate the pre-onset load pattern (calendar- and weekday-aware).
+  - Measure post-onset deficits including the morning/afternoon shoulders.
+  - Treat zero-reading slots as censored (generation ≥ load), not as observed generation.
+  - Output a small effective-amplitude feature set, offered to the capacity model as an inner option. Do not assume stationary load, unchanged night load, or that every zero is PV.
 
-Every item is a Tier A option inside `Procedure.fit`. Inner CV chooses per fit with the Step 11 margin rule, and outer scores never adopt it. Re-evaluating after an item is a logged Tier B decision.
+**Admission criteria** (all required before a challenger enters the option pool):
+1. It addresses a failure mode named in the private P3 review.
+2. Customer and source grouping is preserved.
+3. Every learned transform is fit on the appropriate training customers only.
+4. The pipeline still produces complete presence, date and capacity outputs.
+5. The dev stress scenarios pass (missingness, clipping, battery, night load, short history, late install).
+6. It adds evidence not already covered by existing features.
+7. It fits the offline CPU, inference-time and packaging budget.
+8. Per-customer outputs stay private.
+
+**Weekly-evidence head (detection challenger, only per the mapping above):**
+- Clock-aligned weekly windows from the existing day matrices.
+- Features: daytime deficit, zero fraction, zero-run width, dip position, evening contrast, variability, coverage.
+- Window labels: pre-install weeks of PV customers are negative, post-install weeks positive, straddling weeks dropped.
+- All of a customer's windows stay in one fold, with weights so long histories don't dominate.
+- A strongly regularized linear head.
+- Aggregation must support both the `event` and `present_at_start` cases.
+- Missing readings are masked, never counted as zeros.
+
+**Not in the pre-submission path:**
+- MiniRocket: dependency conflict, and its default wrapper's window-level internal CV and one-hot "probabilities" are both unsuitable.
+- catch22: GPL licence review needed.
+- TabPFN: fitted state retains training data, a release/privacy problem.
+- Score-optimal date/capacity point estimates beyond κ.
+
+Every item is a Tier A option inside `Procedure.fit`. Inner CV chooses per fit with the Step 11 margin rule, and outer scores never adopt it. Re-evaluating after an item is a logged Tier B decision. An improvement in F1 can lower D/P, because the newly found positives are harder; inspect fixed-subset diagnostics privately.
 
 **E1. Persistence feature `summer_suppressed_week_frac`** (`features.py`, fitted part, because it uses `ds`):
 - Summer ISO weeks in `last365` with ≥4 valid days.
@@ -773,7 +870,7 @@ Every item is a Tier A option inside `Procedure.fit`. Inner CV chooses per fit w
 
 **E4. Calibration:** not implemented unless the threshold range across outer fits exceeds 0.3 (logged).
 
-**E5. GPU/PatchTST challenger (last):** only if detection remains the weakest component after E1–E2 **and** PatchTST wins P3-matched on matched folds **and** on the full score. Preconditions, each verified and recorded:
+**E5. GPU/PatchTST challenger (last):** considered only if detection remains the weakest component after E1–E2. A P3-matched result on identical folds (C3 in place) can **motivate** admitting PatchTST to the inner option pool, logged as a Tier B decision. It never adopts PatchTST: inner CV chooses per fit. A detection-only output is not a complete submission. Preconditions, each verified and recorded:
 1. The late-install fix (reported done in `0e5b0ce`) is confirmed by an R test with an install 10 weeks before the series end.
 2. Training time per fit × the number of fits in a nested run fits the benchmark budget (measured with the pilot).
 3. `torch` (CPU wheel) is accepted in `requirements.in`, and inference stays under 120 s for 20 customers.
@@ -988,7 +1085,7 @@ Findings relayed to agents are generalized, e.g. "night-load FPs dominate", "`pr
 ### Step 22 — Fraunhofer CNN+MLP (priority 9, last)
 
 - **Credit:** a PyTorch port of the architecture in Neubert et al., *Energies* 15(13):4922, 2022 (`github.com/m-neubert/mdpi-2022-paper`, Apache-2.0).
-- **Windows:** weekly, 168 hourly sums from the UTC+1 matrix; keep a week when coverage is ≥80% and set remaining NaN to 0; divide by each customer's median hourly sum + 0.05.
+- **Windows:** weekly, 168 hourly sums from the UTC+1 matrix; keep a week when coverage is ≥80%. **Missing hours are never indistinguishable from observed zeros.** Either feed a per-hour missing-value mask channel (placeholder 0 + mask = 1), or use a defined conservative imputation (the customer's same-hour median over the surrounding 4 weeks) **and** a mask. The choice is made before implementation and covered by a U test: a week with a 6-hour midday gap must not score like a week with 6 observed zero hours. Divide by each customer's median hourly sum + 0.05.
 - **KDE features:** numpy KDE on `linspace(−5, 15, 100)`, `h = 0.25`.
 - **Network:**
   - MLP branch: 4×[Linear(400), LeakyReLU(0.05)];
