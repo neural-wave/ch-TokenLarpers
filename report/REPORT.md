@@ -14,9 +14,9 @@ Most of the knowledge sits in hand-built features:
 - exact-zero statistics, because import-only meters clip PV surplus to zero;
 - a changepoint detector with a year-over-year recurrence check;
 - confounder features for night loads, batteries and commercial profiles;
-- a shoulder-hour deficit that maps to capacity in kWp.
+- capacity from the midday pre-vs-post dip and a physics kWp estimate from the pre-install midday level and the width of the zero-reading window around solar noon.
 
-The learned part is small. A logistic or CatBoost classifier, a decision threshold, a ridge or CatBoost capacity model, a scale factor κ and a date rule. Dates come from one of three regimes: a visible event, PV already present at the start of the series, or too little data.
+The learned part is small: a logistic or CatBoost classifier, a decision threshold, a ridge or CatBoost capacity model, a scale factor κ and a date rule. Dates come from one of three regimes: a visible event, PV already present at the start of the series, or too little data.
 
 All of these choices are made by inner cross-validation inside one fit procedure. Nested cross-validation on the 40 labelled customers scores the whole procedure, option pool included. The final model is the same procedure fit on all 40.
 
@@ -26,7 +26,7 @@ Filled after the real-data run (P3) from aggregate lines only: `nested:`, `dates
 
 `outer_informed_decisions=1`, so the estimate is labelled selection-biased.
 
-Synthetic holdout benchmark (P2 gate, 40 customers, 2 repeats). These numbers are synthetic and are not evidence of competition accuracy:
+Synthetic holdout benchmark (P2 gate, 40 customers, 2 repeats, code `3d2e5cd`, before the Phase 2.5 fixes). These numbers are synthetic and are not evidence of competition accuracy:
 
 | scenario | score |
 |---|---|
@@ -46,7 +46,7 @@ Synthetic holdout benchmark (P2 gate, 40 customers, 2 repeats). These numbers ar
 - Night loads such as heat pumps and storage heaters shift consumption in ways that mimic PV. Dedicated confounder features help; they do not solve it.
 - With 40 labelled customers, any choice made by looking at results overfits. We moved all tuning inside the fit and log every outer-informed decision.
 - Different branches scored on different splits, so numbers were not comparable. We fixed shared customer folds and a common out-of-fold format.
-- Data hygiene: an identifier slipped into the repository once. We scrubbed the history and added a commit hook that blocks data files and identifiers.
+- Data hygiene: a benchmark report on one branch exposed customer identifiers and per-customer values. We scrubbed it at the branch tip, added a commit hook that blocks data files and identifiers, keep the repository private until the old commits are removed, and hand in only a clean export without history.
 - What did not work: (to fill after P3).
 
 ## AI agents and LLM usage

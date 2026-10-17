@@ -42,10 +42,10 @@ History and visibility: commits `e303f6d`, `1f875b6`, `a65b552` and `086eda8` on
 ## Train
 
 ```
-python train.py --timeseries energy.csv --labels labels.csv --out artifacts/model.json [--cv] [--outer-repeats 4] [--report-dir DIR] [--folds F0,F1,...] [--oof-out PATH]
+python train.py --timeseries energy.csv --labels labels.csv --out <private>/model.json [--cv] [--outer-repeats 4] [--report-dir DIR] [--folds F0,F1,...] [--oof-out PATH]
 ```
 
-`--cv` runs nested customer-level cross-validation of the whole training procedure and prints aggregate lines only: `data:` (including whether readings are signed, which switches export features on), `nested:` (score ± SD over repeats, bootstrap 90% interval, F1/D/P, `inner=`/`gap=` for the inner-vs-outer score gap, and `outer_informed_decisions=k`), `dates:` (date accuracy per regime), `regime_confusion:`, `selection:` (how often each inner-CV choice was made). The final model is always fit on all labelled customers. `--report-dir` writes the repeat-0 out-of-fold table (`oof_repeat0.csv`) and selection records.
+`--cv` runs nested customer-level cross-validation of the whole training procedure and prints aggregate lines only: `data:` (including whether readings are signed, which switches export features on), `nested:` (score ± SD over repeats, bootstrap 90% interval, F1/D/P, `inner=`/`gap=` for the inner-vs-outer score gap, and `outer_informed_decisions=k`), `dates:` (date accuracy per regime), `regime_confusion:`, `selection:` (how often each inner-CV choice was made). The final model is always fit on all labelled customers. `--report-dir` writes the repeat-0 out-of-fold table (`oof_repeat0.csv`) and selection records. A model trained on real data goes to a private path outside this repository; it reaches the NW_26 repository only through the export below (`## Submission export`).
 
 Inside each fit, inner CV on the training customers chooses: logistic regression vs CatBoost (CatBoost needs ≥2.0 points and a stable bootstrap), the decision threshold, ridge vs CatBoost capacity, a capacity factor κ, and the date rule for weak-evidence customers. The week-of-year climatology (from labelled non-PV training customers) deseasonalizes the changepoint signal; candidates whose step recurs at the same time in other years are rejected.
 
@@ -129,7 +129,7 @@ Every full run starts with the pilot and is refused if the projection exceeds `-
 
 ## Organizer clarifications
 
-Asked of the organizers; answers get recorded here.
+Questions for the organizers (Step 2.5-H, sent by the team); answers get recorded here.
 
 1. May semi-synthetic augmentation of the provided series be used in the competitive model? *Awaiting answer.*
 2. May the trained model files (JSON parameters with aggregate statistics over the 40 development customers, and CatBoost model files) be published in the open-sourced NW_26 repo? *Awaiting answer.*
