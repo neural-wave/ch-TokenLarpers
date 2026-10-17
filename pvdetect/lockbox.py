@@ -449,7 +449,7 @@ def compare(args) -> int:
     try:
         lines, changes = compare_mod.compare(
             compare_mod.load_oof(a_dir / "oof.csv"), compare_mod.load_oof(b_dir / "oof.csv"),
-            load_labels(d / "dev_labels.csv"),
+            load_labels(d / "dev_labels.csv"), target=args.target,
         )
     except ValueError as e:
         raise _refuse(str(e)) from None
@@ -459,14 +459,18 @@ def compare(args) -> int:
     (out / "compare.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
     for line in lines:
         print(line)
-    m = re.search(r"score_diff=(\S+) ci90=\[([^,]+),([^\]]+)\].*verdict=(\w+)", lines[-1])
-    verdict = m.group(4) if m else "unknown"
+    boot = next(line for line in lines if line.startswith("bootstrap:"))
+    m = re.search(r"score_diff=(\S+) ci90=\[([^,]+),([^\]]+)\]", boot)
+    final = next((line for line in lines if line.startswith("targeted:")), boot)
+    v = re.search(r"verdict=(\w+)\s*$", final)
+    verdict = v.group(1) if v else "unknown"
     if used >= budget:
         _force(st, "compare", f"{args.a} vs {args.b} beyond the decision budget")
     st["decisions_used"] = used + 1
     st["decisions"].append(
         {
             "time": _now(), "base": args.a, "cand": args.b, "verdict": verdict, "forced": used >= budget,
+            "target": args.target,
             "score_diff": float(m.group(1)) if m else None,
             "ci90": [float(m.group(2)), float(m.group(3))] if m else None,
         }
@@ -695,6 +699,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("a")
     p.add_argument("b")
     p.add_argument("--force", action="store_true")
+    p.add_argument("--target", choices=compare_mod.COMPONENTS, help="component the candidate was built for")
     p = sub.add_parser("freeze", parents=[common], help="freeze one run and the code commit")
     p.add_argument("name")
     p = sub.add_parser("open", parents=[common], help="score the frozen run on the lock-box (once)")

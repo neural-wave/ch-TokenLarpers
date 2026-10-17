@@ -1,13 +1,18 @@
 """Paired comparison of two out-of-fold files on the same outer splits, for the data holder only.
 
-    python -m pvdetect.compare BASE_OOF CAND_OOF LABELS [--out-dir PRIVATE_DIR]
+    python -m pvdetect.compare BASE_OOF CAND_OOF LABELS [--out-dir PRIVATE_DIR] [--target COMPONENT]
 
 BASE_OOF and CAND_OOF are shared out-of-fold files from `train.py --cv --oof-out`; every
 (repeat, customer_id) must sit in the same fold in both, else the comparison is refused.
 Prints aggregate lines only: per repeat and pooled over repeats, the confusion matrix and the score
-components of both; paired outcome changes; a paired customer bootstrap of the score difference.
+components of both; paired outcome changes; a paired customer bootstrap of the score difference and of
+the points lost per component (as `pvdetect.diagnose`: detection 100·(1−F1), dates 15·F1·(1−D), capacity 15·F1·(1−P)).
+
+Verdicts (90 % paired bootstrap): without `--target`, `improvement` when the score-difference interval
+lies above 0. With `--target C` (a candidate built for component C), `improvement` when the reduction of
+C's points lost has an interval above 0 **and** the total score is non-inferior: point estimate ≥ 0 and
+interval lower bound ≥ −NONINFERIORITY_MARGIN points; `worse` when the total interval lies below 0.
 `--out-dir` (outside the repository) receives `changes.csv`, the per-customer table; it is never printed.
-The output is AIL-derived when run on real data: keep it with the team, never in an agent session.
 """
 
 from __future__ import annotations
@@ -25,6 +30,8 @@ from pvdetect.scoring import bootstrap_weights, weighted_scores
 BOOTSTRAP_B = 2000
 BOOTSTRAP_SEED = 0
 CI_LEVEL = 0.90
+COMPONENTS = ("detection", "dates", "capacity")
+NONINFERIORITY_MARGIN = 3.0  # score points; pre-registered in DECISIONS.md before its first use
 
 
 def load_oof(path: str | Path) -> pd.DataFrame:
@@ -100,6 +107,45 @@ def paired_bootstrap(pairs: list[tuple[pd.DataFrame, pd.DataFrame]], B: int = BO
     return float(np.mean(point)), float(np.quantile(draws, a)), float(np.quantile(draws, 1 - a))
 
 
+def points_lost(W: np.ndarray, comp: np.ndarray) -> np.ndarray:
+    """Points lost per component for resampled customer sets (draws × 3: detection, dates, capacity);
+    they add up to 100 − score."""
+    tp, fp, fn, sd, sp = (W @ comp).T
+    with np.errstate(divide="ignore", invalid="ignore"):
+        f1 = np.where(tp > 0, 2 * tp / (2 * tp + fp + fn), 0.0)
+        d = np.where(tp > 0, sd / tp, 0.0)
+        p = np.where(tp > 0, sp / tp, 0.0)
+    return np.column_stack([100 * (1 - f1), 15 * f1 * (1 - d), 15 * f1 * (1 - p)])
+
+
+def paired_component_bootstrap(pairs, B: int = BOOTSTRAP_B, seed: int = BOOTSTRAP_SEED) -> dict[str, tuple[float, float, float]]:
+    """Reduction of points lost (base − candidate, positive = better) per component: (point, lo, hi),
+    with the same customer resamples as `paired_bootstrap`."""
+    ids = pairs[0][0].index
+    n = len(ids)
+    W = bootstrap_weights(n, B, seed)
+    point, draws = np.zeros(3), np.zeros((B, 3))
+    for tb, tc in pairs:
+        cb, cc = _components(tb.loc[ids]), _components(tc.loc[ids])
+        one = np.ones((1, n))
+        point += (points_lost(one, cb) - points_lost(one, cc))[0]
+        draws += points_lost(W, cb) - points_lost(W, cc)
+    point, draws = point / len(pairs), draws / len(pairs)
+    a = (1 - CI_LEVEL) / 2
+    lo, hi = np.quantile(draws, a, axis=0), np.quantile(draws, 1 - a, axis=0)
+    return {c: (float(point[i]), float(lo[i]), float(hi[i])) for i, c in enumerate(COMPONENTS)}
+
+
+def targeted_verdict(component: tuple[float, float, float], total: tuple[float, float, float]) -> str:
+    """Verdict for a candidate built for one component: that component's points lost fall (interval above 0)
+    and the total score is non-inferior (point ≥ 0, lower bound ≥ −NONINFERIORITY_MARGIN)."""
+    if total[2] < 0:
+        return "worse"
+    if component[1] > 0 and total[0] >= 0 and total[1] >= -NONINFERIORITY_MARGIN:
+        return "improvement"
+    return "within_noise"
+
+
 def verdict(lo: float, hi: float) -> str:
     if lo > 0:
         return "improvement"
@@ -122,8 +168,14 @@ def _paired_line(label: str, p: dict) -> str:
     )
 
 
-def compare(base: pd.DataFrame, cand: pd.DataFrame, truth: pd.DataFrame) -> tuple[list[str], pd.DataFrame]:
-    """(printed aggregate lines, per-customer changes table)."""
+def compare(
+    base: pd.DataFrame, cand: pd.DataFrame, truth: pd.DataFrame, target: str | None = None
+) -> tuple[list[str], pd.DataFrame]:
+    """(printed aggregate lines, per-customer changes table); the last line carries the verdict."""
+    """(printed aggregate lines, per-customer changes table); the last line carries the verdict
+    (`targeted:` with a target, else `bootstrap:`)."""
+    if target is not None and target not in COMPONENTS:
+        raise ValueError(f"target must be one of {COMPONENTS}")
     check_same_splits(base, cand)
     truth = truth[truth["customer_id"].isin(base["customer_id"])].reset_index(drop=True)
     t_pv = truth["pv_installed"].to_numpy(bool)
@@ -174,6 +226,18 @@ def compare(base: pd.DataFrame, cand: pd.DataFrame, truth: pd.DataFrame) -> tupl
         f"bootstrap: score_diff={diff:+.2f} ci90=[{lo:+.2f},{hi:+.2f}] draws={BOOTSTRAP_B} "
         f"(customers resampled, same per repeat) verdict={verdict(lo, hi)}"
     )
+    comps = paired_component_bootstrap(pairs)
+    lines.append(
+        "components (points lost reduction, + = better): "
+        + " ".join(f"{c}={p:+.2f} ci90=[{a:+.2f},{b:+.2f}]" for c, (p, a, b) in comps.items())
+    )
+    if target is not None:
+        v = targeted_verdict(comps[target], (diff, lo, hi))
+        lines.append(
+            f"targeted: component={target} reduction={comps[target][0]:+.2f} ci90=[{comps[target][1]:+.2f},"
+            f"{comps[target][2]:+.2f}] score_diff={diff:+.2f} ci90=[{lo:+.2f},{hi:+.2f}] "
+            f"margin={NONINFERIORITY_MARGIN:.1f} verdict={v}"
+        )
     return lines, pd.concat(rows)
 
 
@@ -183,10 +247,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("cand")
     ap.add_argument("labels")
     ap.add_argument("--out-dir", type=Path, help="private folder for the per-customer changes table")
+    ap.add_argument("--target", choices=COMPONENTS, help="component the candidate was built for")
     args = ap.parse_args(argv)
     out_dir = _outside_repo(args.out_dir) if args.out_dir else None
     try:
-        lines, changes = compare(load_oof(args.base), load_oof(args.cand), load_labels(args.labels))
+        lines, changes = compare(load_oof(args.base), load_oof(args.cand), load_labels(args.labels), args.target)
     except ValueError as e:
         raise SystemExit(f"refusing: {e}") from None
     for line in lines:

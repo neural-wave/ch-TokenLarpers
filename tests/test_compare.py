@@ -68,6 +68,10 @@ def test_bootstrap_point_estimate_matches_the_scorer(tmp_path):
     assert lo <= diff <= hi
 
 
+def _verdict(lines: list[str], prefix: str = "bootstrap:") -> str:
+    return next(line for line in lines if line.startswith(prefix)).rsplit("verdict=", 1)[1]
+
+
 def test_single_flip_is_within_noise_and_a_large_gain_is_an_improvement(tmp_path):
     labels = compare.load_labels(_labels(tmp_path / "labels.csv", 40))
     truth = [i % 2 == 0 for i in range(40)]
@@ -76,10 +80,46 @@ def test_single_flip_is_within_noise_and_a_large_gain_is_an_improvement(tmp_path
     base = compare.load_oof(_oof(tmp_path / "b.csv", one_wrong))
     cand = compare.load_oof(_oof(tmp_path / "c.csv", truth))
     lines, _ = compare.compare(base, cand, labels)
-    assert lines[-1].endswith("verdict=within_noise")
+    assert _verdict(lines) == "within_noise"
     poor = compare.load_oof(_oof(tmp_path / "p.csv", [not t if i < 12 else t for i, t in enumerate(truth)]))
-    assert compare.compare(poor, cand, labels)[0][-1].endswith("verdict=improvement")
-    assert compare.compare(cand, poor, labels)[0][-1].endswith("verdict=worse")
+    assert _verdict(compare.compare(poor, cand, labels)[0]) == "improvement"
+    assert _verdict(compare.compare(cand, poor, labels)[0]) == "worse"
+
+
+def test_points_lost_add_up_to_the_missing_score():
+    rng = np.random.default_rng(3)
+    tp = rng.random(30) < 0.5
+    comp = np.column_stack([tp, ~tp & (rng.random(30) < 0.3), ~tp & (rng.random(30) < 0.3),
+                            np.where(tp, rng.random(30), 0), np.where(tp, rng.random(30), 0)]).astype(float)
+    W = compare.bootstrap_weights(30, 50, 1)
+    np.testing.assert_allclose(compare.points_lost(W, comp).sum(axis=1), 100 - compare.weighted_scores(W, comp))
+
+
+@pytest.mark.parametrize(
+    ("component", "total", "expected"),
+    [
+        ((3.0, 0.5, 6.0), (2.0, -1.5, 5.5), "improvement"),  # component up, total non-inferior
+        ((3.0, 0.5, 6.0), (2.0, -3.5, 5.5), "within_noise"),  # lower bound beyond the margin
+        ((3.0, 0.5, 6.0), (-0.1, -2.0, 1.0), "within_noise"),  # total point estimate below 0
+        ((3.0, -0.5, 6.0), (2.0, -1.0, 5.0), "within_noise"),  # component interval reaches 0
+        ((3.0, 0.5, 6.0), (-4.0, -6.0, -0.5), "worse"),  # total interval below 0
+    ],
+)
+def test_targeted_verdict_rule(component, total, expected):
+    assert compare.targeted_verdict(component, total) == expected
+
+
+def test_dates_targeted_candidate_with_identical_detection(tmp_path):
+    labels = compare.load_labels(_labels(tmp_path / "labels.csv", 40))
+    truth = [i % 2 == 0 for i in range(40)]
+    late = compare.load_oof(_oof(tmp_path / "b.csv", truth, date="2023-05-21"))  # 20 days late: D = 1/3
+    exact = compare.load_oof(_oof(tmp_path / "c.csv", truth))
+    lines, _ = compare.compare(late, exact, labels, target="dates")
+    comps = next(line for line in lines if line.startswith("components"))
+    assert "detection=+0.00 ci90=[+0.00,+0.00]" in comps and "dates=+10.00" in comps
+    assert lines[-1].startswith("targeted: component=dates reduction=+10.00 ") and _verdict(lines, "targeted:") == "improvement"
+    with pytest.raises(ValueError, match="target must be one of"):
+        compare.compare(late, exact, labels, target="detect")
 
 
 def test_mismatched_folds_are_refused(tmp_path, capsys):
