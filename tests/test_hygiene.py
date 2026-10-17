@@ -65,3 +65,28 @@ def test_clean_python_file_passes(tmp_path: Path):
 def test_whole_tracked_tree_is_clean():
     result = subprocess.run([sys.executable, str(SCRIPT), "--all"], cwd=REPO, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_published_encoder_exception_checks_exact_path_and_bytes(monkeypatch):
+    import hashlib
+    from scripts import check_hygiene as hygiene
+
+    path = "pretrained/small/encoder.pt"
+    content = b"fabricated encoder bytes"
+    monkeypatch.setitem(hygiene.PUBLISHED_ENCODERS, path, hashlib.sha256(content).hexdigest())
+    assert hygiene.check([path], lambda _: content) == []
+    assert hygiene.check([path], lambda _: content + b"changed") == [
+        ("published encoder hash mismatch", path)
+    ]
+    copied = "pretrained/other/encoder.pt"
+    assert hygiene.check([copied], lambda _: content) == [("data file", copied)]
+
+
+def test_published_encoder_exception_still_blocks_identifiers(monkeypatch):
+    import hashlib
+    from scripts import check_hygiene as hygiene
+
+    path = "pretrained/small/encoder.json"
+    content = ("POD" + "123").encode()
+    monkeypatch.setitem(hygiene.PUBLISHED_ENCODERS, path, hashlib.sha256(content).hexdigest())
+    assert hygiene.check([path], lambda _: content) == [("customer identifier", path)]

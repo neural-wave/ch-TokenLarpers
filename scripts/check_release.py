@@ -30,7 +30,7 @@ import sys
 from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from check_hygiene import has_customer_identifier, is_data_path  # noqa: E402
+from check_hygiene import PUBLISHED_ENCODERS, has_customer_identifier, is_data_path, is_published_encoder  # noqa: E402
 
 
 REDACTED = "<path containing a customer identifier>"
@@ -101,11 +101,15 @@ def check(dest: Path, allowed: set[str]) -> list[tuple[str, str]]:
     for path in files:
         if _id_in_path(path):
             offending.append(("customer identifier in path", path))
-        if path not in allowed and is_data_path(path):
-            offending.append(("data file", path))
         with open(dest / path, "rb") as handle:
-            if has_customer_identifier(handle.read()):
-                offending.append(("customer identifier", path))
+            content = handle.read()
+        if path in PUBLISHED_ENCODERS:
+            if not is_published_encoder(path, content):
+                offending.append(("published encoder hash mismatch", path))
+        elif path not in allowed and is_data_path(path):
+            offending.append(("data file", path))
+        if has_customer_identifier(content):
+            offending.append(("customer identifier", path))
     return [(reason, REDACTED if _id_in_path(path) else path) for reason, path in offending]
 
 

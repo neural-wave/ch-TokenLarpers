@@ -8,6 +8,7 @@ Read `IMPLEMENTATION_HANDOFF.md` first. It is the authoritative implementation p
 - No LLM may be in the inference/training pipeline; no external weather, irradiation or geographical data. All inference must run offline, without network calls. Use timestamp-derived calendar features only.
 - Synthetic PV augmentation in competitive training only after organizer approval (Step 19 gate).
 - The hygiene hook must be installed (`sh scripts/install_hooks.sh`) and `python scripts/check_hygiene.py --all` must pass before every commit: no data or model dumps, nothing under artifacts directories, no real customer identifiers (`POD` followed by digits) in any file, message or report.
+- Explicit user-approved model publication exception: the small/medium `pretrained/*/encoder.pt` and `encoder.json` pairs may be committed and used by agents on fabricated inputs. Only the exact four SHA-256-pinned files in `scripts/check_hygiene.py` qualify; this does not allow datasets, private metrics, optimizer states, other model dumps, or AIL inputs in agent sessions.
 
 ## Selection and evidence
 

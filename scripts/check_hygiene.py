@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Refuse to commit organizer data or real customer identifiers.
 
-The repository is open-sourced after the event, so nothing derived from the
-AIL data may enter git history.  This check inspects the files staged for
+Datasets and unapproved derived artifacts must not enter git history. The
+user explicitly approved the exact four checksum-pinned encoder files below.
+The check inspects files staged for
 commit (the default, used by the pre-commit hook), the working-tree copy of
 every tracked file (``--all``, used by CI and one-off audits) or explicit
 paths, and exits 1 when any of them
@@ -20,6 +21,7 @@ Standard library only, so the hook works in any interpreter.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import subprocess
@@ -32,6 +34,19 @@ DATA_SUFFIXES = frozenset({
 })
 DATA_DIRS = frozenset({"artifacts", "artifacts_private", "data_private"})
 DATA_DIR_PREFIXES = ("AIL_data_for_neural_wave",)
+
+# Explicit publication approval: only these bytes at these exact paths.
+PUBLISHED_ENCODERS = {
+    "pretrained/small/encoder.pt": "fd006059193939a00d039f19168e2b80cb3d3b602df17268f23f5445d1952b3e",
+    "pretrained/small/encoder.json": "5c5d159219b1055b8417e73db7129f7a22b739d33d0f60a72375b0db7ff35d95",
+    "pretrained/medium/encoder.pt": "e8bbcc4273ad7f3af72ccdd93093a8560a23729a8e86af0a7d8745ae266b2857",
+    "pretrained/medium/encoder.json": "5cd05732b466dae1f28683081612583ff71ee97f9c76ad574da4dbde2146df03",
+}
+
+
+def is_published_encoder(path: str, content: bytes) -> bool:
+    expected = PUBLISHED_ENCODERS.get(path)
+    return expected is not None and hashlib.sha256(content).hexdigest() == expected
 
 
 def _git(*args: str) -> bytes:
@@ -70,10 +85,17 @@ def check(paths: list[str], reader) -> list[tuple[str, str]]:
     """Return (reason, path) for every offending path, in path order."""
     offending: list[tuple[str, str]] = []
     for path in paths:
-        if is_data_path(path):
+        if path in PUBLISHED_ENCODERS:
+            content = reader(path)
+            if not is_published_encoder(path, content):
+                offending.append(("published encoder hash mismatch", path))
+                continue
+        elif is_data_path(path):
             offending.append(("data file", path))
             continue
-        if has_customer_identifier(reader(path)):
+        else:
+            content = reader(path)
+        if has_customer_identifier(content):
             offending.append(("customer identifier", path))
     return offending
 

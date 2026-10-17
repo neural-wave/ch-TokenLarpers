@@ -16,6 +16,9 @@ Detects photovoltaic installations, commissioning dates and nominal capacity (kW
 
 ## Setup
 
+Both pretrained encoder sizes are included under `pretrained/`. For clone-contained offline setup and matched baseline/hybrid experiments, see [`docs/hybrid_team_setup.md`](docs/hybrid_team_setup.md). After installing dependencies, run `python scripts/check_pretrained.py --models small medium` to verify both.
+
+
 Python 3.11–3.12 (`requires-python >=3.11,<3.13`; verified on 3.12).
 
 ```
@@ -35,7 +38,7 @@ The baseline does not import Torch. Install a CUDA-compatible PyTorch build on t
 
 ## Data hygiene
 
-The repository is open-sourced after the event, so nothing derived from the AIL data may enter git history: raw files and every data-derived artifact stay in private, git-ignored paths, and reports hold aggregate metrics only (no customer identifiers, per-customer values, probabilities or label dates).
+Raw AIL inputs, private metrics, customer identifiers, optimizer checkpoints, and unapproved derived artifacts must not enter Git history. The user explicitly approved publication of the small and medium pretrained encoder pairs under `pretrained/`; the hygiene hook permits only those exact four checksum-pinned files. No general model/data-file exemption is enabled. AIL evaluation outputs remain data-holder-only, including aggregates shared with coding agents.
 
 Install the commit-time check once per clone:
 
