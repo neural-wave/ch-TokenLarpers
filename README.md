@@ -72,6 +72,17 @@ python -m neuralwave_experiment.oof_contract --labels <dev labels> <private>/pvd
 
 Only the printed aggregate lines leave the private directory, and only to teammates, never to an agent. PatchTST writes empty date and capacity (D = P = 0), so compare F1 separately from the full score. The comparison is a Tier B decision and gets a `DECISIONS.md` line.
 
+### One-command private run and error analysis (data holder)
+
+```
+sh scripts/train_and_launch.sh DEV_ENERGY_CSV DEV_LABELS_CSV [UNLABELLED_CSV]
+python -m pvdetect.diagnose PRED_OR_OOF.csv LABELS.csv [--repeat 0] [--out-dir <private>]
+```
+
+The script refuses a `PRIVATE_DIR` inside the repository (default `~/pvdetect_private/final`, mode 700). It runs `train.py --cv --oof-out`, saves the final model and `train_log.txt`, then runs `pvdetect.diagnose` on the out-of-fold predictions (every customer predicted by a model that never saw it) into `diagnosis.txt` and `errors.csv`, and finally opens the GUI with the new model. `CV=0` fits the final model only; `NO_GUI=1` skips the GUI.
+
+`pvdetect.diagnose` prints aggregates only: score with F1/D/P and the exact `points_lost:` split; precision, recall and the TP/FP/FN/TN counts; date errors (median absolute and signed days, share late, shares within 0/7/15/30 days); capacity errors (median APE, median predicted/true ratio, share underestimated, shares within 10/25/50 %, predictions at the 500 kWp clip); the same by true size bin, install season and install year; a rule-based `failure_mode:` per component; and `next_step:`. The per-customer table goes only to `--out-dir`, which must be outside the repository. On a submission-format file of customers the model was trained on, every number is optimistic. All of it is AIL-derived on real data: share only the `next_step:` word or a decision with an agent.
+
 ### Review plots (dev requirement: matplotlib)
 
 ```

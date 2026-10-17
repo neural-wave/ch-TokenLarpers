@@ -41,11 +41,20 @@ for f in "$1" "$2" ${3:+"$3"}; do
   [ -f "$f" ] || { echo "input file not found (argument $f)" >&2; exit 1; }
 done
 
+LABELS=$2
 set -- --timeseries "$1" --labels "$2" ${3:+--unlabelled "$3"}
-[ "${CV:-1}" = "0" ] || set -- "$@" --cv
+[ "${CV:-1}" = "0" ] || set -- "$@" --cv --oof-out "$PRIVATE_DIR/oof.csv"
 
 echo "training; model and log go to the private folder"
-"$PYTHON" train.py "$@" --out "$PRIVATE_DIR/model.json" | tee "$PRIVATE_DIR/train_log.txt"
+rm -f "$PRIVATE_DIR/model.json" "$PRIVATE_DIR/oof.csv"
+PYTHONUNBUFFERED=1 "$PYTHON" train.py "$@" --out "$PRIVATE_DIR/model.json" | tee "$PRIVATE_DIR/train_log.txt"
+[ -f "$PRIVATE_DIR/model.json" ] || { echo "training failed; see the messages above" >&2; exit 1; }
+
+if [ -f "$PRIVATE_DIR/oof.csv" ]; then
+  echo
+  echo "error analysis on out-of-fold predictions (each customer predicted by a model that never saw it):"
+  "$PYTHON" -m pvdetect.diagnose "$PRIVATE_DIR/oof.csv" "$LABELS" --out-dir "$PRIVATE_DIR" | tee "$PRIVATE_DIR/diagnosis.txt"
+fi
 
 [ "${NO_GUI:-0}" = "1" ] && exit 0
 exec "$PYTHON" gui.py --model "$PRIVATE_DIR/model.json"
