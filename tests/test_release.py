@@ -62,8 +62,8 @@ def test_saved_model_files_carry_no_training_customer_ids(tmp_path, monkeypatch)
     selected = _model_saved_files(procedure.fit(table, labels, ids), tmp_path / "selected" / "model.json")
     assert _model_leaked_ids(selected, ids) == []
 
-    forced_sel = {"classifier": "catboost", "threshold": 0.5, "capacity": "catboost", "kappa": 1.0, "insufficient_rule": "weak_candidate"}
-    monkeypatch.setattr(procedure, "_select", lambda oof: dict(forced_sel))
+    forced_sel = {"classifier": "catboost", "threshold": 0.5, "capacity": "catboost", "kappa": 1.0, "insufficient_rule": "weak_candidate", "inner_score": float("nan")}
+    monkeypatch.setattr(procedure, "_select", lambda oof, avg=True: dict(forced_sel))
     forced = procedure.fit(table, labels, ids)
     assert forced["classifier"]["kind"] == "catboost" and forced["capacity"]["kind"] == "catboost"
     files = _model_saved_files(forced, tmp_path / "catboost" / "model.json")

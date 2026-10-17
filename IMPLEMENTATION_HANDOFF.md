@@ -888,6 +888,12 @@ Every item is a Tier A option inside `Procedure.fit`. Inner CV chooses per fit w
 
 **Unlabelled-data modelling:** remains P5/P6, gated.
 
+### Step 2.5-GUI — Optional local GUI (done, synthetic-verified)
+
+- Scope from the GUI plan (`new-stack/docs/GUI_PLAN.md`): `gui.py` + `pvdetect/gui.py` (loopback stdlib server, spawn worker, synthetic check, diagnostics) and `pvdetect/gui_assets/` (vanilla HTML/CSS/JS, no external resources). `inference.py` exposes `run_inference`; the CLI contract is unchanged.
+- Changes no model gate, Tier A option, threshold, release priority or dependency. The GUI is not part of the submission interface and is never needed by `inference.py`.
+- Verified on synthetic data only: browser downloads byte-identical to an isolated CLI run; malformed input, missing model, cancel, clear and shutdown cleanup exercised; only the loopback origin contacted.
+
 ### Step 2.5-F — Package merge and CI (only if time remains after G is safe)
 
 - One `pyproject.toml` with a `src/` layout; one loader following `main`'s stricter rules:
@@ -1037,6 +1043,8 @@ Findings relayed to agents are generalized, e.g. "night-load FPs dominate", "`pr
 - **Tests (U):**
   - the sensitivity test on hand-built climatologies that differ by 0.04 vs 0.06 → pass vs fail;
   - `fit` with options present but a stub inner score preferring the baseline → the baseline is selected.
+
+**Status (2026-10-17):** Steps 17–18 implemented and synthetic-verified (`pvdetect/unlabelled.py`, `pvdetect/unlabelled_audit.py`, `train.py --unlabelled`). Built before P3 at the user's request; no real-data result informed them, so no `DECISIONS.md` line. Memory gate: 866 MB peak on 100 synthetic customers × 4 years (cap 1500). On synthetic data the climatology option fails the sensitivity test (0.127 > 0.05) and is disabled; the spread option ties the baseline and is not adopted.
 
 ### Step 19 — Gated augmentation (`pvdetect/augment.py`)
 

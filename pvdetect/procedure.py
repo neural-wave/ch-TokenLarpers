@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pandas as pd
 
 from pvdetect.changepoint import shrunk_median
 from pvdetect.evaluation import inner_splits
-from pvdetect.features import EXPORT_CAPACITY_FEATURES, capacity_feature_names, feature_names
+from pvdetect.features import EXPORT_CAPACITY_FEATURES, SCHEDULE_FEATURES, capacity_feature_names, feature_names
 from pvdetect.model import CURRENT_VERSION, fit_logreg, fit_ridge, standardize_params
 from pvdetect.pipeline import (
     SIGNED_SHARE,
@@ -22,10 +22,11 @@ from pvdetect.pipeline import (
     regimes_and_dates,
     to_kwp,
 )
-from pvdetect.season import Climatology, fit_climatology
+from pvdetect.season import Climatology, climatology_from_curves, fit_climatology
 from pvdetect.selection import (
     ape_array,
     bootstrap_prob_better,
+    bootstrap_prob_better_outputs,
     choose_kappa,
     pick_threshold,
     threshold_scores,
@@ -35,9 +36,14 @@ CLASSIFIER_MARGIN = 2.0
 BOOTSTRAP_MIN = 0.8
 CAPACITY_MARGIN = 0.03
 NO_CUT = -1e9  # contrast_cut when the present_at_start regime is disabled
+BASE_SETTING = ("labelled_nonpv", "none")  # (climatology, evidence_scale); the conservative baseline
 # Labelled commissioning dates may lag the visible onset by months.
 OFFSET_ERROR_WINDOW = 180
 OFFSET_CAP = 120
+# Optional inner-CV options: E1 persistence block, E2 `avg` classifier, schedule-robust feature block.
+# Without e1/e2 the procedure is exactly the pre-E1/E2 one (`train.py --no-e1e2`); schedule is opt-in.
+ALL_OPTIONS = frozenset({"e1", "e2", "schedule"})
+DEFAULT_OPTIONS = frozenset({"e1", "e2"})
 
 CB_PARAMS = dict(
     iterations=300,
@@ -113,6 +119,26 @@ def fit_date_params(table: FeatureTable, lab: pd.DataFrame, ids: list[str], F: p
     }
 
 
+def _fit_classifiers(
+    X: np.ndarray, y: np.ndarray, clf_kinds: tuple[str, ...], weight: np.ndarray | None = None
+) -> tuple[dict | None, dict]:
+    """(logreg params or None, {"catboost_clf": model} when fitted); `weight` is a per-row sample weight."""
+    from catboost import CatBoostClassifier
+
+    both = y.any() and not y.all()
+    objects: dict = {}
+    logreg = None
+    if "logreg" in clf_kinds:
+        logreg = (
+            fit_logreg(X, y, C=0.5, sample_weight=weight) if both else _constant_linear(X, 50.0 if y.all() else -50.0)
+        )
+    if "catboost" in clf_kinds and both:
+        cb = CatBoostClassifier(auto_class_weights="Balanced", **CB_PARAMS)
+        cb.fit(X, y.astype(int), sample_weight=weight)
+        objects["catboost_clf"] = cb
+    return logreg, objects
+
+
 def _fit_components(
     table: FeatureTable,
     lab: pd.DataFrame,
@@ -124,26 +150,18 @@ def _fit_components(
     *,
     embedding=None,
     projection: dict | None = None,
+    setting: tuple[str, str] = BASE_SETTING,
 ) -> Components:
-    from catboost import CatBoostClassifier, CatBoostRegressor
+    from catboost import CatBoostRegressor
 
     sub = lab.loc[ids]
     y = sub["pv_installed"].to_numpy(bool)
     dates = {c: d.date() for c, d in sub.loc[y, "pv_installation_date"].items() if pd.notna(d)}
     nonpv = [c for c, on in zip(ids, y) if not on]
-    clim = fit_climatology(table.dailies(), nonpv, dates)
+    clim = _climatology(table, nonpv, dates, setting)
     F, cps = compute_features(table, ids, clim, embedding=embedding, projection=projection)
     date_params = fit_date_params(table, lab, ids, F, cps)
-    X = F[names].to_numpy(float)
-    both = y.any() and not y.all()
-    objects: dict = {}
-    logreg = None
-    if "logreg" in clf_kinds:
-        logreg = fit_logreg(X, y, C=0.5) if both else _constant_linear(X, 50.0 if y.all() else -50.0)
-    if "catboost" in clf_kinds and both:
-        cb = CatBoostClassifier(auto_class_weights="Balanced", **CB_PARAMS)
-        cb.fit(X, y.astype(int))
-        objects["catboost_clf"] = cb
+    logreg, objects = _fit_classifiers(F[names].to_numpy(float), y, clf_kinds)
     kwp = sub["pv_capacity_kwp"].to_numpy(float)
     pos = y & np.isfinite(kwp) & (kwp > 0)
     fallback = float(np.median(kwp[pos])) if pos.any() else 5.0
@@ -163,6 +181,19 @@ def _fit_components(
     return Components(clim, F, cps, date_params, logreg, ridge, ridge_export, fallback, objects)
 
 
+def _climatology(table: FeatureTable, nonpv: list[str], pv_dates: dict, setting: tuple[str, str]) -> Climatology:
+    """Climatology for one fit; unlabelled options use the label-free prior's curves/spread."""
+    clim_kind, scale_kind = setting
+    dailies = table.dailies()
+    if clim_kind == "unlabelled_0.5":
+        clim = climatology_from_curves(table.unlabelled.curves_q[0.5], dailies, pv_dates, "unlabelled_0.5")
+    else:
+        clim = fit_climatology(dailies, nonpv, pv_dates)
+    if scale_kind == "unlabelled_spread":
+        clim = replace(clim, evidence_scale=table.unlabelled.evidence_scale)
+    return clim
+
+
 def _inner_oof(
     table,
     labels,
@@ -171,10 +202,13 @@ def _inner_oof(
     splits,
     names,
     cap_names,
+    setting=BASE_SETTING,
+    refit=None,
     *,
     embedding=None,
     raw=None,
 ) -> pd.DataFrame:
+    """Pooled inner OOF outputs; ``refit`` may replace classifiers only."""
     from pvdetect.embedding import fit_projection
 
     rows = []
@@ -190,7 +224,10 @@ def _inner_oof(
             ("ridge", "catboost"),
             embedding=embedding,
             projection=projection,
+            setting=setting,
         )
+        if refit is not None:
+            comp = refit(comp, tr)
         Fva, cps_va = compute_features(table, va, comp.clim, embedding=embedding, projection=projection)
         p_lr = classifier_proba({"logreg": comp.logreg}, {}, Fva, names, "logreg")
         p_cb = (
@@ -241,13 +278,20 @@ def _p_mean(ape: np.ndarray) -> float:
     return float(np.where(np.isfinite(ape), np.maximum(0, 1 - ape / 0.5), 0.0).mean()) if ape.size else np.nan
 
 
-def _select(oof: pd.DataFrame) -> dict:
+def _proba(oof: pd.DataFrame, kind: str) -> np.ndarray:
+    """Inner OOF probabilities of a classifier option; `avg` (E2) is the mean of logreg and CatBoost."""
+    if kind == "avg":
+        return (oof["p_logreg"].to_numpy(float) + oof["p_catboost"].to_numpy(float)) / 2
+    return oof[f"p_{kind}"].to_numpy(float)
+
+
+def _select(oof: pd.DataFrame, avg: bool = True) -> dict:
     """Tier A choices from pooled inner OOF predictions."""
     t_pv = oof["t_pv"].to_numpy(bool)
     t_dates = oof["t_date"].to_numpy("datetime64[ns]")
     err = _err_days(oof["date_weak"], t_dates)
     ape_r = ape_array(oof["kwp_ridge"].to_numpy(float), oof["t_kwp"].to_numpy(float))
-    p_lr, p_cb = oof["p_logreg"].to_numpy(float), oof["p_catboost"].to_numpy(float)
+    p_lr, p_cb = _proba(oof, "logreg"), _proba(oof, "catboost")
     t_lr, s_lr = pick_threshold(threshold_scores(p_lr, t_pv, err, ape_r))
     t_cb, s_cb = pick_threshold(threshold_scores(p_cb, t_pv, err, ape_r))
     clf_kind, thr, boot = "logreg", t_lr, None
@@ -255,7 +299,17 @@ def _select(oof: pd.DataFrame) -> dict:
         boot = bootstrap_prob_better(p_lr, t_lr, p_cb, t_cb, t_pv, err, ape_r)
         if boot >= BOOTSTRAP_MIN:
             clf_kind, thr = "catboost", t_cb
-    prob = p_cb if clf_kind == "catboost" else p_lr
+    # E2: probability averaging is a third candidate, compared against the winner of the rule above.
+    scores = {"logreg": s_lr, "catboost": s_cb, "avg": np.nan}
+    boot_avg = None
+    if avg and np.isfinite(p_cb).all():
+        p_avg = _proba(oof, "avg")
+        t_avg, scores["avg"] = pick_threshold(threshold_scores(p_avg, t_pv, err, ape_r))
+        if scores["avg"] - scores[clf_kind] >= CLASSIFIER_MARGIN:
+            boot_avg = bootstrap_prob_better(_proba(oof, clf_kind), thr, p_avg, t_avg, t_pv, err, ape_r)
+            if boot_avg >= BOOTSTRAP_MIN:
+                clf_kind, thr = "avg", t_avg
+    prob = _proba(oof, clf_kind)
     tp = t_pv & (prob >= thr)
     true_k = oof["t_kwp"].to_numpy(float)
     P_r = _p_mean(ape_r[tp])
@@ -281,23 +335,28 @@ def _select(oof: pd.DataFrame) -> dict:
     final_kwp = np.clip(kappa * oof[f"kwp_{cap_kind}"].to_numpy(float), 0.5, 500.0)
     ape_final = ape_array(final_kwp, true_k)
     thr_final, s_final = pick_threshold(threshold_scores(prob, t_pv, err_final, ape_final))
-    return {
+    out = {
         "classifier": clf_kind,
         "threshold": thr_final,
         "threshold_initial": thr,
         "inner_score_logreg": s_lr,
         "inner_score_catboost": s_cb,
+        "inner_score_avg": scores["avg"],
         "inner_score": s_final,
-        "inner_score_initial": s_cb if clf_kind == "catboost" else s_lr,
+        "inner_score_initial": scores[clf_kind],
         "bootstrap_p": boot,
+        "bootstrap_p_avg": boot_avg,
         "capacity": cap_kind,
         "inner_P_ridge": P_r,
         "inner_P_catboost": P_c,
         "kappa": kappa,
         "insufficient_rule": rule,
     }
+    if not avg:
+        del out["inner_score_avg"], out["bootstrap_p_avg"]
+    return out
 def _full_inner_predictions(oof: pd.DataFrame, sel: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
-    prob = oof["p_catboost"] if sel["classifier"] == "catboost" else oof["p_logreg"]
+    prob = _proba(oof, sel["classifier"])
     raw_kwp = oof[f"kwp_{sel['capacity']}"].to_numpy(float)
     kwp = np.clip(float(sel.get("kappa", 1.0)) * raw_kwp, 0.5, 500.0)
     regime = oof["regime"].to_numpy()
@@ -309,7 +368,7 @@ def _full_inner_predictions(oof: pd.DataFrame, sel: dict) -> tuple[pd.DataFrame,
     pred = pd.DataFrame(
         {
             "customer_id": oof.index.astype(str),
-            "pv_installed": prob.to_numpy(float) >= float(sel["threshold"]),
+            "pv_installed": prob >= float(sel["threshold"]),
             "pv_installation_date": dates,
             "pv_capacity_kwp": kwp,
         }
@@ -331,6 +390,7 @@ def _full_inner_score(oof: pd.DataFrame, sel: dict) -> float:
     pred, truth = _full_inner_predictions(oof, sel)
     return float(main_score(pred, truth)["score"])
 
+
 def _score_precomputed(pred: pd.DataFrame, truth: pd.DataFrame):
     t_pv = truth["pv_installed"].to_numpy(bool)
     p_pv = pred["pv_installed"].to_numpy(bool)
@@ -338,7 +398,6 @@ def _score_precomputed(pred: pd.DataFrame, truth: pd.DataFrame):
     p_dates = pd.to_datetime(pred["pv_installation_date"]).reset_index(drop=True)
     days = np.abs((p_dates - t_dates).dt.days.to_numpy(float))
     d_i = np.where(np.isfinite(days), np.maximum(0.0, 1.0 - days / 30.0), 0.0)
-
     t_cap = truth["pv_capacity_kwp"].to_numpy(float)
     p_cap = pred["pv_capacity_kwp"].to_numpy(float)
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -365,6 +424,7 @@ def _score_from_arrays(t_pv, p_pv, d_i, p_i, idx):
 def _paired_bootstrap_stability(
     base_oof: pd.DataFrame, base_sel: dict, emb_oof: pd.DataFrame, emb_sel: dict, B: int = 1000
 ) -> float:
+    """Fast paired bootstrap equivalent to the official score for embedding adoption."""
     bp, truth = _full_inner_predictions(base_oof, base_sel)
     ep, _ = _full_inner_predictions(emb_oof, emb_sel)
     tb, pb, db, capb = _score_precomputed(bp, truth)
@@ -379,6 +439,96 @@ def _paired_bootstrap_stability(
         better += se > sb
     return better / B
 
+
+def _select_outputs(oof: pd.DataFrame, sel: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Outputs a configuration would submit: prediction, date error, capacity APE."""
+    pred = _proba(oof, sel["classifier"]) >= sel["threshold"]
+    dates = oof["date_first"] if sel["insufficient_rule"] == "first_date" else oof["date_weak"]
+    err = _err_days(dates, oof["t_date"].to_numpy("datetime64[ns]"))
+    ape = ape_array(sel["kappa"] * oof[f"kwp_{sel['capacity']}"].to_numpy(float), oof["t_kwp"].to_numpy(float))
+    return pred, err, ape
+
+
+def _adopt(base: tuple[pd.DataFrame, dict], cand: tuple[pd.DataFrame, dict]) -> tuple[bool, float | None]:
+    """Adopt a candidate only after score margin and paired official-output bootstrap."""
+    (oof_b, sel_b), (oof_c, sel_c) = base, cand
+    if not sel_c["inner_score"] - sel_b["inner_score"] >= CLASSIFIER_MARGIN:
+        return False, None
+    t_pv = oof_b["t_pv"].to_numpy(bool)
+    boot = bootstrap_prob_better_outputs(t_pv, *_select_outputs(oof_b, sel_b), *_select_outputs(oof_c, sel_c))
+    return boot >= BOOTSTRAP_MIN, boot
+
+
+def _choose_unlabelled(table, labels, lab, train_ids, splits, names, cap_names, oof, sel, avg=True):
+    """Climatology first, then evidence_scale on top; every option uses the same splits."""
+    prior = table.unlabelled
+    setting, cur = BASE_SETTING, (oof, sel)
+    info: dict = {}
+    options: dict = {}
+
+    def evaluate(cand_setting):
+        c_oof = _inner_oof(table, labels, lab, train_ids, splits, names, cap_names, cand_setting)
+        return c_oof, _select(c_oof, avg)
+
+    if prior.passed:
+        cand_setting = ("unlabelled_0.5", "none")
+        cand = evaluate(cand_setting)
+        adopt, boot = _adopt(cur, cand)
+        options["climatology"] = {
+            "labelled_nonpv": cur[1]["inner_score"],
+            "unlabelled_0.5": cand[1]["inner_score"],
+            "bootstrap_p": boot,
+        }
+        if adopt:
+            setting, cur = cand_setting, cand
+    else:
+        info["unlabelled_disabled_reason"] = prior.reason
+    if prior.evidence_scale is not None:
+        cand_setting = (setting[0], "unlabelled_spread")
+        cand = evaluate(cand_setting)
+        adopt, boot = _adopt(cur, cand)
+        options["evidence_scale"] = {
+            "none": cur[1]["inner_score"],
+            "unlabelled_spread": cand[1]["inner_score"],
+            "bootstrap_p": boot,
+        }
+        if adopt:
+            setting, cur = cand_setting, cand
+    else:
+        info["evidence_scale_disabled_reason"] = "unlabelled spread unusable"
+    settings = {"climatology": setting[0], "evidence_scale": setting[1]}
+    return setting, cur[0], cur[1], {**settings, **info, "unlabelled_options": options}
+
+
+def _choose_feature_block(table, labels, lab, train_ids, splits, export, cap_names, setting, oof, sel, avg=True):
+    """E1 persistence block on the same inner splits, adopted by the Step 11 rule."""
+    names, cand_names = feature_names(export), feature_names(export, persistence=True)
+    c_oof = _inner_oof(table, labels, lab, train_ids, splits, cand_names, cap_names, setting)
+    cand = (c_oof, _select(c_oof, avg))
+    adopt, boot = _adopt((oof, sel), cand)
+    info = {
+        "feature_block": "persistence" if adopt else "base",
+        "feature_options": {"base": sel["inner_score"], "persistence": cand[1]["inner_score"], "bootstrap_p": boot},
+    }
+    return (cand_names, *cand, info) if adopt else (names, oof, sel, info)
+
+
+def _choose_schedule(table, labels, lab, train_ids, splits, names, cap_names, setting, oof, sel, avg=True):
+    """Schedule-robust block on top of the current names and same inner-split rule."""
+    cand_names = names + list(SCHEDULE_FEATURES)
+    c_oof = _inner_oof(table, labels, lab, train_ids, splits, cand_names, cap_names, setting)
+    cand = (c_oof, _select(c_oof, avg))
+    adopt, boot = _adopt((oof, sel), cand)
+    info = {
+        "schedule_block": "on" if adopt else "off",
+        "schedule_options": {"off": sel["inner_score"], "on": cand[1]["inner_score"], "bootstrap_p": boot},
+    }
+    return (cand_names, *cand, info) if adopt else (names, oof, sel, info)
+
+
+def _final_outputs(oof: pd.DataFrame, sel: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    return _select_outputs(oof, sel)
+
 def fit(
     table: FeatureTable,
     labels: pd.DataFrame,
@@ -387,15 +537,14 @@ def fit(
     inner: bool = True,
     encoder=None,
     feature_block: str = "auto",
+    options: frozenset = DEFAULT_OPTIONS,
 ) -> dict:
-    """Fit baseline or the opt-in frozen-embedding candidate.
-
-    ``encoder`` may be a :class:`FrozenEncoder` or an artifact directory.  A
-    supplied bad artifact is intentionally allowed to raise; it never falls
-    back to baseline.
-    """
+    """Fit option-selected baseline features, optionally augmented by a frozen encoder."""
     if feature_block not in {"auto", "baseline", "embedding"}:
         raise ValueError("feature_block must be auto, baseline, or embedding")
+    if not options <= ALL_OPTIONS:
+        raise ValueError(f"unknown options: {sorted(options - ALL_OPTIONS)}")
+    avg = "e2" in options
     if encoder is not None:
         from pvdetect.embedding import FrozenEncoder
 
@@ -408,22 +557,36 @@ def fit(
     base_names = feature_names(export)
     cap_names = capacity_feature_names(export)
     splits = inner_splits(labels, train_ids) if inner else []
-    raw = None
-    embedding_projection = None
-    block = "baseline"
-    unavailable_reason = None
+    setting, unl_info = BASE_SETTING, {}
+    names = base_names
+    feat_info = {"feature_block": "base"} if "e1" in options else {}
+    sched_info = {"schedule_block": "off"} if "schedule" in options else {}
+    pseudo_info = {"pseudo": "off"} if table.unlabelled_pool else {}
     base_oof = None
-    emb_oof = None
-    base_score = float("nan")
-    emb_score = float("nan")
-    emb_bootstrap = float("nan")
+    base_sel = None
     if splits:
-        base_oof = _inner_oof(table, labels, lab, train_ids, splits, base_names, cap_names)
-        base_sel = _select(base_oof)
-        base_score = _full_inner_score(base_oof, base_sel)
-        base_sel["inner_score"] = base_score
+        oof = _inner_oof(table, labels, lab, train_ids, splits, names, cap_names, setting)
+        sel = _select(oof, avg)
+        sel["inner_score"] = _full_inner_score(oof, sel)
+        if table.unlabelled is not None:
+            setting, oof, sel, unl_info = _choose_unlabelled(
+                table, labels, lab, train_ids, splits, names, cap_names, oof, sel, avg
+            )
+            sel["inner_score"] = _full_inner_score(oof, sel)
+        if "e1" in options:
+            names, oof, sel, feat_info = _choose_feature_block(
+                table, labels, lab, train_ids, splits, export, cap_names, setting, oof, sel, avg
+            )
+            sel["inner_score"] = _full_inner_score(oof, sel)
+        if "schedule" in options:
+            names, oof, sel, sched_info = _choose_schedule(
+                table, labels, lab, train_ids, splits, names, cap_names, setting, oof, sel, avg
+            )
+            sel["inner_score"] = _full_inner_score(oof, sel)
+        base_oof, base_sel = oof, sel
+        option_oof, option_sel = oof, sel
     else:
-        base_sel = {
+        sel = {
             "classifier": "logreg",
             "threshold": 0.5,
             "threshold_initial": 0.5,
@@ -433,12 +596,31 @@ def fit(
             "inner_score": float("nan"),
             "inner_score_initial": float("nan"),
         }
-    emb_sel = None
+        option_oof, option_sel = None, sel
+    labeller = None
+    if table.unlabelled_pool and splits:
+        from pvdetect.pseudolabel import choose_pseudo
+
+        sel, pseudo_info, selected_oof = choose_pseudo(
+            table, labels, lab, train_ids, splits, names, cap_names, setting, base_oof, sel, avg
+        )
+        sel["inner_score"] = _full_inner_score(selected_oof, sel)
+        option_oof, option_sel = selected_oof, sel
+        labeller = pseudo_info.get("pseudo_labeller")
+    elif not table.unlabelled_pool:
+        labeller = None
+    else:
+        pseudo_info["pseudo_disabled_reason"] = "inner CV is disabled"
+    comparison_sel = option_sel
+    raw = None
+    embedding_projection = None
+    block = "baseline"
+    unavailable_reason = None
     if encoder is not None and feature_block in {"auto", "embedding"}:
         from pvdetect.embedding import EMBEDDING_FEATURES, ProjectionUnavailable, fit_projection
 
         raw = encoder.raw_customer_features(table, table.ids)
-        emb_names = base_names + list(EMBEDDING_FEATURES)
+        emb_names = names + list(EMBEDDING_FEATURES)
         try:
             if splits:
                 emb_oof = _inner_oof(
@@ -449,15 +631,17 @@ def fit(
                     splits,
                     emb_names,
                     cap_names,
+                    setting,
                     embedding=encoder,
                     raw=raw,
                 )
-                emb_sel = _select(emb_oof)
-                emb_score = _full_inner_score(emb_oof, emb_sel)
-                emb_bootstrap = _paired_bootstrap_stability(base_oof, base_sel, emb_oof, emb_sel)
-            if not splits:
-                emb_sel = dict(base_sel)
-            # This is the outer fit projection, never a globally cached artifact.
+                emb_sel = _select(emb_oof, avg)
+                emb_sel["inner_score"] = _full_inner_score(emb_oof, emb_sel)
+                emb_bootstrap = _paired_bootstrap_stability(option_oof, option_sel, emb_oof, emb_sel)
+            else:
+                emb_oof = None
+                emb_sel = dict(sel)
+                emb_bootstrap = float("nan")
             embedding_projection = fit_projection(raw, train_ids)
         except ProjectionUnavailable as exc:
             unavailable_reason = str(exc)
@@ -467,8 +651,8 @@ def fit(
         if emb_sel is not None and (
             feature_block == "embedding"
             or (
-                np.isfinite(base_sel.get("inner_score", np.nan))
-                and emb_sel.get("inner_score", -np.inf) - base_sel.get("inner_score", -np.inf) >= CLASSIFIER_MARGIN
+                np.isfinite(comparison_sel.get("inner_score", np.nan))
+                and emb_sel.get("inner_score", -np.inf) - comparison_sel.get("inner_score", -np.inf) >= CLASSIFIER_MARGIN
                 and emb_bootstrap >= BOOTSTRAP_MIN
             )
         ):
@@ -476,25 +660,43 @@ def fit(
             sel = emb_sel
             names = emb_names
         else:
-            sel = base_sel
-            names = base_names
+            embedding_projection = None
     else:
-        sel = base_sel
-        names = base_names
-    if block != "embedding":
-        embedding_projection = None
+        emb_bootstrap = float("nan")
+    if block == "embedding" and labeller:
+        labeller = None
+        pseudo_info = {k: v for k, v in pseudo_info.items() if k != "pseudo_labeller"}
+        pseudo_info.update(
+            pseudo="off",
+            pseudo_disabled_reason="embedding candidate selected; pool has no epoch frame for embeddings",
+        )
+    if block == "embedding":
+        sel["feature_block"] = "embedding"
+        sel["embedding_feature_block"] = feat_info.get("feature_block", "base")
+        sel.update({k: v for k, v in feat_info.items() if k != "feature_block"})
+    elif "e1" in options:
+        sel.update(feat_info)
+    sel.update(unl_info)
+    sel.update(sched_info)
+    sel.update(pseudo_info)
+    clf_kinds = ("logreg", "catboost") if sel["classifier"] in ("avg", "catboost") or labeller else ("logreg", "logreg")
     comp = _fit_components(
         table,
         lab,
         train_ids,
         names,
         cap_names,
-        ("logreg", sel["classifier"]),
+        clf_kinds,
         (sel["capacity"],),
         embedding=encoder if block == "embedding" else None,
         projection=embedding_projection,
+        setting=setting,
     )
-    if sel["classifier"] == "catboost" and "catboost_clf" not in comp.objects:
+    if labeller:
+        from pvdetect.pseudolabel import final_pseudo
+
+        comp = final_pseudo(table, lab, train_ids, names, comp, pseudo_info)
+    if sel["classifier"] in ("catboost", "avg") and "catboost_clf" not in comp.objects:
         sel["classifier"] = "logreg"
         sel["inner_score"] = sel.get("inner_score_logreg", sel.get("inner_score", np.nan))
     if sel["capacity"] == "catboost" and "catboost_cap" not in comp.objects:
@@ -502,11 +704,13 @@ def fit(
     date = {**comp.date_params, "insufficient_rule": sel["insufficient_rule"]}
     sel.update(offset_event=date["offset_event"], start_lag=date["start_lag"], contrast_cut=date["contrast_cut"])
     sel["embedding_bootstrap_p"] = emb_bootstrap
-    sel["feature_block"] = block
+    if block == "embedding":
+        sel["feature_block"] = "embedding"
     if unavailable_reason is not None:
         sel["embedding_unavailable_reason"] = unavailable_reason
+    uses_cb = sel["classifier"] in ("catboost", "avg")
     objects = {}
-    if sel["classifier"] == "catboost":
+    if uses_cb:
         objects["catboost_clf"] = comp.objects["catboost_clf"]
     if sel["capacity"] == "catboost":
         objects["catboost_cap"] = comp.objects["catboost_cap"]
@@ -519,8 +723,8 @@ def fit(
         "classifier": {
             "kind": sel["classifier"],
             "threshold": sel["threshold"],
-            "logreg": comp.logreg if sel["classifier"] == "logreg" else None,
-            "catboost_file": "catboost_clf.cbm" if sel["classifier"] == "catboost" else None,
+            "logreg": comp.logreg if sel["classifier"] in ("logreg", "avg") else None,
+            "catboost_file": "catboost_clf.cbm" if uses_cb else None,
         },
         "capacity": {
             "kind": sel["capacity"],

@@ -38,14 +38,29 @@ FITTED = (
 )
 FEATURE_NAMES = FITTED[:12] + LABEL_FREE + FITTED[12:]
 EXPORT_FEATURES = ("neg_frac", "export_kw")
+# E1 feature block: computed in every fit/predict, used by the classifier only when inner CV picks it.
+PERSISTENCE_FEATURES = ("summer_suppressed_week_frac",)
+PERSIST_WEEK_DAYS = 4  # valid summer days for an ISO week to count
+PERSIST_MIN_WEEKS = 8
+PERSIST_MIN_WINTER_DAYS = 30
+PERSIST_DROP = 0.5  # weekly median ds this far below the winter median counts as suppressed
+# Schedule feature block: computed in every fit/predict, used by the classifier only when inner CV picks it.
+SCHEDULE_FEATURES = ("solar_shape_consistency",)
+SCHEDULE_MONTHS = (6, 7, 8)
+SCHEDULE_GAP_DAYS = 14  # post window starts this many days after the cut
+SCHEDULE_MIN_DAYS = 20  # valid days per stratum (weekday / weekend) on each side of the cut
 CAPACITY_FEATURES = ("dip_kw", "log_kwp_phys", "zero_window_h", "night_kw", "log_mean_daily_kwh")
 EXPORT_CAPACITY_FEATURES = ("export_kw", "night_kw")
 LOG1P_CAPACITY = ("dip_kw", "zero_window_h", "night_kw", "export_kw")
 NOON_SLOT = 50  # 12:30 UTC+1
 
 
-def feature_names(export_enabled: bool) -> list[str]:
-    return list(FEATURE_NAMES) + (list(EXPORT_FEATURES) if export_enabled else [])
+def feature_names(export_enabled: bool, persistence: bool = False) -> list[str]:
+    return (
+        list(FEATURE_NAMES)
+        + (list(EXPORT_FEATURES) if export_enabled else [])
+        + (list(PERSISTENCE_FEATURES) if persistence else [])
+    )
 
 
 def capacity_feature_names(export_enabled: bool) -> list[str]:
@@ -120,21 +135,34 @@ def _zero_window_h(dates: np.ndarray, M: np.ndarray, v: pd.DataFrame) -> float:
     return float(np.mean(hours))
 
 
+DAILY_LABEL_FREE = ("seasonal_contrast", "early_contrast", "summer_zero_frac", "log_mean_daily_kwh", "night_kw")
+
+
+def daily_label_free_features(daily: pd.DataFrame) -> dict[str, float]:
+    """The label-free features computable from the daily frame alone (also used for unlabelled data)."""
+    out = dict.fromkeys(DAILY_LABEL_FREE, np.nan)
+    v = daily[daily["valid"]]
+    if v.empty:
+        return out
+    out["seasonal_contrast"] = _contrast(last365(v))
+    out["early_contrast"] = _contrast(first365(v))
+    su = last365(v)
+    su = su[su["month"].isin(SUMMER)]
+    out["summer_zero_frac"] = float(su["zero"].mean()) if len(su) else np.nan
+    out["log_mean_daily_kwh"] = float(np.log1p(max(0.0, v["total"].mean())))
+    out["night_kw"] = 4 * float(v["night"].median())
+    return out
+
+
 def label_free_features(cd) -> dict[str, float]:
     """Features that never depend on labels or fitted artifacts (cacheable across folds)."""
     out = dict.fromkeys(LABEL_FREE + EXPORT_FEATURES, np.nan)
     if cd is None or cd.n_valid == 0:
         return out
     v = cd.daily[cd.daily["valid"]]
-    out["seasonal_contrast"] = _contrast(last365(v))
-    out["early_contrast"] = _contrast(first365(v))
+    out.update(daily_label_free_features(cd.daily))
     out["dip_center_hour"] = _dip_center_hour(cd.dates, cd.M, v)
-    su = last365(v)
-    su = su[su["month"].isin(SUMMER)]
-    out["summer_zero_frac"] = float(su["zero"].mean()) if len(su) else np.nan
     out["zero_window_h"] = _zero_window_h(cd.dates, cd.M, v)
-    out["log_mean_daily_kwh"] = float(np.log1p(max(0.0, v["total"].mean())))
-    out["night_kw"] = 4 * float(v["night"].median())
     out["neg_frac"] = cd.neg_frac
     out["export_kw"] = 4 * max(0.0, -cd.q001)
     return out
@@ -164,9 +192,50 @@ def _cloud_var(v: pd.DataFrame, cut: pd.Timestamp) -> float:
     return float(np.clip(np.log((_mad_diff(post) + 1e-6) / (_mad_diff(pre) + 1e-6)), -5.0, 5.0))
 
 
+def _summer_suppressed_week_frac(w: pd.DataFrame, ds: np.ndarray) -> float:
+    """E1: share of summer ISO weeks in `w` (≥4 valid days) whose median ds ≤ the winter median ds − 0.5."""
+    months = w["month"].to_numpy()
+    winter = _med(ds[np.isin(months, WINTER)], PERSIST_MIN_WINTER_DAYS)
+    if not np.isfinite(winter):
+        return np.nan
+    summer = np.isin(months, SUMMER)
+    iso = w.index[summer].isocalendar()
+    week = iso["year"].to_numpy(np.int64) * 100 + iso["week"].to_numpy(np.int64)
+    weekly = pd.Series(ds[summer]).groupby(week).agg(["median", "count"])
+    weekly = weekly[weekly["count"] >= PERSIST_WEEK_DAYS]
+    if len(weekly) < PERSIST_MIN_WEEKS:
+        return np.nan
+    return float((weekly["median"] <= winter - PERSIST_DROP).mean())
+
+
+def _solar_shape_consistency(v: pd.DataFrame, cut: pd.Timestamp) -> float:
+    """Change of the June–August midday trough depth across `cut`, the smaller of weekdays and weekends.
+
+    Trough depth per valid day: (mid − mean(night, eve)) / the customer's median June–August total per slot.
+    Pre: June–August days before `cut`; post: June–August days ≥ 14 days after it; ≥ 20 days per stratum and
+    side, else NaN. Positive only when both day types acquire a deeper midday trough (PV, not a schedule)."""
+    jja = v[v["month"].isin(SCHEDULE_MONTHS)]
+    norm = _med(jja["total"].to_numpy(float) / 96, 1)
+    if not (np.isfinite(norm) and norm > 0):
+        return np.nan
+    t = (jja["mid"].to_numpy(float) - (jja["night"].to_numpy(float) + jja["eve"].to_numpy(float)) / 2) / norm
+    idx = jja.index
+    pre = idx < cut
+    post = idx >= cut + pd.Timedelta(days=SCHEDULE_GAP_DAYS)
+    weekend = jja["weekend"].to_numpy(bool)
+    deltas = []
+    for stratum in (False, True):
+        on = weekend == stratum
+        a, b = _med(t[pre & on], SCHEDULE_MIN_DAYS), _med(t[post & on], SCHEDULE_MIN_DAYS)
+        if not (np.isfinite(a) and np.isfinite(b)):
+            return np.nan
+        deltas.append(a - b)
+    return float(min(deltas))
+
+
 def fitted_features(cd, clim: Climatology, lf: dict[str, float]) -> tuple[dict[str, float], Commissioning | None]:
     """Climatology-dependent features (computed inside every fit/predict with that fit's climatology)."""
-    out = dict.fromkeys(FITTED, np.nan)
+    out = dict.fromkeys(FITTED + PERSISTENCE_FEATURES + SCHEDULE_FEATURES, np.nan)
     if cd is None or cd.n_valid == 0:
         return out, None
     daily = cd.daily
@@ -190,11 +259,13 @@ def fitted_features(cd, clim: Climatology, lf: dict[str, float]) -> tuple[dict[s
             out["d_eve"] = _delta(v, clim.deseason(v, "log_eve"), cut)
             out["dtotal"] = _delta(v, clim.deseason(v, "log_total"), cut)
             out["cloud_var"] = _cloud_var(v, cut)
+            out["solar_shape_consistency"] = _solar_shape_consistency(v, cut)
     ds = v["s"].to_numpy(float) - clim.s[v["woy"].to_numpy() - 1]
     w365 = v.index > v.index[-1] - pd.Timedelta(days=365)
     summer = v["month"].isin(SUMMER).to_numpy()
     sd = _med(ds[w365 & summer], 30)
     out["summer_ds"] = sd if np.isfinite(sd) else _med(ds[summer], 30)
+    out["summer_suppressed_week_frac"] = _summer_suppressed_week_frac(v[w365], ds[w365])
 
     w = last365(v)
     summer_all = v[v["month"].isin(SUMMER)]

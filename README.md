@@ -50,16 +50,24 @@ History and visibility: commits `e303f6d`, `1f875b6`, `a65b552` and `086eda8` on
 ## Train
 
 ```
-python train.py --timeseries energy.csv --labels labels.csv --out <private>/model.json [--cv] [--outer-repeats 4] [--report-dir DIR] [--folds F0,F1,...] [--oof-out PATH]
+python train.py --timeseries energy.csv --labels labels.csv --out <private>/model.json [--cv] [--outer-repeats 4] [--report-dir DIR] [--folds F0,F1,...] [--oof-out PATH] [--unlabelled <private>/unlabelled.csv] [--split-dir <private>/split [--split-frac 0.75] [--split-seed 0]]
 ```
 
-`--cv` runs nested customer-level cross-validation of the whole training procedure and prints aggregate lines only: `data:` (including whether readings are signed, which switches export features on), `nested:` (score ± SD over repeats, bootstrap 90% interval, F1/D/P, `inner=`/`gap=` for the inner-vs-outer score gap, and `outer_informed_decisions=k`), `dates:` (date accuracy per regime), `regime_confusion:`, `selection:` (how often each inner-CV choice was made). The final model is always fit on all labelled customers. `--report-dir` writes the repeat-0 out-of-fold table (`oof_repeat0.csv`) and selection records. A model trained on real data goes to a private path outside this repository; it reaches the NW_26 repository only through the export below (`## Submission export`).
+`--cv` runs nested customer-level cross-validation of the whole training procedure and prints aggregate lines only: `data:` (including whether readings are signed, which switches export features on), `nested:` (score ± SD over repeats, bootstrap 90% interval, F1/D/P, `inner=`/`gap=` for the inner-vs-outer score gap, and `outer_informed_decisions=k`), `points_lost:` (the exact split of `100 − score` into detection `100·(1−F1)`, dates `15·F1·(1−D)` and capacity `15·F1·(1−P)`, with the largest named; it picks the Step 2.5-E branch), `dates:` (date accuracy per regime), `regime_confusion:`, `selection:` (how often each inner-CV choice was made). These lines are AIL-derived: they stay with the team and never go into an agent session (organizer answer 6). The final model is always fit on all labelled customers. `--report-dir` writes the repeat-0 out-of-fold table (`oof_repeat0.csv`) and selection records. A model trained on real data goes to a private path outside this repository; it reaches the NW_26 repository only through the export below (`## Submission export`).
 
-Inside each fit, inner CV on the training customers chooses: logistic regression vs CatBoost (CatBoost needs ≥2.0 points and a stable bootstrap), the decision threshold, ridge vs CatBoost capacity, a capacity factor κ, and the date rule for weak-evidence customers. The week-of-year climatology (from labelled non-PV training customers) deseasonalizes the changepoint signal; candidates whose step recurs at the same time in other years are rejected.
+Inside each fit, inner CV on the training customers chooses: logistic regression vs CatBoost (CatBoost needs ≥2.0 points and a stable bootstrap), then the average of both (`avg`, Step 2.5-E2, same margin rule against that winner), the decision threshold, ridge vs CatBoost capacity, a capacity factor κ, the date rule for weak-evidence customers, and whether to add the persistence feature block (E1: `summer_suppressed_week_frac`, the share of summer weeks in the last year whose midday/night ratio stays clearly below the winter level, which separates PV from temporary drops such as holidays; same margin rule). The week-of-year climatology (from labelled non-PV training customers) deseasonalizes the changepoint signal; candidates whose step recurs at the same time in other years are rejected.
+
+`--unlabelled PATH` (optional, Steps 17–18) streams the unlabelled series in typed chunks (`--unlabelled-chunksize`, default 500000) into per-day sums with exact keep-first deduplication; it drops null ids, ids that don't start with `--unlabelled-id-prefix` (default `POD`) and every customer present in `--timeseries`, and prints one aggregate `unlabelled:` line. From these label-free daily frames it builds a fold-independent prior: a week-of-year climatology from the unlabelled customers with `seasonal_contrast` at or above the median (`unlabelled_0.5`), and the spread of behaviour across households per week. Two Tier A options are then scored on each fit's common inner folds: climatology `labelled_nonpv` vs `unlabelled_0.5` (only when the filter-sensitivity test passes: the climatologies for q = 0, 0.25, 0.5, 0.75 differ by at most 0.05 log units in every week; otherwise disabled with the reason printed), then changepoint evidence scaled by the weekly spread or not. An option replaces the baseline only with ≥2.0 inner points and a paired bootstrap ≥0.8; the `selection:` line counts the choices. Unlabelled customers are never treated as PV-free or as negatives. `clim_unlabelled.json` (aggregate curves and the sensitivity numbers) is written next to `--out` and is not shipped by the export. Without `--unlabelled`, training is byte-identical to before. `python -m pvdetect.unlabelled_audit --unlabelled P --timeseries DEV` prints dev-vs-unlabelled KS statistics and peak memory (synthetic gate: 100 customers × 4 years, 13.9M rows, 866 MB peak, 10 s).
+
+Pseudo-labelling (organizer answer 4): with `--unlabelled`, `--pseudo-pool N` (default 300, `0` disables) streams the file a second time to rebuild full day matrices (float32) for at most N unlabelled customers with ≥365 valid days, chosen by a salted hash of the id (independent of file order). As the last Tier A option of each fit, on the same inner splits, the already chosen classifier scores the pool; customers with probability ≥0.95 or ≤0.05 become pseudo-positives/negatives (each class capped at 3× the labelled count, weight 0.5) and only the classifier is refit; dates, capacity and climatology never see pseudo-labels, and unconfident customers are left out, never treated as negatives. Adopted only with the margin rule; one round. The `selection:` line shows `pseudo off=k/n on=k/n`.
+
+Option switches for single-change experiments: `--no-e1e2` disables the E1/E2 options (training is then byte-identical to commit `fbab11e`); `--schedule` adds the `solar_shape_consistency` feature-block option (computed at the changepoint cut from June–August days before vs ≥14 days after, weekdays and weekends separately with ≥20 days each, value = the smaller of the two midday-trough deepenings, NaN otherwise; adopted only with the margin rule; off by default). `scripts/train_and_launch.sh` passes `TRAIN_FLAGS` through, e.g. `TRAIN_FLAGS="--no-e1e2 --schedule"`.
 
 `inner=` is the mean inner-CV score of the final selected configuration over the outer fits, and `gap=` is `inner` minus the nested score. After the capacity model, κ and the date rule are chosen, the decision threshold is rescored once on those final inner out-of-fold outputs (same grid, same tie-breaking); `threshold_initial`/`inner_score_initial` in the selection records keep the pre-rescoring values. The gap is a warning signal, not a measure of overfitting: inner and outer scores come from different customer sets and training sizes. A gap above about 5 points calls for a look at selection stability (the `selection:` line); it proves nothing alone.
 
 Dates come from one of three regimes: `event` (detected changepoint + learned offset), `present_at_start` (PV already present when data starts: first date − learned lag), `insufficient` (weak candidate or first date, chosen by inner CV).
+
+`--split-dir DIR` (optional) first splits `--timeseries` by customer: the unique customer ids are shuffled with `--split-seed` (default 0), a `--split-frac` share (default 0.75, rounded) goes to `DIR/training.csv` and the rest to `DIR/test.csv`, each file holding every row of its customers as text (same separator and columns, leading zeros kept; rows with an empty id go to neither). Training, `--cv` included, then runs on `training.csv` only: labelled and extension customers in `test.csv` are dropped from `--labels`/`--ext-labels`, and `--unlabelled` excludes every customer of the original input. It prints one `split:` line with counts. `DIR` must be outside the repository. Score the held-out customers by running inference on `DIR/test.csv` with the saved model.
 
 ### Shared-fold comparison
 
@@ -77,7 +85,21 @@ python -m neuralwave_experiment.evaluation --canonical-dir <private>/canonical -
 python -m neuralwave_experiment.oof_contract --labels <dev labels> <private>/pvdetect_oof.csv <private>/patchtst/oof_patchtst_scratch.csv
 ```
 
-Only the printed aggregate lines leave the private directory. PatchTST writes empty date and capacity (D = P = 0), so compare F1 separately from the full score. The comparison is a Tier B decision and gets a `DECISIONS.md` line.
+Only the printed aggregate lines leave the private directory, and only to teammates, never to an agent. PatchTST writes empty date and capacity (D = P = 0), so compare F1 separately from the full score. The comparison is a Tier B decision and gets a `DECISIONS.md` line.
+
+### One-command private run and error analysis (data holder)
+
+```
+sh scripts/train_and_launch.sh DEV_ENERGY_CSV DEV_LABELS_CSV [UNLABELLED_CSV]
+python -m pvdetect.compare BASE_OOF CAND_OOF LABELS [--out-dir <private>]
+python -m pvdetect.diagnose PRED_OR_OOF.csv LABELS.csv [--repeat 0] [--out-dir <private>]
+```
+
+The script refuses a `PRIVATE_DIR` inside the repository (default `~/pvdetect_private/final`, mode 700). It runs `train.py --cv --oof-out`, saves the final model and `train_log.txt`, then runs `pvdetect.diagnose` on the out-of-fold predictions (every customer predicted by a model that never saw it) into `diagnosis.txt`, `diagnosis.json` and `errors.csv`, and finally opens the GUI with the new model. `CV=0` fits the final model only; `NO_GUI=1` skips the GUI; `PORT=` picks the GUI port.
+
+`pvdetect.diagnose` prints aggregates only: score with F1/D/P and the exact `points_lost:` split; precision, recall and the TP/FP/FN/TN counts; date errors (median absolute and signed days, share late, shares within 0/7/15/30 days); capacity errors (median APE, median predicted/true ratio, share underestimated, shares within 10/25/50 %, predictions at the 500 kWp clip); the same by true size bin, install season and install year; a rule-based `failure_mode:` per component; and `next_step:`. The per-customer table goes only to `--out-dir`, which must be outside the repository. On a submission-format file of customers the model was trained on, every number is optimistic. All of it is AIL-derived on real data: share only the `next_step:` word or a decision with an agent.
+
+`pvdetect.compare` is the paired check for one pre-registered change: two out-of-fold files from the same splits (it refuses differing folds or coverage), per repeat and in total the confusion matrices, precision, recall, F1, D, P and score for both, the paired counts of customers that went wrong→right and right→wrong, and a customer bootstrap of the score difference with a 90 % interval and a verdict (`improvement`, `within_noise`, `worse`). Numbers reuse `pvdetect.diagnose`; the per-customer `changes.csv` goes only to the private `--out-dir`. Typical run: `TRAIN_FLAGS=--no-e1e2` and `TRAIN_FLAGS="--no-e1e2 --schedule"` into two private folders, then compare their `oof.csv`. Each comparison is a Tier B decision (one `DECISIONS.md` line).
 
 ### Unlabelled pretraining and optional hybrid features
 
@@ -109,6 +131,17 @@ python train.py --timeseries <private>/energy.csv --labels <private>/labels.csv 
 ```
 
 The frozen encoder produces label-free customer summaries. Imputation, scaling and the four-component projection are fit only on the current training customers, including inside inner folds. Physical features, date detection and capacity estimation remain intact. `auto` compares baseline and embedding candidates on identical inner folds using complete predictions and the existing margin/bootstrap rule; outer results never choose the feature block. `--feature-block embedding` is a forced diagnostic, not an adoption decision. A selected baseline saves no encoder dependency; a selected hybrid saves the exact hash-checked `encoder/` pair with model schema v3.
+
+The integrated `new-stack` options remain available with the encoder: E1 persistence
+and E2 probability averaging are enabled by default (`--no-e1e2` disables them),
+`--schedule` adds the schedule-consistency candidate, and `--unlabelled` enables
+the upstream prior and pseudo-pool preparation. Pseudo-labelling and frozen embeddings
+are separate candidates: the compact pseudo pool has no epoch frame for encoder
+windows. Automatic hybrid selection compares against the selected physical candidate,
+including pseudo-labelling when it wins. A selected hybrid records pseudo-labelling
+as off with an explicit reason; it is not a combined pseudo-plus-embedding refit.
+Previously saved evaluation results describe their recorded source version, not this
+updated option pool.
 
 Before any scale increase, compare the same transformer trained from scratch and with masked pretraining, with matched windows, targets, aggregation, splits and tuning budgets. Evaluate calendar-time persistence/coverage, pre-installation alarms, onset error, late installations and non-PV alarms separately. Fresh blind customers are required for a final independent claim when available; more development seeds cannot replace them.
 
@@ -160,9 +193,34 @@ Loads `artifacts/model.json` (plus sibling files) automatically and writes to th
 
 The loader sniffs `;`/`,` separators and comma decimals, accepts epoch seconds or milliseconds, drops duplicate timestamps, and maps every reading to fixed UTC+1 so DST days (92/100 rows) become ordinary 96-slot days.
 
+## Local GUI (optional)
+
+A browser interface for running the same detector without the command line. It is optional: `python inference.py path/to/test.csv` remains the submission interface and does not depend on it.
+
+```
+python gui.py                                    # default model location (artifacts/model.json)
+python gui.py --model /private/final/model.json  # explicit model
+python gui.py --model /private/final/model.json --labels /private/labels.csv  # diagnose every analysed CSV
+python gui.py --port 8765 --no-browser
+```
+
+The terminal prints `PV detector GUI: http://127.0.0.1:PORT/`; the browser opens there unless `--no-browser`. Stop with Ctrl-C.
+
+- **Run synthetic check** needs no files and no model. It generates fabricated variant-A customers (train seed 101, n = 24; test seed 102, n = 12), fits a demo model with the normal training procedure, runs inference, repeats it, runs `inference.py` in an isolated copy of the app, and compares both CSVs byte for byte. The synthetic score is labelled as a regression demonstration, not real-world accuracy.
+- **Analyze local CSV** uploads a file through the browser to a private temporary folder and runs it with the model configured at launch only. The demo model is never used for your file; without a configured model this action is disabled.
+- **Automatic diagnosis:** with `--labels` (`scripts/train_and_launch.sh` passes the training labels), every completed analysis is scored against the labels of the customers it contains, with the same aggregates as `pvdetect.diagnose`, shown at the top of the sidebar ("Diagnosis"). Customers without a label are left out and counted. On the customers the model was trained on the numbers are optimistic; the cross-validated panel below it is the honest estimate. The synthetic check is diagnosed against its known labels the same way.
+- **Model evaluation panel:** when `diagnosis.json` (written by `pvdetect.diagnose --out-dir`) sits next to the configured `model.json`, the sidebar shows it before any run: score and F1, points lost per part, precision/recall with false-alarm and missed counts, date D and error days, capacity P and the predicted/true ratio, the failure modes and the per-size breakdown. It is labelled out-of-fold or in-sample, and marked stale when the model file is newer. Only the aggregate file is read; `errors.csv` is never served.
+- Layout: header actions (Analyze CSV, Run synthetic check, download menu), a sidebar of run figures (customers, PV share, median/total capacity, date regimes, synthetic score, output checks, files, input quality), the selected customer's weekly/daily withdrawal or midday power with the estimated (and, for synthetic data, known) installation marker, a customer table with search and PV filter, and a before/after typical-day comparison (observed withdrawal, not seasonally adjusted). Times use the fixed UTC+1 day matrix of the model.
+- **Download** returns the exact `predictions.csv` and `pv_extensions_predictions.csv` written by `pvdetect.output`, byte-identical to the CLI for the same model and input.
+- **Clear session data** deletes uploads, outputs, synthetic data and the demo model; your original files, the configured model and downloaded files are untouched. Stopping the app deletes the session folder as well. A hard kill can leave the folder (`pvdetect-gui-*`) in the OS temp directory; it is not securely erased.
+
+Privacy: the server binds to 127.0.0.1 only, rejects other Host headers and cross-origin requests, requires a per-launch token for every API call, logs no data, and loads no external resources. Do not use real customer data in screenshots, videos or reports; demo material comes from the synthetic check.
+
+Design credit: the visual design (dark Quartz layout, palette, chart styling and icons) is ported from Open Climate Fix's MIT-licensed [quartz-frontend](https://github.com/openclimatefix/quartz-frontend); see `pvdetect/gui_assets/Quartz-frontend-MIT.txt`. The bundled Inter font is under the SIL Open Font License (`pvdetect/gui_assets/Inter-OFL.txt`).
+
 ## Submission export
 
-The trained model never enters this repository's history: the hygiene hook blocks `artifacts/` and every `.cbm`. It reaches the NW_26 repository only through the export script below or through the organizer-approved private channel (files placed into `artifacts/` next to `inference.py`, which loads them automatically).
+The trained model never enters this repository's history: the hygiene hook blocks `artifacts/` and every `.cbm`. It reaches the NW_26 repository through the export script below, which the organizers allow (answer 2): the exported repository carries `artifacts/model.json` and its sibling files next to `inference.py`, which loads them automatically.
 
 ```
 sh scripts/export_submission.sh COMMIT DEST [MODEL_DIR]
@@ -200,16 +258,21 @@ Every full run starts with the pilot and is refused if the projection exceeds `-
 
 ## Organizer clarifications
 
-Questions for the organizers (Step 2.5-H, sent by the team); answers get recorded here.
+Questions for the organizers (Step 2.5-H and the team's Discord questions); answers get recorded here.
 
-1. May semi-synthetic augmentation of the provided series be used in the competitive model? *Awaiting answer.*
-2. May the trained model files (JSON parameters with aggregate statistics over the 40 development customers, and CatBoost model files) be published in the open-sourced NW_26 repo? *Awaiting answer.*
-3. If not, which private channel should deliver them (e.g. direct upload or Swisstransfer), with the organizers placing them into `artifacts/` next to `inference.py`? *Awaiting answer.*
-
-Until answer 2 arrives we plan for the private channel. `inference.py` loads `artifacts/model.json` automatically, so that route needs no code change.
+1. May semi-synthetic augmentation of the provided series be used in the competitive model? *Awaiting answer* (not covered by the answers below; Step 19 stays gated).
+2. May the trained model files be published in the NW_26 repo? **Yes** (2026-10-17): a pre-trained model may be included in the repository. `scripts/export_submission.sh COMMIT DEST MODEL_DIR` copies it into `DEST/artifacts/`; the private channel is no longer needed.
+3. Sunrise/sunset or solar elevation computed for an assumed location? **No**: it counts as location data, and the customers are spread across Switzerland. Calendar features from the timestamps only (the pipeline uses fixed UTC+1 clock windows).
+4. Pseudo-labelling / self-training on the unlabelled series? **Yes**, semi-supervised and hybrid approaches are allowed.
+5. Are the 20 hidden test customers in the unlabelled set? **No**, there is no overlap.
+6. May per-customer or aggregate statistics derived from AIL data be shared with an LLM coding assistant? **No**, not even aggregates. Real-data outputs (`train.py --cv` lines, review plots, OOF files) stay with the data holder and are never pasted into an agent session or a file an agent reads.
+7. Test data: same 2022–2025 period, already filtered to the evaluated POD customers.
+8. Evaluation: no internet; any Python version (document it); no formal time or memory limit, fast is appreciated.
+9. Date scoring: linear, 1.0 at 0 days, 0.5 at 15 days, 0 at ≥ 30 days (matches `pvdetect.scoring`).
+10. Installs before 2022: none in the labelled set; possible in the unlabelled set (never checked).
 
 ## Status
 
-The baseline and optional frozen-encoder pipeline are integrated. Local checks use wholly artificial data only; they establish execution and leakage-contract behavior, not competition accuracy. Real-data nested CV, blind-customer evaluation and CUDA validation remain data-holder tasks. Extensions remain header-only. No GPU rental, upload or real-data training is performed by the integration.
+The baseline and optional frozen-encoder pipeline are integrated, including upstream unlabelled-derived climatology and evidence-scale options (`--unlabelled`) and inner-CV model selection. Local checks use wholly artificial data only; they establish execution and leakage-contract behavior, not competition accuracy. Real-data nested CV and blind-customer evaluation remain data-holder tasks. Extensions remain header-only. Upstream organizer restrictions apply to all AIL outputs, including aggregates: they must not be shared with coding agents.
 
 Upstream baseline export rehearsal (reported on `Jeffremm10/new-stack`, Step 2.5-X2, synthetic model, 2026-10-17): passed with default `python3` and fresh Python 3.12.14 dependencies; network-blocked inference on 20 synthetic customers produced repeatable output. Hybrid integration verification is recorded separately in `docs/evaluation_protocol.md`.

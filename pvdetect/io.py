@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -90,6 +91,57 @@ def _parse_frame(raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     return frame, counts
 
 
+def iter_chunks(path: str | Path, chunksize: int = 500_000) -> Iterator[tuple[pd.DataFrame, dict]]:
+    """Typed `(frame, counts)` per chunk; same header check, sniffing and parsing as `load_timeseries`.
+
+    Null customer ids become "" (not "nan") so streaming consumers can count and drop them."""
+    with _read(path, chunksize=chunksize) as reader:
+        for raw in reader:
+            raw = raw.rename(columns=lambda c: c.strip())
+            raw["customer_id"] = raw["customer_id"].fillna("")
+            frame, counts = _parse_frame(raw)
+            yield frame, {"rows_total": len(raw), **counts}
+
+
+def split_by_customer(
+    path: str | Path, out_dir: str | Path, train_frac: float = 0.75, seed: int = 0, chunksize: int = 500_000
+) -> tuple[list[str], list[str]]:
+    """Write `out_dir/training.csv` and `out_dir/test.csv`: a seeded random `train_frac` of the unique
+    customer ids goes to training, the rest to test, each with all of its rows.
+
+    Rows are copied as text (same separator and columns; leading zeros and decimal marks kept).
+    Rows with an empty customer id belong to no customer and are written to neither file.
+    Returns the sorted (training ids, test ids)."""
+    if not 0.0 < train_frac < 1.0:
+        raise ValueError("train_frac must be in (0, 1)")
+    sep, _, cols = _sniff(path)
+    _check_header(cols)
+    kw = dict(sep=sep, dtype=str, keep_default_na=False, encoding="utf-8-sig", chunksize=chunksize)
+    id_col = pd.read_csv(path, sep=sep, nrows=0, encoding="utf-8-sig").columns[cols.index("customer_id")]
+
+    ids: set[str] = set()
+    with pd.read_csv(path, usecols=[id_col], **kw) as reader:
+        for raw in reader:
+            ids.update(raw[id_col].str.strip())
+    ids.discard("")
+    if len(ids) < 2:
+        raise ValueError(f"need at least 2 customers to split, found {len(ids)}")
+    order = np.random.default_rng(seed).permutation(sorted(ids))
+    n_train = min(max(int(round(train_frac * len(order))), 1), len(order) - 1)
+    train_ids = set(order[:n_train].tolist())
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    paths = {True: out / "training.csv", False: out / "test.csv"}
+    with pd.read_csv(path, **kw) as reader:
+        for i, raw in enumerate(reader):
+            key = raw[id_col].str.strip()
+            for is_train, dest in paths.items():
+                part = raw[key.isin(train_ids)] if is_train else raw[(key != "") & ~key.isin(train_ids)]
+                part.to_csv(dest, sep=sep, index=False, header=i == 0, mode="w" if i == 0 else "a", encoding="utf-8")
+    return sorted(train_ids), sorted(ids - train_ids)
+
+
 def local_dates(epoch_s: np.ndarray) -> np.ndarray:
     """Europe/Zurich calendar dates (datetime64[D]) for UTC epoch seconds."""
     ts = pd.to_datetime(epoch_s, unit="s", utc=True).tz_convert(TZ).tz_localize(None)
@@ -99,8 +151,13 @@ def local_dates(epoch_s: np.ndarray) -> np.ndarray:
 def load_timeseries(path: str | Path) -> LoadedTimeseries:
     raw = _read(path).rename(columns=lambda c: c.strip())
     rows_total = len(raw)
-    customer_ids = sorted(set(raw["customer_id"].astype(str).str.strip()))
+    # A row with an empty customer id belongs to no customer (pandas 3 keeps it as NaN, which cannot be sorted).
+    raw["customer_id"] = raw["customer_id"].fillna("").astype(str).str.strip()
+    no_id = (raw["customer_id"] == "").to_numpy()
+    raw = raw[~no_id]
+    customer_ids = sorted(set(raw["customer_id"]))
     frame, counts = _parse_frame(raw)
+    counts["rows_bad_id"] = int(no_id.sum())
     n_before = len(frame)
     frame = frame.drop_duplicates(["customer_id", "epoch_s"], keep="first")
     rows_duplicate = n_before - len(frame)

@@ -134,6 +134,9 @@ def detect_commissioning(daily: pd.DataFrame, clim: Climatology) -> Commissionin
         recurs = [r for r in recurs if np.isfinite(r)]
         recur = max(recurs) if recurs else np.nan
         evidence = step - max(0.0, recur) if np.isfinite(recur) else step
+        if clim.evidence_scale is not None:
+            sc = float(clim.evidence_scale[woy[tau] - 1])
+            step, recur, evidence = step / sc, recur / sc, evidence / sc
         stats.append((tau, step, persist, recur, evidence))
 
     persistent = [c for c in stats if np.isfinite(c[2]) and c[2] >= MIN_PERSIST]

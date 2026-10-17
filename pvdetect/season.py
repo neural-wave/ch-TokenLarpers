@@ -18,11 +18,14 @@ SIGNALS = ("s",) + tuple(f"log_{c}" for c in LOG_COLUMNS)
 
 @dataclass(frozen=True)
 class Climatology:
-    """`curves[name][woy-1]` is the typical customer-centred value of signal `name` (s, log_mid, ...)."""
+    """`curves[name][woy-1]` is the typical customer-centred value of signal `name` (s, log_mid, ...).
+
+    `evidence_scale[woy-1]` (optional) divides change-point step/recur/evidence at that week."""
 
     curves: dict[str, np.ndarray]
     yield_shape: np.ndarray
     source: str = "labelled_nonpv"
+    evidence_scale: np.ndarray | None = None
 
     @property
     def s(self) -> np.ndarray:
@@ -32,15 +35,24 @@ class Climatology:
         return signal(daily, name) - self.curves[name][daily["woy"].to_numpy() - 1]
 
     def to_json(self) -> dict:
-        return {
+        out = {
             "source": self.source,
             "curves": {k: v.tolist() for k, v in self.curves.items()},
             "yield_shape": self.yield_shape.tolist(),
         }
+        if self.evidence_scale is not None:
+            out["evidence_scale"] = np.asarray(self.evidence_scale).tolist()
+        return out
 
     @classmethod
     def from_json(cls, d: dict) -> Climatology:
-        return cls({k: np.asarray(v) for k, v in d["curves"].items()}, np.asarray(d["yield_shape"]), d["source"])
+        scale = d.get("evidence_scale")
+        return cls(
+            {k: np.asarray(v) for k, v in d["curves"].items()},
+            np.asarray(d["yield_shape"]),
+            d["source"],
+            None if scale is None else np.asarray(scale, float),
+        )
 
 
 def signal(daily: pd.DataFrame, name: str) -> np.ndarray:
@@ -122,15 +134,10 @@ def _yield_shape(dailies, pv_dates, log_mid_curve: np.ndarray, smooth: bool) -> 
     return ys / ys.max() if ys.max() > 0 else default_yield_shape()
 
 
-def fit_climatology(
-    dailies: dict[str, pd.DataFrame],
-    nonpv_ids: list[str],
-    pv_dates: dict[str, dt.date],
-    smooth: bool = True,
-) -> Climatology:
-    """Signal climatologies from labelled non-PV customers; yield shape from labelled PV customers."""
+def signal_curves(dailies: dict[str, pd.DataFrame], ids: list[str], smooth: bool = True) -> dict[str, np.ndarray]:
+    """Combined customer-centred weekly curves of every signal over `ids` (≥56 valid days each)."""
     per_signal: dict[str, list[np.ndarray]] = {k: [] for k in SIGNALS}
-    for cid in nonpv_ids:
+    for cid in ids:
         d = dailies.get(cid)
         if d is None:
             continue
@@ -142,7 +149,28 @@ def fit_climatology(
             x = signal(v, name)
             per_signal[name].append(weekly_median(x - np.median(x), woy))
     if len(per_signal["s"]) < 3:
-        curves = {k: np.zeros(N_WEEKS) for k in SIGNALS}
-    else:
-        curves = {k: _combine(c, smooth) for k, c in per_signal.items()}
-    return Climatology(curves, _yield_shape(dailies, pv_dates, curves["log_mid"], smooth))
+        return {k: np.zeros(N_WEEKS) for k in SIGNALS}
+    return {k: _combine(c, smooth) for k, c in per_signal.items()}
+
+
+def climatology_from_curves(
+    curves: dict[str, np.ndarray],
+    dailies: dict[str, pd.DataFrame],
+    pv_dates: dict[str, dt.date],
+    source: str,
+    smooth: bool = True,
+) -> Climatology:
+    """Given signal curves + the yield shape fitted from labelled PV customers."""
+    return Climatology(curves, _yield_shape(dailies, pv_dates, curves["log_mid"], smooth), source)
+
+
+def fit_climatology(
+    dailies: dict[str, pd.DataFrame],
+    nonpv_ids: list[str],
+    pv_dates: dict[str, dt.date],
+    smooth: bool = True,
+) -> Climatology:
+    """Signal climatologies from labelled non-PV customers; yield shape from labelled PV customers."""
+    return climatology_from_curves(
+        signal_curves(dailies, nonpv_ids, smooth), dailies, pv_dates, "labelled_nonpv", smooth
+    )
