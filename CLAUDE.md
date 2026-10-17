@@ -43,7 +43,7 @@ P1–P2 are implemented per `IMPLEMENTATION_HANDOFF.md` (tags `submit-v0`, `subm
 
 ## Your immediate task
 
-Execute the remaining Phase 2.5 work of `IMPLEMENTATION_HANDOFF.md` (v3.3): B4, X2 and D-pub now (no real data needed); C3 belongs to the `oof_contract` owner; E only for the component the private real-data results name, one challenger at a time, under the admission criteria; F only if time remains after G is safe. Never place a real-data model under this repository; real models reach the NW_26 repo only via `scripts/export_submission.sh`. Never put real-customer plots or per-customer values into the report or video. Commit each step separately, keep `pytest -q` and `python scripts/check_hygiene.py --all` green, then STOP and report changed files, tests and risks.
+B4, X2 and D-pub wording are done (v3.3). Next work in `IMPLEMENTATION_HANDOFF.md`: C3 belongs to the `oof_contract` owner; the team decides the D-pub items marked in `report/REPORT.md`; E only for the component the private real-data results name, one challenger at a time, under the admission criteria; F only if time remains after G is safe. Never place a real-data model under this repository; real models reach the NW_26 repo only via `scripts/export_submission.sh`. Never put real-customer plots or per-customer values into the report or video. Commit each step separately, keep `pytest -q` and `python scripts/check_hygiene.py --all` green, then STOP and report changed files, tests and risks.
 
 ## Exact submission contract
 

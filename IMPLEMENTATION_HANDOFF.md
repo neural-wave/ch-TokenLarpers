@@ -1,6 +1,6 @@
 # AIL PV detection — implementation plan v3.3
 
-Supersedes v3.2 and earlier. Repo: `neural-wave/ch-TokenLarpers`, branch `Jeffremm10/new-stack`. P1–P2 are implemented (tags `submit-v0`, `submit-v1`). Phase 2.5 steps A, A2, B1–B3, C1–C2, D (drafts), H (listed), and X are implemented (merged from `Jeffremm10/new-stack-2`, head `10f44a2`). v3.3 adds the merge audit and review round 6 (§0.4e), fix B4, follow-ups X2, D-pub, the conditional challenger mapping, and corrects E5 and Step 22.
+Supersedes v3.2 and earlier. Repo: `neural-wave/ch-TokenLarpers`, branch `Jeffremm10/new-stack`. P1–P2 are implemented (tags `submit-v0`, `submit-v1`). Phase 2.5 steps A, A2, B1–B4, C1–C2, D (drafts), D-pub (wording), H (listed), X and X2 are implemented. v3.3 adds the merge audit and review round 6 (§0.4e), B4, X2, D-pub, the conditional challenger mapping with the research memo's preprocessing and reporting rules, and corrects E5, Step 21 and Step 22.
 
 ## 0. Decisions and audit
 
@@ -606,7 +606,7 @@ Deadline: everything published by **Sunday 11:00**. Rules for every step:
 
 |#|When|Work|Needs real data?|Owner|
 |---|---|---|---|---|
-|1|Today, first|A2 hygiene follow-ups, B fixes, D deliverable drafts, H organizer email, X export rehearsal on synthetic data — **done**; remaining: **B4**, **X2**, **D-pub** wording fixes, H actually sent, C3 (other branch)|No|Agents/teammates; H by the user|
+|1|Today, first|A2, B1–B4, D drafts, D-pub wording, X and X2 (fresh-venv rehearsal recorded in the README) — **done**; remaining: the team's D-pub decisions (hygiene-incident item, LLM-usage confirmation), H actually sent, C3 (other branch)|No|Agents/teammates; H by the user|
 |2|In parallel, when the data holder is ready|**P3-baseline:** the existing pvdetect nested CV on the real 40 (its own splits), private, aggregates only|Yes|Data holder|
 |3|After 1|C shared-fold contract on pvdetect, then **P3-matched:** both pipelines on the same three split files|Build no; run yes|Agent builds; data holder runs|
 |4|After 2–3|E: only the improvement the real results point to|Build no; evaluate yes|Agent builds; data holder evaluates|
@@ -758,7 +758,10 @@ python -m neuralwave_experiment.oof_contract --labels <dev labels> <private>/pvd
   - 40 labelled customers;
   - selection-biased estimate (`outer_informed_decisions`);
   - capacity not uniquely identifiable from withdrawal data;
-  - synthetic benchmarks are not evidence of competition accuracy.
+  - synthetic benchmarks are not evidence of competition accuracy;
+  - weekly windows are not independent labelled cases;
+  - the spread across CV repeats measures sensitivity to the customer split, not new data;
+  - the bootstrap interval resamples fixed out-of-fold predictions and omits model-selection uncertainty.
 
 ### Step 2.5-H — Organizer email (user, today)
 
@@ -845,6 +848,8 @@ Record the answers in the README under "Organizer clarifications". Until answer 
 - A strongly regularized linear head.
 - Aggregation must support both the `event` and `present_at_start` cases.
 - Missing readings are masked, never counted as zeros.
+- Keep an amplitude-sensitive input next to any per-window normalized (shape) input: per-window normalization alone erases the level changes PV causes.
+- Night load is a reference hypothesis, not ground truth: EV charging, night-tariff boilers, heat pumps and battery discharge change it. Any night-based normalization is paired with the confounder channels, and its effect is tested on the night-load stress scenarios.
 
 **Not in the pre-submission path:**
 - MiniRocket: dependency conflict, and its default wrapper's window-level internal CV and one-hot "probabilities" are both unsuitable.
@@ -879,6 +884,7 @@ Every item is a Tier A option inside `Procedure.fit`. Inner CV chooses per fit w
 **Extensions (optional, after the core submission works):** P4 Steps 15–16.
 - Extension false alarms lower the bonus (they reduce `F1_ext`), but the bonus never drops below 0 and the main score is unaffected. So attempting never scores below header-only.
 - Do not ship extension predictions unless the synthetic no-extension tests stay at zero events.
+- Extension detection must never change the predicted initial installation date or initial capacity. Add a test: the same model with extensions on and off gives identical `predictions.csv`.
 
 **Unlabelled-data modelling:** remains P5/P6, gated.
 
@@ -1069,23 +1075,24 @@ Findings relayed to agents are generalized, e.g. "night-load FPs dominate", "`pr
   - Drop non-finite and constant columns.
   - `calculate_relevance_table`, keep `relevant`, sort by `p_value`.
   - `ValueError` → `[]`.
+  - An empty selection is a legitimate outcome, not a failure: with 40 customers the Benjamini–Yekutieli filter often keeps nothing. The option then degenerates to the physical features alone.
 - **Model JSON:** `from_columns` settings plus the training medians.
 - **Tests (U):** planted `y + N(0, 0.1)` column selected (length ≤ 8); 3 rows → `[]`.
 
 ### Step 21 — TS2Vec (priority 8)
 
-- **Vendoring:** `zhihanyue/ts2vec` (MIT) into `third_party/ts2vec/`, with the commit SHA recorded and imports made relative. Read `models/encoder.py` for NaN handling; fill NaN with 0 after z-scoring if it doesn't mask.
+- **Vendoring:** `zhihanyue/ts2vec` (MIT) into `third_party/ts2vec/`, with the commit SHA recorded and imports made relative. The official encoder already masks NaN timesteps: pass missing readings as NaN, **never** zero-fill them. Confirm this in the vendored `models/encoder.py`, with a U test: a series with a NaN gap embeds differently from the same series with that gap set to 0.
 - **`pretrain_ts2vec.py --unlabelled P --out-dir D [--epochs 20] [--device cpu|mps]`:**
   - Unlabelled file only, via Step 17. Daily 4-channel tensor (1148 × ≤1461 × 4 float32 ≈ 27 MB), `output_dims=32`, seed 0.
   - Prints `peak_rss_mb` and seconds per epoch.
 - **Compute check:** before the full run, 1 epoch on CPU; if it exceeds 10 min per epoch, use `--device mps`, or `--epochs 5` on CPU. The architecture stays the same.
-- **Features:** `embed(encoding_window="full_series")`; PCA(4) fitted inside `fit` → `ts2vec_pc1..4` as an inner-CV feature-block option.
+- **Features:** `embed(encoding_window="full_series")`; PCA(4) fitted inside `fit` → `ts2vec_pc1..4` as an inner-CV feature-block option. `full_series` uses temporal max pooling, so it is a **customer representation for detection**, not an onset-date estimator. Dates stay with the changepoint path unless timestamp-level embeddings are separately justified.
 - **Tests (U):** 1-epoch pretrain on 6 synthetic customers → files exist; `embed` twice → identical.
 
 ### Step 22 — Fraunhofer CNN+MLP (priority 9, last)
 
 - **Credit:** a PyTorch port of the architecture in Neubert et al., *Energies* 15(13):4922, 2022 (`github.com/m-neubert/mdpi-2022-paper`, Apache-2.0).
-- **Windows:** weekly, 168 hourly sums from the UTC+1 matrix; keep a week when coverage is ≥80%. **Missing hours are never indistinguishable from observed zeros.** Either feed a per-hour missing-value mask channel (placeholder 0 + mask = 1), or use a defined conservative imputation (the customer's same-hour median over the surrounding 4 weeks) **and** a mask. The choice is made before implementation and covered by a U test: a week with a 6-hour midday gap must not score like a week with 6 observed zero hours. Divide by each customer's median hourly sum + 0.05.
+- **Windows:** weekly, 168 hourly sums from the UTC+1 matrix; keep a week when coverage is ≥80%. **Missing hours are never indistinguishable from observed zeros.** Either feed a per-hour missing-value mask channel (placeholder 0 + mask = 1), or use a defined conservative imputation (the customer's same-hour median over the surrounding 4 weeks) **and** a mask. The choice is made before implementation and covered by a U test: a week with a 6-hour midday gap must not score like a week with 6 observed zero hours. Divide by each customer's median hourly sum + 0.05, and also feed that median (log) as an amplitude input, so normalization does not erase level changes.
 - **KDE features:** numpy KDE on `linspace(−5, 15, 100)`, `h = 0.25`.
 - **Network:**
   - MLP branch: 4×[Linear(400), LeakyReLU(0.05)];
