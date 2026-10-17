@@ -2,6 +2,8 @@
 
 This document details the architecture, evaluation methodology, anti-overfitting strategy, and statistical analysis for **Task 1: PV Presence Detection** on the development dataset.
 
+*Data hygiene: this report contains aggregate metrics only. Customer identifiers, per-customer readings, probabilities and label dates stay in private, git-ignored artifacts; the repository is open-sourced after the event and `scripts/check_hygiene.py` enforces this at commit time.*
+
 ---
 
 ## 1. Aggregate Benchmark Results

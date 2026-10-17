@@ -41,15 +41,15 @@ def test_cli_filters_pod_before_malformed_parse_and_preserves_status_dst(tmp_pat
     data = tmp_path / "measurements.csv"
     rows = ["customer_id;timestamp_local;energy_consumption_kwh"]
     rows += [
-        "POD001;2024-10-27T00:00:00+02:00;1", "POD001;2024-10-27T00:15:00+02:00;",
-        "POD001;2024-10-27T00:45:00+02:00;-2", "POD001;2024-10-27T02:00:00+02:00;3",
-        "POD001;2024-10-27T02:00:00+01:00;4", "pod001;not-a-time;not-a-number",
+        "PODSYN001;2024-10-27T00:00:00+02:00;1", "PODSYN001;2024-10-27T00:15:00+02:00;",
+        "PODSYN001;2024-10-27T00:45:00+02:00;-2", "PODSYN001;2024-10-27T02:00:00+02:00;3",
+        "PODSYN001;2024-10-27T02:00:00+01:00;4", "podsyn001;not-a-time;not-a-number",
         "NOPE;not-a-time;not-a-number", ";not-a-time;not-a-number",
     ]
     write_source(data, "\n".join(rows))
     output = run_cli(tmp_path, [source(data, "unlabelled_measurements")])
     measurements = pq.read_table(output / "measurements.parquet").to_pandas()
-    assert set(measurements.customer_id) == {"POD001"}
+    assert set(measurements.customer_id) == {"PODSYN001"}
     assert measurements.energy_kwh.dropna().tolist() == [1.0, -2.0, 3.0, 4.0]
     assert "missing_input" in set(measurements.value_status) and "absent_interval" in set(measurements.value_status)
     assert measurements.dst_fold.max() == 1 and measurements.utc_offset_minutes.nunique() == 2

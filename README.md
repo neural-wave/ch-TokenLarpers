@@ -1,6 +1,20 @@
 # NeuralWave data pipelines
 
-This branch combines canonical preprocessing, constrained synthetic PV generation, and offline numerical time-series embedding experiments. Raw organizer data and all data-derived artifacts remain private. Regression tests use independently fabricated inputs; authorized local evaluation can use AIL data.
+This branch combines canonical preprocessing, constrained synthetic PV generation, offline numerical time-series embedding experiments, and the Task 1 PatchTST window classifier. Raw organizer data and all data-derived artifacts remain private. Regression tests use independently fabricated inputs; authorized local evaluation can use AIL data.
+
+## Data hygiene
+
+The repository is open-sourced after the event, so nothing derived from the AIL data may enter git history: raw files and generated artifacts stay under private, git-ignored paths (`data_private/`, `artifacts_private/`), and reports such as [benchmarks.md](benchmarks.md) hold aggregate metrics only, never customer identifiers, per-customer readings, probabilities or label dates.
+
+Install the commit-time check once per clone:
+
+```bash
+sh scripts/install_hooks.sh
+```
+
+It installs a pre-commit hook that runs `scripts/check_hygiene.py` on the staged files and refuses the commit when any of them is a data or model dump (`.csv`, `.parquet`, `.cbm`, `.pt`, ...), lives under an artifacts directory, or contains a real customer identifier (the letters `POD` immediately followed by digits). Fabricated fixtures use identifiers such as `PODSYN001`, which start with `POD` as the organizer filter requires but are not matched. The check prints offending paths only, never their content. `python scripts/check_hygiene.py --all` audits the whole tracked tree and is meant for CI; `tests/test_hygiene.py` runs it too. The hand-in is an export of the frozen tree (`git archive <commit>`), never this history.
+
+Run the full regression suite with `python -m pytest -q`; `pyproject.toml` points pytest at `tests/` and puts `src/` on the path, so no install is needed for the tests.
 
 ## Install and run
 
