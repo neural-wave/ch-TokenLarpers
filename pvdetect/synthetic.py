@@ -29,7 +29,14 @@ SCENARIOS = (
     "missing_5pct",
     "commercial_heavy",
     "pv_before_start",
+    "label_lag_60",
+    "meter_spikes",
 )
+# Development-only scenarios (variant A): `label_lag_60` labels each PV customer 30–90 days after its
+# visible onset; `meter_spikes` adds a few isolated single-slot spikes of 20–50× the median slot value
+# per customer-year. Both reuse the `base` customers, so the base series and labels stay as they are.
+A_ONLY_SCENARIOS = ("label_lag_60", "meter_spikes")
+SPIKES_PER_YEAR = 3
 
 
 @dataclass(frozen=True)
@@ -40,6 +47,7 @@ class PVSpec:
     export: bool = False
     battery_kwh: float = 0.0
     extensions: tuple[tuple[str, float], ...] = ()  # (local date, total kWp after)
+    label_lag_days: int = 0  # labelled date − visible onset (`label_lag_60`)
 
 
 @dataclass(frozen=True)
@@ -60,6 +68,7 @@ class CustomerSpec:
     events: tuple[Event, ...] = ()
     missing: bool = True
     missing_rate: float = 0.005
+    spikes_per_year: int = 0  # isolated single-slot meter spikes (`meter_spikes`)
 
 
 @dataclass
@@ -346,6 +355,8 @@ def generate_customer(spec: CustomerSpec, seed: int, variant: Literal["A", "B"] 
             net = _battery(g, net, spec.pv.battery_kwh)
         if not spec.pv.export:
             net = np.maximum(net, 0.0)
+    if spec.spikes_per_year > 0:
+        net = _spikes(g, net, spec.spikes_per_year, np.random.default_rng([seed, 2]))
     df = pd.DataFrame(
         {
             "customer_id": spec.customer_id,
@@ -363,6 +374,17 @@ def generate_customer(spec: CustomerSpec, seed: int, variant: Literal["A", "B"] 
         dup_row = int(rng.integers(0, len(kept)))
         df = pd.concat([kept, kept.iloc[[dup_row]]], ignore_index=True)
     return df
+
+
+def _spikes(g: _Grid, net: np.ndarray, per_year: int, rng: np.random.Generator) -> np.ndarray:
+    """`per_year` single-slot spikes per customer-year at 20–50× the median positive slot value."""
+    pos = net[net > 0]
+    med = float(np.median(pos)) if pos.size else 0.1
+    k = max(1, int(round(per_year * g.n_days / 365)))
+    idx = rng.choice(net.size, size=k, replace=False)
+    out = net.copy()
+    out[idx] = np.round(rng.uniform(20, 50, k) * med, 4)
+    return out
 
 
 # -------------------------------------------------------------------- datasets
@@ -384,7 +406,10 @@ def _dataset_specs(
 ) -> list[CustomerSpec]:
     if scenario not in SCENARIOS:
         raise ValueError(f"unknown scenario: {scenario}")
+    if scenario in A_ONLY_SCENARIOS and variant != "A":
+        raise ValueError(f"scenario {scenario} is variant A only")
     rng = np.random.default_rng(seed)
+    aux = np.random.default_rng([seed, 1])  # draws of the A-only scenarios; `rng` stays the base stream
     kinds = A_KINDS if variant == "A" else B_KINDS
     t0, t1 = pd.Timestamp(start), pd.Timestamp(end)
     specs = []
@@ -434,6 +459,7 @@ def _dataset_specs(
                 export=i % 8 == 0,
                 battery_kwh=battery,
                 extensions=exts,
+                label_lag_days=int(aux.integers(30, 91)) if scenario == "label_lag_60" else 0,
             )
             if hard_negatives and i % 6 == 2:
                 events.append(Event(kinds[(i // 2) % len(kinds)], _day(draw_date())))
@@ -450,6 +476,7 @@ def _dataset_specs(
                 pv=pv,
                 events=tuple(events),
                 missing_rate=missing_rate,
+                spikes_per_year=SPIKES_PER_YEAR if scenario == "meter_spikes" else 0,
             )
         )
     return specs
@@ -475,7 +502,7 @@ def generate_dataset(
             {
                 "customer_id": spec.customer_id,
                 "pv_installed": "TRUE" if pv else "FALSE",
-                "pv_installation_date": pv.date if pv else "",
+                "pv_installation_date": _day(pd.Timestamp(pv.date) + pd.Timedelta(days=pv.label_lag_days)) if pv else "",
                 "pv_capacity_kwp": f"{pv.kwp}" if pv else "",
             }
         )
@@ -533,6 +560,7 @@ __all__ = [
     "A_KINDS",
     "B_KINDS",
     "SCENARIOS",
+    "A_ONLY_SCENARIOS",
     "PVSpec",
     "Event",
     "CustomerSpec",

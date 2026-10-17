@@ -252,7 +252,7 @@ def test_fit_weekly_choice_saves_loads_and_predicts(data, monkeypatch, tmp_path,
     calls = []
     monkeypatch.setattr(procedure, "_inner_oof", _stub(prefer, calls=calls))
     ids = labels["customer_id"].tolist()
-    model = fit(table, labels, ids)
+    model = fit(table, labels, ids, options=procedure.DEFAULT_OPTIONS - {"offset_tri", "recur_strict"})  # no stub dates
     assert all(c["weekly"] for c in calls) and calls[0]["alt_cs"] == (0.1, 2.0)
     assert len({c["n_splits"] for c in calls}) == 1  # every option on the same inner splits
     clf, sel = model["classifier"], model["selection"]

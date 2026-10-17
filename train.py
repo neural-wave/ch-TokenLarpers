@@ -67,6 +67,10 @@ def _selection_line(infos: list[dict]) -> str:
     pseudo = Counter(i.get("pseudo") for i in infos if i.get("pseudo"))
     if pseudo:
         parts.append(f"pseudo off={pseudo.get('off', 0)}/{n} on={pseudo.get('on', 0)}/{n}")
+    for key in ("offset_tri", "recur_strict"):
+        got = Counter(i.get(key) for i in infos if i.get(key))
+        if got:
+            parts.append(f"{key} off={got.get('off', 0)}/{n} on={got.get('on', 0)}/{n}")
     return "selection: " + " | ".join(parts)
 
 
@@ -114,6 +118,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-e1e2", action="store_true", help="drop the E1 persistence and E2 avg options (baseline)")
     ap.add_argument("--no-weekly", action="store_true", help="drop the weekly-evidence head options (weekly, avg_weekly)")
     ap.add_argument("--no-ctune", action="store_true", help="keep the logreg C at its default (no inner-CV C choice)")
+    ap.add_argument("--no-offset-tri", action="store_true", help="keep the shrunk-median date offsets (no inner-CV choice)")
+    ap.add_argument("--no-recur-strict", action="store_true", help="drop the strict short-series detection option")
     ap.add_argument("--schedule", action="store_true", help="add the schedule-robust feature-block option")
     ap.add_argument(
         "--pseudo-pool",
@@ -134,6 +140,8 @@ def main(argv: list[str] | None = None) -> int:
         ({"e1", "e2"} if args.no_e1e2 else set())
         | ({"weekly"} if args.no_weekly else set())
         | ({"ctune"} if args.no_ctune else set())
+        | ({"offset_tri"} if args.no_offset_tri else set())
+        | ({"recur_strict"} if args.no_recur_strict else set())
     )
     options = DEFAULT_OPTIONS - dropped | ({"schedule"} if args.schedule else set())
     fit_procedure = partial(fit, options=options)

@@ -30,7 +30,8 @@ from tests.helpers import as_loaded
 from tests.test_evaluation import typed_labels
 
 CHUNK = 7_000
-STUB_OPTIONS = procedure.DEFAULT_OPTIONS - {"weekly", "ctune"}  # the stubbed inner OOF scores no weekly head / C
+# the stubbed inner OOF scores no weekly head / C / date options
+STUB_OPTIONS = procedure.DEFAULT_OPTIONS - {"weekly", "ctune", "offset_tri", "recur_strict"}
 
 
 def _write_csv(ts: pd.DataFrame, path: Path) -> Path:

@@ -79,8 +79,11 @@ def build_feature_table(loaded: LoadedTimeseries) -> FeatureTable:
     return FeatureTable(ids=list(loaded.customer_ids), customers=customers)
 
 
-def compute_features(table: FeatureTable, ids: list[str], clim: Climatology) -> tuple[pd.DataFrame, dict]:
-    """All features for `ids` under `clim`; only the label-free part is cached on the table."""
+def compute_features(
+    table: FeatureTable, ids: list[str], clim: Climatology, *, recur_strict: bool = False
+) -> tuple[pd.DataFrame, dict]:
+    """All features for `ids` under `clim` (and the fit's `recur_strict` detection option); only the
+    label-free part is cached on the table."""
     lf_cache = table.cache.setdefault("label_free", {})
     rows, cps = {}, {}
     for cid in ids:
@@ -88,7 +91,7 @@ def compute_features(table: FeatureTable, ids: list[str], clim: Climatology) -> 
         if cid not in lf_cache:
             lf_cache[cid] = label_free_features(cd)
         lf = lf_cache[cid]
-        fitted, cp = fitted_features(cd, clim, lf)
+        fitted, cp = fitted_features(cd, clim, lf, recur_strict=recur_strict)
         rows[cid] = {**lf, **fitted}
         cps[cid] = cp
     return pd.DataFrame.from_dict(rows, orient="index").reindex(ids), cps
@@ -173,7 +176,7 @@ def predict(model: dict, table: FeatureTable, ids: list[str]) -> tuple[pd.DataFr
     """Predictions for `ids`. TRUE rows always carry a date and a positive capacity."""
     clim = Climatology.from_json(model["climatology"])
     objects = model.get("_objects", {})
-    F, cps = compute_features(table, ids, clim)
+    F, cps = compute_features(table, ids, clim, recur_strict=model["date"].get("recur_strict", False))
     clf = model["classifier"]
     weekly = customer_scores(clf["weekly"], table, ids, clim) if "weekly" in clf else None
     prob = classifier_proba(clf, objects, F, model["feature_names"], weekly=weekly)

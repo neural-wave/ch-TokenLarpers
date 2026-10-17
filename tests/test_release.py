@@ -63,7 +63,8 @@ def test_saved_model_files_carry_no_training_customer_ids(tmp_path, monkeypatch)
     forced_sel = {"classifier": "catboost", "threshold": 0.5, "capacity": "catboost", "kappa": 1.0, "insufficient_rule": "weak_candidate", "inner_score": float("nan")}
     monkeypatch.setattr(procedure, "_inner_oof", lambda *args, **kwargs: None)
     monkeypatch.setattr(procedure, "_select", lambda oof, avg=True: dict(forced_sel))
-    forced = procedure.fit(table, labels, ids, options=procedure.DEFAULT_OPTIONS - {"ctune"})  # no OOF to tune C on
+    no_oof = procedure.DEFAULT_OPTIONS - {"ctune", "offset_tri", "recur_strict"}  # no OOF to tune C or dates on
+    forced = procedure.fit(table, labels, ids, options=no_oof)
     assert forced["classifier"]["kind"] == "catboost" and forced["capacity"]["kind"] == "catboost"
     files = _model_saved_files(forced, tmp_path / "catboost" / "model.json")
     assert sorted(f.name for f in files if f.suffix == ".cbm") == ["catboost_cap.cbm", "catboost_clf.cbm"]

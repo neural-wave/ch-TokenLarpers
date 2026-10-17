@@ -108,7 +108,8 @@ def test_schedule_block_follows_inner_cv(data, monkeypatch, tmp_path, prefer_on)
 
     monkeypatch.setattr(procedure, "_inner_oof", stub)
     ids = labels["customer_id"].tolist()
-    options = procedure.DEFAULT_OPTIONS - {"weekly", "ctune"} | {"schedule"}  # the stub scores no weekly head / C
+    # the stub scores no weekly head / C / date options
+    options = procedure.DEFAULT_OPTIONS - {"weekly", "ctune", "offset_tri", "recur_strict"} | {"schedule"}
     model = fit(table, labels, ids, options=options)
     sel = model["selection"]
     base = feature_names(model["export_enabled"])

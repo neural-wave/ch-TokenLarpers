@@ -30,10 +30,11 @@ def _pool_view(table: FeatureTable) -> FeatureTable:
     return FeatureTable(ids=list(pool), customers=pool, cache=table.cache.setdefault("unlabelled_pool", {}))
 
 
-def pool_features(table: FeatureTable, clim) -> pd.DataFrame:
-    """Pool features under one fit's climatology; only the label-free part is cached (separately)."""
+def pool_features(table: FeatureTable, clim, recur_strict: bool = False) -> pd.DataFrame:
+    """Pool features under one fit's climatology and detection rule; only the label-free part is cached
+    (separately)."""
     view = _pool_view(table)
-    return compute_features(view, view.ids, clim)[0]
+    return compute_features(view, view.ids, clim, recur_strict=recur_strict)[0]
 
 
 def pick_pseudo(prob: np.ndarray, max_pos: int, max_neg: int) -> tuple[np.ndarray, np.ndarray]:
@@ -53,7 +54,7 @@ def with_pseudo(table: FeatureTable, lab: pd.DataFrame, ids: list[str], names: l
     y = lab.loc[ids, "pv_installed"].to_numpy(bool)
     if y.all() or not y.any():
         return comp, (0, 0)
-    Fp = pool_features(table, comp.clim)
+    Fp = pool_features(table, comp.clim, comp.recur_strict)
     if kind in ("catboost", "avg") and "catboost_clf" not in comp.objects:  # as `_inner_oof`: needs both classes
         kind = "logreg"
     weekly = None
@@ -73,7 +74,8 @@ def with_pseudo(table: FeatureTable, lab: pd.DataFrame, ids: list[str], names: l
 
 
 def choose_pseudo(
-    table, labels, lab, train_ids, splits, names, cap_names, setting, oof, sel, avg=True, C=procedure.LOGREG_C, weekly=False
+    table, labels, lab, train_ids, splits, names, cap_names, setting, oof, sel, avg=True, C=procedure.LOGREG_C, weekly=False,
+    dkw=None,
 ):
     """pseudo ∈ {off, on} on the same inner splits, after every other selection; adopted by the Step 11 rule.
 
@@ -86,7 +88,7 @@ def choose_pseudo(
         return comp
 
     c_oof = procedure._inner_oof(
-        table, labels, lab, train_ids, splits, names, cap_names, setting, refit=refit, C=C, weekly=weekly
+        table, labels, lab, train_ids, splits, names, cap_names, setting, refit=refit, C=C, weekly=weekly, **(dkw or {})
     )
     cand = procedure._select(c_oof, avg)
     adopt, boot = procedure._adopt((oof, sel), (c_oof, cand))

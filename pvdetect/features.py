@@ -233,13 +233,16 @@ def _solar_shape_consistency(v: pd.DataFrame, cut: pd.Timestamp) -> float:
     return float(min(deltas))
 
 
-def fitted_features(cd, clim: Climatology, lf: dict[str, float]) -> tuple[dict[str, float], Commissioning | None]:
-    """Climatology-dependent features (computed inside every fit/predict with that fit's climatology)."""
+def fitted_features(
+    cd, clim: Climatology, lf: dict[str, float], *, recur_strict: bool = False
+) -> tuple[dict[str, float], Commissioning | None]:
+    """Climatology-dependent features (computed inside every fit/predict with that fit's climatology);
+    `recur_strict` is the fit's short-series detection option (`detect_commissioning`)."""
     out = dict.fromkeys(FITTED + PERSISTENCE_FEATURES + SCHEDULE_FEATURES, np.nan)
     if cd is None or cd.n_valid == 0:
         return out, None
     daily = cd.daily
-    cp = detect_commissioning(daily, clim)
+    cp = detect_commissioning(daily, clim, recur_strict=recur_strict)
     v = daily[daily["valid"]]
     if cp is not None:
         has = cp.tau is not None

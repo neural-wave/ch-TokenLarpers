@@ -24,7 +24,7 @@ from pvdetect.evaluation import REGIMES, nested_cv, outer_splits
 from pvdetect.io import parse_bool
 from pvdetect.pipeline import build_feature_table, predict
 from pvdetect.procedure import fit
-from pvdetect.synthetic import SCENARIOS, generate_dataset
+from pvdetect.synthetic import A_ONLY_SCENARIOS, SCENARIOS, generate_dataset
 
 REPO = Path(__file__).resolve().parent.parent
 PILOT_N = 12
@@ -109,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--suite", choices=("dev", "holdout"))
     ap.add_argument("--pilot", action="store_true", help="run only the pilot and print the projection")
-    ap.add_argument("--scenarios", default=",".join(SCENARIOS))
+    ap.add_argument("--scenarios", help="comma-separated; default: every scenario of the suite's variant")
     ap.add_argument("--n", type=int, default=40)
     ap.add_argument("--repeats", type=int, default=2)
     ap.add_argument("--budget-min", type=float, default=30.0)
@@ -117,7 +117,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--log")
     args = ap.parse_args(argv)
 
-    scenarios = [s.strip() for s in args.scenarios.split(",") if s.strip()]
+    if args.scenarios:
+        scenarios = [s.strip() for s in args.scenarios.split(",") if s.strip()]
+    else:  # the holdout suite keeps its scenario list (variant B has no A-only scenarios)
+        scenarios = [s for s in SCENARIOS if args.suite != "holdout" or s not in A_ONLY_SCENARIOS]
     unknown = set(scenarios) - set(SCENARIOS)
     if unknown:
         raise ValueError(f"unknown scenario: {sorted(unknown)[0]}")

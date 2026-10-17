@@ -118,7 +118,7 @@ def test_with_pseudo_builds_capped_weighted_set(monkeypatch):
     pool_ids = [f"PODSYN{i:02d}" for i in range(prob.size)]
     Fp = pd.DataFrame({"a": 100.0 + np.arange(prob.size), "b": 0.0}, index=pool_ids)
     seen = {}
-    monkeypatch.setattr(pseudolabel, "pool_features", lambda table, clim: Fp)
+    monkeypatch.setattr(pseudolabel, "pool_features", lambda table, clim, recur_strict=False: Fp)
 
     def proba(clf, objects, F_, names_, kind, weekly=None):
         seen.update(kind=kind, weekly=weekly)
@@ -167,7 +167,8 @@ def data():
     return table, dataclasses.replace(table, unlabelled_pool=pool), typed_labels(labels)
 
 
-STUB_OPTIONS = procedure.DEFAULT_OPTIONS - {"weekly", "ctune"}  # the stubbed inner OOF scores no weekly head / C
+# the stubbed inner OOF scores no weekly head / C / date options
+STUB_OPTIONS = procedure.DEFAULT_OPTIONS - {"weekly", "ctune", "offset_tri", "recur_strict"}
 
 
 def _stub_inner_oof(good):
