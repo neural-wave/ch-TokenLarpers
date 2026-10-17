@@ -851,18 +851,19 @@ def _choose_block(
 def _choose_onset_first(
     table, labels, lab, train_ids, splits, names, cap_names, oof, sel, avg=True, C=LOGREG_C, weekly=False, dkw=None
 ):
-    """`onset_first` (earliest-qualifying-candidate date rule + earlier-year-only recurrence) on the same
-    inner splits, adopted by the Step 11 rule."""
+    """`onset_first` (earliest-qualifying-candidate date rule + earlier-year-only recurrence) is the fixed
+    dating rule while the option is in the pool: the round-2 targeted comparison adopted it, and re-deciding it
+    per fit by the margin rule let inner-CV noise switch the final fit back (DECISIONS.md). It changes dates and
+    regimes only, never the features; both inner scores are still recorded."""
     c_oof = _inner_oof(
         table, labels, lab, train_ids, splits, names, cap_names, C=C, weekly=weekly, **(dkw or {}), onset_first=True
     )
     cand = (c_oof, _select(c_oof, avg))
-    adopt, boot = _adopt((oof, sel), cand)
     info = {
-        "onset_first": "on" if adopt else "off",
-        "onset_first_options": {"off": sel["inner_score"], "on": cand[1]["inner_score"], "bootstrap_p": boot},
+        "onset_first": "on",
+        "onset_first_options": {"off": sel["inner_score"], "on": cand[1]["inner_score"], "bootstrap_p": None},
     }
-    return (*cand, info) if adopt else (oof, sel, info)
+    return (*cand, info)
 
 
 def _choose_tail_guard(
@@ -1015,6 +1016,9 @@ def fit(
         if table.unlabelled is not None:
             unl_info = {"climatology": setting[0], "evidence_scale": setting[1]}
         option_oof, option_sel = None, sel
+        if "onset_first" in options:  # the fixed dating rule needs no inner CV
+            dkw["onset_first"] = True
+            onset_first_info = {"onset_first": "on"}
     labeller = None
     if table.unlabelled_pool and splits:
         from pvdetect.pseudolabel import choose_pseudo  # pseudolabel imports this module

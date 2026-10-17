@@ -168,3 +168,20 @@ def test_winter_install_ramp_scenario_runs_and_onset_first_not_worse():
     # onset_first must not be dramatically worse than base (tolerance: 60 days mean absolute error)
     if errs_base and errs_of:
         assert np.mean(errs_of) <= np.mean(errs_base) + 60
+
+
+def test_onset_first_is_the_fixed_dating_rule_of_every_fit(monkeypatch):
+    """Regression: the margin rule rejecting every candidate must not switch the final fit back to the old
+    dating rule (round-2 final fit on all labelled customers); without the option the old rule stays."""
+    from pvdetect import procedure
+    from tests.test_evaluation import typed_labels
+
+    ts, labels, _ = generate_dataset(16, seed=50, scenario="winter_install_ramp")
+    table = __import__("pvdetect.pipeline", fromlist=["build_feature_table"]).build_feature_table(as_loaded(ts))
+    labels = typed_labels(labels)
+    monkeypatch.setattr(procedure, "_adopt", lambda base, cand: (False, 0.0))
+    ids = labels["customer_id"].tolist()
+    on = procedure.fit(table, labels, ids, options=frozenset({"onset_first"}))
+    assert on["date"]["onset_first"] is True and on["selection"]["onset_first"] == "on"
+    assert procedure.fit(table, labels, ids, inner=False, options=frozenset({"onset_first"}))["date"]["onset_first"] is True
+    assert procedure.fit(table, labels, ids, options=frozenset())["date"].get("onset_first", False) is False
