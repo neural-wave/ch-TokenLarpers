@@ -7,7 +7,54 @@ import pandas as pd
 import pytest
 
 from pvdetect.model import load_model, save_model
+from pvdetect.procedure import _select
 from pvdetect.selection import choose_kappa, choose_threshold
+
+
+def _inner_oof(ridge_factor_pos: float, ridge_factor_low: float) -> pd.DataFrame:
+    """Hand-built pooled inner OOF frame: two confident positives (dates 40 days off, ridge capacity
+    `ridge_factor_pos`× true), one low-probability positive (exact date, ridge `ridge_factor_low`× true)
+    and two negatives scored just above it. CatBoost scores equal logreg (no margin) and no CatBoost
+    capacity, so only the threshold, κ and the rescoring matter."""
+    t_date = pd.to_datetime(["2023-05-01", "2023-06-01", "2023-07-01", None, None])
+    pred_date = pd.to_datetime(["2023-06-10", "2023-07-11", "2023-07-01", "2023-01-01", "2023-01-01"])
+    true_k = np.array([8.0, 10.0, 6.0, np.nan, np.nan])
+    factor = np.array([ridge_factor_pos, ridge_factor_pos, ridge_factor_low, 1.0, 1.0])
+    prob = np.array([0.90, 0.90, 0.40, 0.42, 0.44])
+    return pd.DataFrame(
+        {
+            "p_logreg": prob,
+            "p_catboost": prob,
+            "kwp_ridge": np.nan_to_num(true_k, nan=5.0) * factor,
+            "kwp_catboost": np.nan,
+            "regime": "event",
+            "date_weak": pred_date,
+            "date_first": pred_date,
+            "t_pv": [True, True, True, False, False],
+            "t_date": t_date,
+            "t_kwp": true_k,
+        },
+        index=pd.Index(list("abcde"), name="customer_id"),
+    )
+
+
+def test_threshold_is_rescored_on_final_capacity_outputs():
+    """Ridge (κ=1) favours including the low-probability positive (t=0.40); after κ=0.80 the confident
+    positives earn capacity credit, and including it plus two false positives no longer pays (t=0.50)."""
+    sel = _select(_inner_oof(1.5, 1.0))
+    assert sel["threshold_initial"] == 0.40
+    assert sel["kappa"] == 0.80
+    assert sel["threshold"] == 0.50
+    # S = 2·Σ_TP(70+15d+15p) / (N_pred_pos + N_true_pos)
+    assert sel["inner_score_initial"] == pytest.approx(2 * (70 + 70 + 100) / (5 + 3))
+    assert sel["inner_score"] == pytest.approx(2 * (79 + 79) / (2 + 3))
+
+
+def test_threshold_unchanged_when_final_outputs_agree():
+    sel = _select(_inner_oof(1.0, 1.0))
+    assert sel["kappa"] == 1.0
+    assert sel["threshold"] == sel["threshold_initial"]
+    assert sel["inner_score"] == pytest.approx(sel["inner_score_initial"])
 
 
 def test_threshold_tie_goes_closest_to_half():
