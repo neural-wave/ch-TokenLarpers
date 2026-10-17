@@ -97,6 +97,16 @@ python -m pvdetect.benchmark --suite holdout --log benchmarks/LOG.md   # phase g
 
 Every full run starts with the pilot and is refused if the projection exceeds `--budget-min` (default 30) or memory looks too high, unless `--force`. The holdout suite uses generator variant B (different PV, cloud and load models plus confounders absent from the dev generator) and seeds from `benchmarks/HOLDOUT_SEED_BLOCK`; a code change made in response to a holdout result burns the block.
 
+## Organizer clarifications
+
+Asked of the organizers; answers get recorded here.
+
+1. May semi-synthetic augmentation of the provided series be used in the competitive model? *Awaiting answer.*
+2. May the trained model files (JSON parameters with aggregate statistics over the 40 development customers, and CatBoost model files) be published in the open-sourced NW_26 repo? *Awaiting answer.*
+3. If not, which private channel should deliver them (e.g. direct upload or Swisstransfer), with the organizers placing them into `artifacts/` next to `inference.py`? *Awaiting answer.*
+
+Until answer 2 arrives we plan for the private channel. `inference.py` loads `artifacts/model.json` automatically, so that route needs no code change.
+
 ## Status
 
 Procedure: season-aware changepoint and confounder features, three date regimes, inner-CV selection of classifier, threshold, capacity model, κ and date rule, scored by nested CV; `outer_informed_decisions=1` (selection-biased). Synthetic-validated only; real-data nested CV pending (P3); extensions header-only; unlabelled data unused.
