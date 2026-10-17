@@ -59,4 +59,4 @@ if [ -f "$PRIVATE_DIR/oof.csv" ]; then
 fi
 
 [ "${NO_GUI:-0}" = "1" ] && exit 0
-exec "$PYTHON" gui.py --model "$PRIVATE_DIR/model.json" ${PORT:+--port "$PORT"}
+exec "$PYTHON" gui.py --model "$PRIVATE_DIR/model.json" --labels "$LABELS" ${PORT:+--port "$PORT"}

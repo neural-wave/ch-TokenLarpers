@@ -109,6 +109,7 @@ A browser interface for running the same detector without the command line. It i
 ```
 python gui.py                                    # default model location (artifacts/model.json)
 python gui.py --model /private/final/model.json  # explicit model
+python gui.py --model /private/final/model.json --labels /private/labels.csv  # diagnose every analysed CSV
 python gui.py --port 8765 --no-browser
 ```
 
@@ -116,6 +117,7 @@ The terminal prints `PV detector GUI: http://127.0.0.1:PORT/`; the browser opens
 
 - **Run synthetic check** needs no files and no model. It generates fabricated variant-A customers (train seed 101, n = 24; test seed 102, n = 12), fits a demo model with the normal training procedure, runs inference, repeats it, runs `inference.py` in an isolated copy of the app, and compares both CSVs byte for byte. The synthetic score is labelled as a regression demonstration, not real-world accuracy.
 - **Analyze local CSV** uploads a file through the browser to a private temporary folder and runs it with the model configured at launch only. The demo model is never used for your file; without a configured model this action is disabled.
+- **Automatic diagnosis:** with `--labels` (`scripts/train_and_launch.sh` passes the training labels), every completed analysis is scored against the labels of the customers it contains, with the same aggregates as `pvdetect.diagnose`, shown at the top of the sidebar ("Diagnosis"). Customers without a label are left out and counted. On the customers the model was trained on the numbers are optimistic; the cross-validated panel below it is the honest estimate. The synthetic check is diagnosed against its known labels the same way.
 - **Model evaluation panel:** when `diagnosis.json` (written by `pvdetect.diagnose --out-dir`) sits next to the configured `model.json`, the sidebar shows it before any run: score and F1, points lost per part, precision/recall with false-alarm and missed counts, date D and error days, capacity P and the predicted/true ratio, the failure modes and the per-size breakdown. It is labelled out-of-fold or in-sample, and marked stale when the model file is newer. Only the aggregate file is read; `errors.csv` is never served.
 - Layout: header actions (Analyze CSV, Run synthetic check, download menu), a sidebar of run figures (customers, PV share, median/total capacity, date regimes, synthetic score, output checks, files, input quality), the selected customer's weekly/daily withdrawal or midday power with the estimated (and, for synthetic data, known) installation marker, a customer table with search and PV filter, and a before/after typical-day comparison (observed withdrawal, not seasonally adjusted). Times use the fixed UTC+1 day matrix of the model.
 - **Download** returns the exact `predictions.csv` and `pv_extensions_predictions.csv` written by `pvdetect.output`, byte-identical to the CLI for the same model and input.

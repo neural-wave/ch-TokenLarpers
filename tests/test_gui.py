@@ -72,8 +72,8 @@ class Client:
         return self.request("GET", f"/api/jobs/{job_id}/files/{name}")
 
 
-def _start(model_path: Path, session_root: Path):
-    srv = create_server(model_path, port=0, session_root=session_root)
+def _start(model_path: Path, session_root: Path, labels_path: Path | None = None):
+    srv = create_server(model_path, port=0, session_root=session_root, labels_path=labels_path)
     thread = threading.Thread(target=srv.serve_forever, daemon=True)
     thread.start()
     return srv, thread
@@ -158,6 +158,29 @@ def analysis_done(trained, syn_test, tmp_path_factory):
     assert job["state"] == "complete", job["error"]
     yield {"client": client, "job": job, "energy": energy, "before": before}
     _stop(srv, thread)
+
+
+def test_analysis_is_diagnosed_against_launch_labels(trained, syn_test, tmp_path):
+    from pvdetect.io import load_labels
+    from pvdetect.scoring import main_score
+
+    srv, thread = _start(trained, tmp_path / "session", labels_path=syn_test / "labels.csv")
+    try:
+        client = Client(srv)
+        assert client.upload(syn_test / "energy.csv")[0] == 202
+        job = client.wait()
+        assert job["state"] == "complete", job["error"]
+        status, res = client.json("GET", f"/api/jobs/{job['id']}/result")
+        assert status == 200
+        dg = res["diagnosis"]
+        assert dg["available"] and dg["matched"] == 12 and dg["unlabelled"] == 0
+        _, _, pred = client.file(job["id"], "predictions.csv")
+        (tmp_path / "p.csv").write_bytes(pred)
+        official = main_score(load_labels(tmp_path / "p.csv"), load_labels(syn_test / "labels.csv"))
+        assert dg["score"] == pytest.approx(official["score"])
+        assert (dg["counts"]["TP"], dg["counts"]["FP"], dg["counts"]["FN"]) == (official["tp"], official["fp"], official["fn"])
+    finally:
+        _stop(srv, thread)
 
 
 def test_completed_analysis_exposes_valid_outputs(analysis_done, syn_test, trained):

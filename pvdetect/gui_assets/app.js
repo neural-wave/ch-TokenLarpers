@@ -455,16 +455,17 @@
     return h("div", { className: `fig ${right ? "right" : ""}` }, h("span", { className: `fig-val num ${color}` }, value, unit ? h("small", { text: unit }) : null), h("span", { className: "fig-cap", text: cap }));
   }
 
-  // Aggregate error analysis saved by `pvdetect.diagnose` next to the configured model (out-of-fold when
-  // produced by scripts/train_and_launch.sh). Shown before any run: it describes the model, not an input.
-  function evaluationCards(ev) {
+  // Aggregate error analysis: either the diagnosis of the last analysed CSV against the labels given at
+  // launch (or the synthetic check's known labels), or the out-of-fold evaluation saved by `pvdetect.diagnose`
+  // next to the configured model. `opts`: { title, tag, about }.
+  function evaluationCards(ev, opts) {
     const n = (v, d = 3) => (v === null || v === undefined ? "–" : Number(v).toFixed(d));
     const pct = (v) => (v === null || v === undefined ? "–" : `${Math.round(v * 100)}%`);
     const c = ev.counts || {};
     const lost = ev.lost || {};
     const dt = ev.dates || {};
     const cap = ev.capacity || {};
-    const label = ev.out_of_fold ? "Cross-validated (out-of-fold)" : "In-sample (optimistic)";
+    const label = opts.tag;
     const lostRow = h(
       "p",
       { className: "metric-line num" },
@@ -481,7 +482,7 @@
       h(
         "div",
         { className: "wcard" },
-        h("div", { className: "wcard-top" }, info(`${label} evaluation of this model on its labelled customers, saved by pvdetect.diagnose (${ev.source}). Each customer is scored by a model that never saw it when out-of-fold.`), h("span", { className: "wcard-label" }, icon("flask", 30), "Model score")),
+        h("div", { className: "wcard-top" }, info(opts.about), h("span", { className: "wcard-label" }, icon("flask", 30), opts.title)),
         h("div", { className: "wcard-row" }, fig(n(ev.score, 1), "score / 100", "c-mint"), fig(n(ev.f1), "F1", "c-mint", true)),
         lostRow,
         h("span", { className: `tag-demo ${ev.stale ? "c-orange" : ""}`, text: ev.stale ? "Stale: model is newer than this evaluation" : label }),
@@ -540,8 +541,32 @@
         h("div", { className: "tl right" }, h("span", { className: "tl-tag", text: "Model inference" }), h("span", { className: "tl-val num" }, icon("clock", 16), r ? fmtElapsed(r.summary.inference_s) : "-.--")),
       ),
     ];
-    const ev = state.session && state.session.evaluation;
-    if (ev) nodes.push(...evaluationCards(ev));
+    const saved = state.session && state.session.evaluation;
+    const dg = r && r.diagnosis;
+    if (dg && dg.available) {
+      const demo = r.kind === "synthetic";
+      const unl = dg.unlabelled ? ` ${dg.unlabelled} customer(s) of the CSV have no label and are left out.` : "";
+      nodes.push(
+        ...evaluationCards(dg, {
+          title: "Diagnosis",
+          tag: demo ? "Synthetic test set vs known labels · not real-world accuracy" : "This CSV vs labels · optimistic for training customers",
+          about: demo
+            ? `Synthetic test customers (seed ${r.synthetic.seeds.test}) scored against their known labels with the official formulas. A regression demonstration, not evidence of real-world accuracy.`
+            : `The predictions of this analysis scored against the labels file given at launch (${dg.matched} labelled customers).${unl} If the model was trained on these customers the numbers are optimistic; the cross-validated panel below is the honest estimate.`,
+        }),
+      );
+    } else if (dg) {
+      nodes.push(h("hr"), h("p", { className: "metric-line", text: `Diagnosis unavailable: ${dg.reason}` }));
+    }
+    if (saved) {
+      nodes.push(
+        ...evaluationCards(saved, {
+          title: "Model score",
+          tag: saved.stale ? "Stale: model is newer than this evaluation" : saved.out_of_fold ? "Cross-validated (out-of-fold)" : "In-sample (optimistic)",
+          about: `Evaluation of this model on its labelled customers saved by pvdetect.diagnose (${saved.source}). Out-of-fold: each customer is scored by a model that never saw it.`,
+        }),
+      );
+    }
 
     const pv = r ? r.customers.filter((c) => c.pv_installed) : [];
     const caps = pv.map((c) => c.capacity_kwp).filter((v) => v !== null).sort((a, b) => a - b);
@@ -567,21 +592,6 @@
         r ? h("p", { className: "metric-line" }, h("b", { text: fmtInt(reg.insufficient) }), " weak evidence (date from the model's fallback rule)") : null,
       ),
     );
-
-    if (r && r.synthetic) {
-      const m = r.synthetic.metrics;
-      nodes.push(
-        h("hr"),
-        h(
-          "div",
-          { className: "wcard" },
-          h("div", { className: "wcard-top" }, info(`Fabricated customers from the development generator (train seed ${r.synthetic.seeds.train}, ${r.synthetic.train_customers} customers; test seed ${r.synthetic.seeds.test}, ${r.synthetic.test_customers} customers). This guards against regressions only; it is not evidence of real-world accuracy.`), h("span", { className: "wcard-label" }, icon("flask", 30), "Synthetic score")),
-          h("div", { className: "wcard-row" }, fig(m.score.toFixed(1), "full score", "c-mint"), fig(m.f1.toFixed(3), "F1", "c-mint", true)),
-          h("p", { className: "metric-line num" }, "Date D ", h("b", { text: m.D.toFixed(3) }), " · Capacity P ", h("b", { text: m.P.toFixed(3) }), ` · TP ${m.tp} · FP ${m.fp} · FN ${m.fn}`),
-          h("span", { className: "tag-demo", text: "Regression demo · not real-world accuracy" }),
-        ),
-      );
-    }
 
     if (r) {
       const passed = r.checks.filter((c) => c.passed).length;
