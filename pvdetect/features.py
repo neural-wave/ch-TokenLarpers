@@ -38,14 +38,24 @@ FITTED = (
 )
 FEATURE_NAMES = FITTED[:12] + LABEL_FREE + FITTED[12:]
 EXPORT_FEATURES = ("neg_frac", "export_kw")
+# E1 feature block: computed in every fit/predict, used by the classifier only when inner CV picks it.
+PERSISTENCE_FEATURES = ("summer_suppressed_week_frac",)
+PERSIST_WEEK_DAYS = 4  # valid summer days for an ISO week to count
+PERSIST_MIN_WEEKS = 8
+PERSIST_MIN_WINTER_DAYS = 30
+PERSIST_DROP = 0.5  # weekly median ds this far below the winter median counts as suppressed
 CAPACITY_FEATURES = ("dip_kw", "log_kwp_phys", "zero_window_h", "night_kw", "log_mean_daily_kwh")
 EXPORT_CAPACITY_FEATURES = ("export_kw", "night_kw")
 LOG1P_CAPACITY = ("dip_kw", "zero_window_h", "night_kw", "export_kw")
 NOON_SLOT = 50  # 12:30 UTC+1
 
 
-def feature_names(export_enabled: bool) -> list[str]:
-    return list(FEATURE_NAMES) + (list(EXPORT_FEATURES) if export_enabled else [])
+def feature_names(export_enabled: bool, persistence: bool = False) -> list[str]:
+    return (
+        list(FEATURE_NAMES)
+        + (list(EXPORT_FEATURES) if export_enabled else [])
+        + (list(PERSISTENCE_FEATURES) if persistence else [])
+    )
 
 
 def capacity_feature_names(export_enabled: bool) -> list[str]:
@@ -177,9 +187,25 @@ def _cloud_var(v: pd.DataFrame, cut: pd.Timestamp) -> float:
     return float(np.clip(np.log((_mad_diff(post) + 1e-6) / (_mad_diff(pre) + 1e-6)), -5.0, 5.0))
 
 
+def _summer_suppressed_week_frac(w: pd.DataFrame, ds: np.ndarray) -> float:
+    """E1: share of summer ISO weeks in `w` (≥4 valid days) whose median ds ≤ the winter median ds − 0.5."""
+    months = w["month"].to_numpy()
+    winter = _med(ds[np.isin(months, WINTER)], PERSIST_MIN_WINTER_DAYS)
+    if not np.isfinite(winter):
+        return np.nan
+    summer = np.isin(months, SUMMER)
+    iso = w.index[summer].isocalendar()
+    week = iso["year"].to_numpy(np.int64) * 100 + iso["week"].to_numpy(np.int64)
+    weekly = pd.Series(ds[summer]).groupby(week).agg(["median", "count"])
+    weekly = weekly[weekly["count"] >= PERSIST_WEEK_DAYS]
+    if len(weekly) < PERSIST_MIN_WEEKS:
+        return np.nan
+    return float((weekly["median"] <= winter - PERSIST_DROP).mean())
+
+
 def fitted_features(cd, clim: Climatology, lf: dict[str, float]) -> tuple[dict[str, float], Commissioning | None]:
     """Climatology-dependent features (computed inside every fit/predict with that fit's climatology)."""
-    out = dict.fromkeys(FITTED, np.nan)
+    out = dict.fromkeys(FITTED + PERSISTENCE_FEATURES, np.nan)
     if cd is None or cd.n_valid == 0:
         return out, None
     daily = cd.daily
@@ -208,6 +234,7 @@ def fitted_features(cd, clim: Climatology, lf: dict[str, float]) -> tuple[dict[s
     summer = v["month"].isin(SUMMER).to_numpy()
     sd = _med(ds[w365 & summer], 30)
     out["summer_ds"] = sd if np.isfinite(sd) else _med(ds[summer], 30)
+    out["summer_suppressed_week_frac"] = _summer_suppressed_week_frac(v[w365], ds[w365])
 
     w = last365(v)
     summer_all = v[v["month"].isin(SUMMER)]

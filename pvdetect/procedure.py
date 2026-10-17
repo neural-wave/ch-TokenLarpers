@@ -232,13 +232,20 @@ def _p_mean(ape: np.ndarray) -> float:
     return float(np.where(np.isfinite(ape), np.maximum(0, 1 - ape / 0.5), 0.0).mean()) if ape.size else np.nan
 
 
+def _proba(oof: pd.DataFrame, kind: str) -> np.ndarray:
+    """Inner OOF probabilities of a classifier option; `avg` (E2) is the mean of logreg and CatBoost."""
+    if kind == "avg":
+        return (oof["p_logreg"].to_numpy(float) + oof["p_catboost"].to_numpy(float)) / 2
+    return oof[f"p_{kind}"].to_numpy(float)
+
+
 def _select(oof: pd.DataFrame) -> dict:
     """Tier A choices from pooled inner OOF predictions."""
     t_pv = oof["t_pv"].to_numpy(bool)
     t_dates = oof["t_date"].to_numpy("datetime64[ns]")
     err = _err_days(oof["date_weak"], t_dates)
     ape_r = ape_array(oof["kwp_ridge"].to_numpy(float), oof["t_kwp"].to_numpy(float))
-    p_lr, p_cb = oof["p_logreg"].to_numpy(float), oof["p_catboost"].to_numpy(float)
+    p_lr, p_cb = _proba(oof, "logreg"), _proba(oof, "catboost")
     t_lr, s_lr = pick_threshold(threshold_scores(p_lr, t_pv, err, ape_r))
     t_cb, s_cb = pick_threshold(threshold_scores(p_cb, t_pv, err, ape_r))
     clf_kind, thr, boot = "logreg", t_lr, None
@@ -246,7 +253,17 @@ def _select(oof: pd.DataFrame) -> dict:
         boot = bootstrap_prob_better(p_lr, t_lr, p_cb, t_cb, t_pv, err, ape_r)
         if boot >= BOOTSTRAP_MIN:
             clf_kind, thr = "catboost", t_cb
-    prob = p_cb if clf_kind == "catboost" else p_lr
+    # E2: probability averaging is a third candidate, compared against the winner of the rule above.
+    scores = {"logreg": s_lr, "catboost": s_cb, "avg": np.nan}
+    boot_avg = None
+    if np.isfinite(p_cb).all():
+        p_avg = _proba(oof, "avg")
+        t_avg, scores["avg"] = pick_threshold(threshold_scores(p_avg, t_pv, err, ape_r))
+        if scores["avg"] - scores[clf_kind] >= CLASSIFIER_MARGIN:
+            boot_avg = bootstrap_prob_better(_proba(oof, clf_kind), thr, p_avg, t_avg, t_pv, err, ape_r)
+            if boot_avg >= BOOTSTRAP_MIN:
+                clf_kind, thr = "avg", t_avg
+    prob = _proba(oof, clf_kind)
     tp = t_pv & (prob >= thr)
     true_k = oof["t_kwp"].to_numpy(float)
     P_r = _p_mean(ape_r[tp])
@@ -277,9 +294,11 @@ def _select(oof: pd.DataFrame) -> dict:
         "threshold_initial": thr,
         "inner_score_logreg": s_lr,
         "inner_score_catboost": s_cb,
+        "inner_score_avg": scores["avg"],
         "inner_score": s_final,
-        "inner_score_initial": s_cb if clf_kind == "catboost" else s_lr,
+        "inner_score_initial": scores[clf_kind],
         "bootstrap_p": boot,
+        "bootstrap_p_avg": boot_avg,
         "capacity": cap_kind,
         "inner_P_ridge": P_r,
         "inner_P_catboost": P_c,
@@ -290,7 +309,7 @@ def _select(oof: pd.DataFrame) -> dict:
 
 def _final_outputs(oof: pd.DataFrame, sel: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """The outputs a configuration would submit: (prediction, date error days, capacity APE)."""
-    pred = oof[f"p_{sel['classifier']}"].to_numpy(float) >= sel["threshold"]
+    pred = _proba(oof, sel["classifier"]) >= sel["threshold"]
     dates = oof["date_first"] if sel["insufficient_rule"] == "first_date" else oof["date_weak"]
     err = _err_days(dates, oof["t_date"].to_numpy("datetime64[ns]"))
     ape = ape_array(sel["kappa"] * oof[f"kwp_{sel['capacity']}"].to_numpy(float), oof["t_kwp"].to_numpy(float))
@@ -344,7 +363,21 @@ def _choose_unlabelled(table, labels, lab, train_ids, splits, names, cap_names, 
             setting, cur = cand_setting, cand
     else:
         info["evidence_scale_disabled_reason"] = "unlabelled spread unusable"
-    return setting, cur[1], {"climatology": setting[0], "evidence_scale": setting[1], **info, "unlabelled_options": options}
+    settings = {"climatology": setting[0], "evidence_scale": setting[1]}
+    return setting, cur[0], cur[1], {**settings, **info, "unlabelled_options": options}
+
+
+def _choose_feature_block(table, labels, lab, train_ids, splits, export, cap_names, setting, oof, sel):
+    """E1 persistence block (classifier only) on the same inner splits, adopted by the Step 11 rule."""
+    names, cand_names = feature_names(export), feature_names(export, persistence=True)
+    c_oof = _inner_oof(table, labels, lab, train_ids, splits, cand_names, cap_names, setting)
+    cand = (c_oof, _select(c_oof))
+    adopt, boot = _adopt((oof, sel), cand)
+    info = {
+        "feature_block": "persistence" if adopt else "base",
+        "feature_options": {"base": sel["inner_score"], "persistence": cand[1]["inner_score"], "bootstrap_p": boot},
+    }
+    return (cand_names, cand[1], info) if adopt else (names, sel, info)
 
 
 def fit(table: FeatureTable, labels: pd.DataFrame, train_ids: list[str], *, inner: bool = True) -> dict:
@@ -353,14 +386,17 @@ def fit(table: FeatureTable, labels: pd.DataFrame, train_ids: list[str], *, inne
     names = feature_names(export)
     cap_names = capacity_feature_names(export)
     splits = inner_splits(labels, train_ids) if inner else []
-    setting, unl_info = BASE_SETTING, {}
+    setting, unl_info, feat_info = BASE_SETTING, {}, {"feature_block": "base"}
     if splits:
         oof = _inner_oof(table, labels, lab, train_ids, splits, names, cap_names)
         sel = _select(oof)
         if table.unlabelled is not None:
-            setting, sel, unl_info = _choose_unlabelled(
+            setting, oof, sel, unl_info = _choose_unlabelled(
                 table, labels, lab, train_ids, splits, names, cap_names, oof, sel
             )
+        names, sel, feat_info = _choose_feature_block(
+            table, labels, lab, train_ids, splits, export, cap_names, setting, oof, sel
+        )
     else:
         sel = {
             "classifier": "logreg",
@@ -374,10 +410,9 @@ def fit(table: FeatureTable, labels: pd.DataFrame, train_ids: list[str], *, inne
         }
         if table.unlabelled is not None:
             unl_info = {"climatology": setting[0], "evidence_scale": setting[1]}
-    comp = _fit_components(
-        table, lab, train_ids, names, cap_names, ("logreg", sel["classifier"]), (sel["capacity"],), setting
-    )
-    if sel["classifier"] == "catboost" and "catboost_clf" not in comp.objects:
+    clf_kinds = ("logreg", "catboost") if sel["classifier"] == "avg" else ("logreg", sel["classifier"])
+    comp = _fit_components(table, lab, train_ids, names, cap_names, clf_kinds, (sel["capacity"],), setting)
+    if sel["classifier"] in ("catboost", "avg") and "catboost_clf" not in comp.objects:
         sel["classifier"] = "logreg"
         sel["inner_score"] = sel["inner_score_logreg"]
     if sel["capacity"] == "catboost" and "catboost_cap" not in comp.objects:
@@ -385,8 +420,10 @@ def fit(table: FeatureTable, labels: pd.DataFrame, train_ids: list[str], *, inne
     date = {**comp.date_params, "insufficient_rule": sel["insufficient_rule"]}
     sel.update(offset_event=date["offset_event"], start_lag=date["start_lag"], contrast_cut=date["contrast_cut"])
     sel.update(unl_info)
+    sel.update(feat_info)
+    uses_cb = sel["classifier"] in ("catboost", "avg")
     objects = {}
-    if sel["classifier"] == "catboost":
+    if uses_cb:
         objects["catboost_clf"] = comp.objects["catboost_clf"]
     if sel["capacity"] == "catboost":
         objects["catboost_cap"] = comp.objects["catboost_cap"]
@@ -399,8 +436,8 @@ def fit(table: FeatureTable, labels: pd.DataFrame, train_ids: list[str], *, inne
         "classifier": {
             "kind": sel["classifier"],
             "threshold": sel["threshold"],
-            "logreg": comp.logreg if sel["classifier"] == "logreg" else None,
-            "catboost_file": "catboost_clf.cbm" if sel["classifier"] == "catboost" else None,
+            "logreg": comp.logreg if sel["classifier"] in ("logreg", "avg") else None,
+            "catboost_file": "catboost_clf.cbm" if uses_cb else None,
         },
         "capacity": {
             "kind": sel["capacity"],

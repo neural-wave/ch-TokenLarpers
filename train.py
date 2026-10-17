@@ -35,7 +35,7 @@ def _selection_line(infos: list[dict]) -> str:
     off = np.array([i.get("offset_event", np.nan) for i in infos], float)
     rule = Counter(i.get("insufficient_rule") for i in infos if i.get("insufficient_rule"))
     parts = [
-        f"classifier logreg={clf.get('logreg', 0)}/{n} catboost={clf.get('catboost', 0)}/{n}",
+        f"classifier logreg={clf.get('logreg', 0)}/{n} catboost={clf.get('catboost', 0)}/{n} avg={clf.get('avg', 0)}/{n}",
         f"capacity ridge={cap.get('ridge', 0)}/{n} catboost={cap.get('catboost', 0)}/{n}",
         f"threshold median={_fmt(np.nanmedian(th), 2)} [{_fmt(np.nanmin(th), 2)},{_fmt(np.nanmax(th), 2)}]",
         f"kappa median={_fmt(np.nanmedian(ka), 2)}",
@@ -51,6 +51,9 @@ def _selection_line(infos: list[dict]) -> str:
     scale = Counter(i.get("evidence_scale") for i in infos if i.get("evidence_scale"))
     if scale:
         parts.append(f"evidence_scale none={scale.get('none', 0)}/{n} spread={scale.get('unlabelled_spread', 0)}/{n}")
+    block = Counter(i.get("feature_block") for i in infos if i.get("feature_block"))
+    if block:
+        parts.append(f"features base={block.get('base', 0)}/{n} persistence={block.get('persistence', 0)}/{n}")
     return "selection: " + " | ".join(parts)
 
 
