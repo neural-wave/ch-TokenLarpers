@@ -78,6 +78,22 @@ CLI: `python -m neuralwave_data.prepare --manifest PATH --out DIR [--config PATH
 
 `run_manifest.json` records schema version, configured source roles, source hashes, settings, row/filter/duplicate/gap counts, artifact names and software versions. Data-bearing reports remain under the output directory. Manifest absent/invalid paths fail without printing file contents.
 
+### Large-file preparation and pretraining partitions
+
+Epoch-backed CSV sources use bounded vectorized validation and temporary SQLite staging with deferred indexing. Canonical writing and daily features operate per customer; the raw corpus is never concatenated in memory. Strict timestamp agreement, exact-duplicate collapse, conflicting-duplicate errors, negative readings, observed zeros, explicit missingness, dense 15-minute gaps and Swiss DST support remain unchanged. Extension labels allow multiple distinct events and reject duplicate customer/date events.
+
+Prepare the labelled development measurements with their initial and extension labels in one run. Prepare the unlabelled measurements in a **separate** run with only the `unlabelled_measurements` role. Existing outputs are not overwritten.
+
+```bash
+python -m neuralwave_data.prepare --manifest PRIVATE_DEV_MANIFEST --out PRIVATE_DEV_OUT --folds 5 --seed 17
+python -m neuralwave_data.prepare --manifest PRIVATE_UNLABELLED_MANIFEST --out PRIVATE_UNLABELLED_OUT
+python -m neuralwave_data.pretraining_split --source-dir PRIVATE_UNLABELLED_OUT \
+  --exclude-labels PRIVATE_DEV_OUT/labels.parquet --out PRIVATE_PRETRAIN_OUT \
+  --validation-fraction 0.15 --seed 17
+```
+
+The partition command requires unlabelled-only provenance, rejects overlap with labelled customers, and assigns entire customers reproducibly before streaming rows into `train.parquet` and `validation.parquet`. It preserves values/statuses, checks row conservation, and writes `manifest.json` for the pretraining CLI plus a private `qa_report.json` containing counts and integrity/audit hashes. No PV labels choose the partition. Reserve at least one customer for each population; the default validation population is approximately 15% of eligible unlabelled customers.
+
 ### Acceptance and smoke
 
 Permanent regression tests: early POD filter with null/non-POD malformed records; literal case-sensitive ID matching; labelled IDs preserved; 92/96/100-day handling and repeated wall clocks; shuffled input; exact/conflicting duplicates; gaps versus zeros; all-null days; partial bands; finite negative values; leading-zero IDs; explicit locale; unsupported schemas/settings; labels optional; fold disjointness/determinism.

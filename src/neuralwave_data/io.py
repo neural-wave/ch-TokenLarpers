@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-import csv
+import numpy as np
 import hashlib
 import json
 import os
 import re
 import sqlite3
-import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -144,11 +142,84 @@ def source_hash(path: str | Path) -> str:
 
 def _ensure_table(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE TABLE IF NOT EXISTS raw (customer_id TEXT NOT NULL, timestamp_epoch INTEGER NOT NULL, energy_kwh REAL, source_id INTEGER NOT NULL, role TEXT NOT NULL)")
-    conn.execute("CREATE INDEX IF NOT EXISTS raw_customer_epoch ON raw(customer_id, timestamp_epoch)")
+
+
+def _vector_error(masks: list[tuple[np.ndarray, str]]) -> None:
+    first: tuple[int, str] | None = None
+    for mask, message in masks:
+        positions = np.flatnonzero(mask)
+        if len(positions):
+            candidate = (int(positions[0]), message)
+            if first is None or candidate[0] < first[0]:
+                first = candidate
+    if first is not None:
+        raise ValueError(first[1])
+
+
+def _parse_epoch_vectorized(values: pd.Series, column: str) -> np.ndarray:
+    raw = values.astype("string").str.strip()
+    missing = (raw.isna() | raw.eq("")).to_numpy(dtype=bool)
+    numeric = pd.to_numeric(raw, errors="coerce")
+    numbers = numeric.to_numpy(dtype=float, na_value=np.nan)
+    nonfinite_tokens = raw.str.fullmatch(r"[+-]?(?:nan|inf(?:inity)?)", case=False).fillna(False).to_numpy(dtype=bool)
+    not_numeric = numeric.isna().to_numpy(dtype=bool) & ~missing & ~nonfinite_tokens
+    not_integral = ~missing & ~not_numeric & (~np.isfinite(numbers) | (numbers != np.floor(numbers)))
+    not_aligned = ~missing & ~not_numeric & ~not_integral & (np.remainder(numbers, 900) != 0)
+    if column not in ("timestamp_epoch", "epoch", "unix_timestamp"):
+        raise AssertionError("epoch vector parser requires an epoch column")
+    _vector_error([
+        (missing, "missing timestamp"),
+        (not_numeric, "timestamp_epoch is not numeric"),
+        (not_integral, "timestamp_epoch must be integral seconds"),
+        (not_aligned, "timestamp is not aligned to a 900-second grid"),
+    ])
+    return numbers.astype(np.int64)
+
+
+def _validate_epoch_backed_vectorized(values: pd.Series, epochs: np.ndarray) -> None:
+    raw = values.astype("string").str.strip()
+    missing = (raw.isna() | raw.eq("")).to_numpy(dtype=bool)
+    aware_hint = raw.str.contains(r"(?:[zZ]|[+-]\d{2}:?\d{2}|UTC|GMT)$", case=False, regex=True, na=False).to_numpy(dtype=bool)
+    aware = pd.to_datetime(raw.where(aware_hint), errors="coerce", utc=True, format="mixed")
+    naive = pd.to_datetime(raw.where(~aware_hint), errors="coerce", format="mixed")
+    invalid = (~missing) & (
+        (aware_hint & aware.isna().to_numpy(dtype=bool))
+        | (~aware_hint & naive.isna().to_numpy(dtype=bool))
+    )
+    _vector_error([(missing, "missing timestamp"), (invalid, "invalid timestamp")])
+    expected_utc = pd.Series(pd.to_datetime(epochs, unit="s", utc=True))
+    expected_local = expected_utc.dt.tz_convert(_TZ).dt.tz_localize(None)
+    expected_utc_ns = epochs.astype(np.int64) * 1_000_000_000
+    expected_local_ns = expected_local.astype("int64").to_numpy()
+    aware_ns = aware.astype("int64").to_numpy()
+    naive_ns = naive.astype("int64").to_numpy()
+    disagree = (
+        (aware_hint & ~invalid & (aware_ns != expected_utc_ns))
+        | (~aware_hint & ~invalid & (naive_ns != expected_local_ns))
+    )
+    _vector_error([(disagree, "timestamp fields disagree")])
+
+
+def _parse_energy_vectorized(values: pd.Series, decimal: str) -> np.ndarray:
+    raw = values.astype("string").str.strip()
+    missing = (raw.isna() | raw.eq("")).to_numpy(dtype=bool)
+    if decimal != ".":
+        raw = raw.str.replace(decimal, ".", regex=False)
+    numeric = pd.to_numeric(raw, errors="coerce")
+    numbers = numeric.to_numpy(dtype=float, na_value=np.nan)
+    nonfinite_tokens = raw.str.fullmatch(r"[+-]?(?:nan|inf(?:inity)?)", case=False).fillna(False).to_numpy(dtype=bool)
+    not_numeric = numeric.isna().to_numpy(dtype=bool) & ~missing & ~nonfinite_tokens
+    nonfinite = ~missing & ~not_numeric & ~np.isfinite(numbers)
+    _vector_error([(not_numeric, "energy is not numeric"), (nonfinite, "energy must be finite")])
+    result = np.empty(len(raw), dtype=object)
+    result[:] = None
+    present = ~missing
+    result[present] = numbers[present]
+    return result
 
 
 def stage_measurements(sources: list[dict[str, Any]], conn: sqlite3.Connection) -> dict[str, Any]:
-    """Read CSVs in chunks into temporary SQLite; never materialize all input rows."""
+    """Read CSVs in bounded chunks into temporary SQLite."""
     _ensure_table(conn)
     counts: dict[str, Any] = {"input_rows": {}, "retained_rows": {}, "excluded_null_customer": 0,
                                "excluded_non_pod": 0, "duplicate_rows": 0, "gap_intervals": 0}
@@ -168,12 +239,6 @@ def stage_measurements(sources: list[dict[str, Any]], conn: sqlite3.Connection) 
                 if parse_timestamp_col is None:
                     raise ValueError("input is missing timestamp column")
                 energy_col = _columns(chunk, "energy")
-                supplied_columns = [customer_col, parse_timestamp_col, energy_col] + ([timestamp_col] if timestamp_col and timestamp_col != parse_timestamp_col else [])
-                supplied_columns = list(dict.fromkeys(supplied_columns))
-                supplied_positions = {name: index for index, name in enumerate(supplied_columns)}
-                epoch_position = supplied_positions[parse_timestamp_col]
-                timestamp_position = supplied_positions.get(timestamp_col) if timestamp_col else None
-                energy_position = supplied_positions[energy_col]
                 # This is intentionally before timestamp/energy parsing for unlabelled junk rows.
                 ids = chunk[customer_col]
                 if role == "unlabelled_measurements":
@@ -186,19 +251,31 @@ def stage_measurements(sources: list[dict[str, Any]], conn: sqlite3.Connection) 
                     bad = ids.isna() | ids.eq("")
                     if bool(bad.any()):
                         raise ValueError(f"{role} contains null or empty customer_id")
-                rows: list[tuple[str, int, float | None, int, str]] = []
-                for record in chunk[supplied_columns].itertuples(index=False, name=None):
-                    customer = record[supplied_positions[customer_col]]
-                    timestamp = record[epoch_position]
-                    energy = record[energy_position]
-                    customer = str(customer)
-                    if not customer:
-                        raise ValueError(f"{role} contains empty customer_id")
-                    epoch = _parse_epoch(timestamp, parse_timestamp_col)
-                    if timestamp_position is not None and timestamp_position != epoch_position:
-                        _validate_epoch_backed_timestamp(record[timestamp_position], epoch, timestamp_col)
-                    parsed_energy = _parse_energy(energy, source["decimal"])
-                    rows.append((customer, epoch, parsed_energy, source_id, role))
+                if epoch_col is not None:
+                    customers = chunk[customer_col].astype(str).to_numpy()
+                    epochs = _parse_epoch_vectorized(chunk[parse_timestamp_col], parse_timestamp_col)
+                    if timestamp_col is not None and timestamp_col != parse_timestamp_col:
+                        _validate_epoch_backed_vectorized(chunk[timestamp_col], epochs)
+                    energies = _parse_energy_vectorized(chunk[energy_col], source["decimal"])
+                    rows = list(zip(customers.tolist(), epochs.tolist(), energies.tolist(),
+                                    [source_id] * len(chunk), [role] * len(chunk)))
+                else:
+                    supplied_columns = [customer_col, parse_timestamp_col, energy_col] + ([timestamp_col] if timestamp_col and timestamp_col != parse_timestamp_col else [])
+                    supplied_columns = list(dict.fromkeys(supplied_columns))
+                    supplied_positions = {name: index for index, name in enumerate(supplied_columns)}
+                    epoch_position = supplied_positions[parse_timestamp_col]
+                    timestamp_position = supplied_positions.get(timestamp_col) if timestamp_col else None
+                    energy_position = supplied_positions[energy_col]
+                    rows = []
+                    for record in chunk[supplied_columns].itertuples(index=False, name=None):
+                        customer = str(record[supplied_positions[customer_col]])
+                        if not customer:
+                            raise ValueError(f"{role} contains empty customer_id")
+                        epoch = _parse_epoch(record[epoch_position], parse_timestamp_col)
+                        if timestamp_position is not None and timestamp_position != epoch_position:
+                            _validate_epoch_backed_timestamp(record[timestamp_position], epoch, timestamp_col)
+                        parsed_energy = _parse_energy(record[energy_position], source["decimal"])
+                        rows.append((customer, epoch, parsed_energy, source_id, role))
                 if rows:
                     conn.executemany("INSERT INTO raw(customer_id,timestamp_epoch,energy_kwh,source_id,role) VALUES(?,?,?,?,?)", rows)
                     retained_count += len(rows)
@@ -207,6 +284,8 @@ def stage_measurements(sources: list[dict[str, Any]], conn: sqlite3.Connection) 
             raise ValueError(f"unable to parse measurement source for role {role}") from exc
         counts["input_rows"][role] = counts["input_rows"].get(role, 0) + input_count
         counts["retained_rows"][role] = counts["retained_rows"].get(role, 0) + retained_count
+    conn.execute("CREATE INDEX IF NOT EXISTS raw_customer_epoch ON raw(customer_id, timestamp_epoch)")
+    conn.commit()
     conflict = conn.execute("SELECT customer_id,timestamp_epoch FROM raw GROUP BY customer_id,timestamp_epoch HAVING (COUNT(*) > 1 AND COUNT(energy_kwh) > 0 AND COUNT(energy_kwh) < COUNT(*)) OR (COUNT(*) > 1 AND MIN(energy_kwh) <> MAX(energy_kwh))").fetchone()
     if conflict:
         raise ValueError("conflicting duplicate measurement values")
@@ -229,24 +308,40 @@ def write_canonical(conn: sqlite3.Connection, output: str | Path, counts: dict[s
     total = 0
     customer_rows = conn.execute("SELECT customer_id, MIN(timestamp_epoch), MAX(timestamp_epoch) FROM raw GROUP BY customer_id ORDER BY customer_id")
     for customer, first, last in customer_rows:
-        values = {row[0]: row[1] for row in conn.execute("SELECT timestamp_epoch, energy_kwh FROM raw WHERE customer_id=?", (customer,))}
-        frame_rows = []
-        epoch = int(first)
-        while epoch <= int(last):
-            if epoch in values:
-                energy = values[epoch]
-                status = "missing_input" if energy is None else "observed"
-            else:
-                energy = None
-                status = "absent_interval"
-                counts["gap_intervals"] += 1
-            local, local_date, slot, fold, offset = _timestamp_fields(epoch)
-            frame_rows.append((customer, epoch, local, datetime.fromisoformat(local_date).date(), slot, fold, offset, energy, status))
-            epoch += 900
-        frame = pd.DataFrame(frame_rows, columns=["customer_id", "timestamp_epoch", "timestamp_local", "local_date", "local_slot", "dst_fold", "utc_offset_minutes", "energy_kwh", "value_status"])
-        frame["local_slot"] = frame["local_slot"].astype("uint8")
-        frame["dst_fold"] = frame["dst_fold"].astype("uint8")
-        frame["utc_offset_minutes"] = frame["utc_offset_minutes"].astype("int16")
+        epochs = np.arange(int(first), int(last) + 900, 900, dtype=np.int64)
+        observed_rows = conn.execute("SELECT timestamp_epoch, energy_kwh FROM raw WHERE customer_id=? ORDER BY timestamp_epoch", (customer,)).fetchall()
+        observed_epochs = np.asarray([row[0] for row in observed_rows], dtype=np.int64)
+        positions = np.searchsorted(epochs, observed_epochs)
+        present = np.zeros(len(epochs), dtype=bool)
+        present[positions] = True
+        energy = np.empty(len(epochs), dtype=object)
+        energy[:] = None
+        observed_values = np.asarray([row[1] for row in observed_rows], dtype=object)
+        nonmissing = pd.notna(observed_values)
+        energy[positions[nonmissing]] = observed_values[nonmissing]
+        counts["gap_intervals"] += int((~present).sum())
+        utc = pd.Series(pd.to_datetime(epochs, unit="s", utc=True))
+        local = utc.dt.tz_convert(_TZ)
+        utc_naive = utc.dt.tz_localize(None)
+        local_naive = local.dt.tz_localize(None)
+        offset = ((local_naive - utc_naive).dt.total_seconds() // 60).astype("int16")
+        # Include a bounded transition context so fold remains correct when a
+        # customer's observed range starts or ends inside the repeated hour.
+        probe_epochs = np.arange(int(first) - 7200, int(first) - 7200 + len(epochs) * 900 + 14400, 900, dtype=np.int64)
+        probe_local = pd.Series(pd.to_datetime(probe_epochs, unit="s", utc=True)).dt.tz_convert(_TZ).dt.tz_localize(None)
+        fold = probe_local.duplicated(keep="first").astype("uint8").iloc[8:8 + len(epochs)].to_numpy()
+        status = np.where(~present, "absent_interval", np.where(pd.isna(energy), "missing_input", "observed"))
+        frame = pd.DataFrame({
+            "customer_id": [customer] * len(epochs),
+            "timestamp_epoch": epochs,
+            "timestamp_local": local,
+            "local_date": local_naive.dt.date,
+            "local_slot": (local.dt.hour * 4 + local.dt.minute // 15).astype("uint8"),
+            "dst_fold": fold,
+            "utc_offset_minutes": offset,
+            "energy_kwh": energy,
+            "value_status": status,
+        }, columns=["customer_id", "timestamp_epoch", "timestamp_local", "local_date", "local_slot", "dst_fold", "utc_offset_minutes", "energy_kwh", "value_status"])
         table = arrow_table(frame, "measurements")
         if writer is None:
             writer = pq.ParquetWriter(output, MEASUREMENT_ARROW_SCHEMA)
@@ -257,3 +352,5 @@ def write_canonical(conn: sqlite3.Connection, output: str | Path, counts: dict[s
     else:
         writer.close()
     return total
+
+
