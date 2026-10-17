@@ -57,7 +57,7 @@ python train.py --timeseries energy.csv --labels labels.csv --out <private>/mode
 
 Inside each fit, inner CV on the training customers chooses: logistic regression vs CatBoost (CatBoost needs ≥2.0 points and a stable bootstrap), the decision threshold, ridge vs CatBoost capacity, a capacity factor κ, and the date rule for weak-evidence customers. The week-of-year climatology (from labelled non-PV training customers) deseasonalizes the changepoint signal; candidates whose step recurs at the same time in other years are rejected.
 
-`inner=` is the mean inner-CV score of the selected classifier over the outer fits, and `gap=` is `inner` minus the nested score. The gap is a warning signal, not a measure of overfitting: inner and outer scores come from different customer sets and training sizes. A gap above about 5 points calls for a look at selection stability (the `selection:` line); it proves nothing alone.
+`inner=` is the mean inner-CV score of the final selected configuration over the outer fits, and `gap=` is `inner` minus the nested score. After the capacity model, κ and the date rule are chosen, the decision threshold is rescored once on those final inner out-of-fold outputs (same grid, same tie-breaking); `threshold_initial`/`inner_score_initial` in the selection records keep the pre-rescoring values. The gap is a warning signal, not a measure of overfitting: inner and outer scores come from different customer sets and training sizes. A gap above about 5 points calls for a look at selection stability (the `selection:` line); it proves nothing alone.
 
 Dates come from one of three regimes: `event` (detected changepoint + learned offset), `present_at_start` (PV already present when data starts: first date − learned lag), `insufficient` (weak candidate or first date, chosen by inner CV).
 
@@ -136,11 +136,11 @@ The loader sniffs `;`/`,` separators and comma decimals, accepts epoch seconds o
 The trained model never enters this repository's history: the hygiene hook blocks `artifacts/` and every `.cbm`. It reaches the NW_26 repository only through the export script below or through the organizer-approved private channel (files placed into `artifacts/` next to `inference.py`, which loads them automatically).
 
 ```
-PYTHON=python sh scripts/export_submission.sh COMMIT DEST [MODEL_DIR]
+sh scripts/export_submission.sh COMMIT DEST [MODEL_DIR]
 python scripts/check_release.py DEST --allow artifacts/model.json [--allow artifacts/catboost_clf.cbm ...]
 ```
 
-`export_submission.sh` extracts `git archive COMMIT` into `DEST` (clean tree, no history). With `MODEL_DIR` it copies `MODEL_DIR/model.json` and exactly the files that model references (`pvdetect.model.referenced_files`) into `DEST/artifacts/`; without it (private-channel route) no model file is copied. It then runs `check_release.py` with an allow list generated from `model.json`, never a wildcard, and aborts non-zero on any failure; an aborted `DEST` must not be committed.
+`export_submission.sh` extracts `git archive COMMIT` into `DEST` (clean tree, no history). With `MODEL_DIR` it copies `MODEL_DIR/model.json` and exactly the files that model references into `DEST/artifacts/`; without it (private-channel route) no model file is copied. The listing (`check_release.model_files`, mirroring `pvdetect.model.referenced_files`) and the audit use the standard library only, so any `python3` works; set `PYTHON` to choose another interpreter. It then runs `check_release.py` with an allow list generated from `model.json`, never a wildcard, and aborts non-zero on any failure; an aborted `DEST` must not be committed.
 
 `check_release.py` walks every file under `DEST` on the filesystem (the NW_26 repository has no hook; `.git` directories are skipped) and exits 1 when a file not on the allow list is a data or model dump, when an allowed path is missing, or when any file, allowed model files included, contains a real customer identifier. It prints paths and reasons only. Passing it is necessary, not sufficient: the export also needs human review and organizer approval (Step 2.5-G).
 
@@ -182,3 +182,5 @@ Until answer 2 arrives we plan for the private channel. `inference.py` loads `ar
 ## Status
 
 The baseline and optional frozen-encoder pipeline are integrated. Local checks use wholly artificial data only; they establish execution and leakage-contract behavior, not competition accuracy. Real-data nested CV, blind-customer evaluation and CUDA validation remain data-holder tasks. Extensions remain header-only. No GPU rental, upload or real-data training is performed by the integration.
+
+Upstream baseline export rehearsal (reported on `Jeffremm10/new-stack`, Step 2.5-X2, synthetic model, 2026-10-17): passed with default `python3` and fresh Python 3.12.14 dependencies; network-blocked inference on 20 synthetic customers produced repeatable output. Hybrid integration verification is recorded separately in `docs/evaluation_protocol.md`.

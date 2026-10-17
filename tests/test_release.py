@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import json
+import pytest
 from pathlib import Path
 
 import pvdetect.procedure as procedure
@@ -144,3 +146,51 @@ def test_release_identifier_in_file_name_is_refused_without_echoing_it(tmp_path:
     assert result.returncode == 1
     assert "customer identifier in path" in result.stdout
     assert identifier not in result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("unsafe", ["../escape.pt", "/abs.pt", "a\\b.pt", "a\nb.pt", "a\rb.pt", "./encoder.pt"])
+def test_release_refuses_unsafe_encoder_references(unsafe):
+    sys.path.insert(0, str(RELEASE_SCRIPT.parent))
+    from check_release import model_files
+    model = {"embedding": {"encoder_files": {"weights": unsafe, "metadata": "encoder/encoder.json"}}}
+    with pytest.raises(ValueError):
+        model_files(model)
+
+
+def test_release_refuses_duplicate_encoder_references():
+    sys.path.insert(0, str(RELEASE_SCRIPT.parent))
+    from check_release import model_files
+    with pytest.raises(ValueError, match="duplicate"):
+        model_files({"embedding": {"encoder_files": {"weights": "encoder/encoder.pt", "metadata": "encoder/encoder.pt"}}})
+
+
+@pytest.mark.parametrize("hybrid", [False, True])
+def test_export_runs_without_site_packages(tmp_path: Path, hybrid):
+    """The export works with an interpreter that cannot import numpy or pvdetect's dependencies."""
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    model = {"version": 3, "classifier": {"catboost_file": None}, "capacity": {"catboost_file": "catboost_cap.cbm"}}
+    if hybrid:
+        model["embedding"] = {"encoder_files": {"weights": "encoder/encoder.pt", "metadata": "encoder/encoder.json"}}
+        (model_dir / "encoder").mkdir()
+        (model_dir / "encoder" / "encoder.pt").write_bytes(b"fabricated encoder")
+        (model_dir / "encoder" / "encoder.json").write_text("{}")
+    (model_dir / "model.json").write_text(json.dumps(model), encoding="utf-8")
+    (model_dir / "unreferenced-private.csv").write_text("must not be exported")
+    (model_dir / "catboost_cap.cbm").write_bytes(b"\x00fabricated model bytes\x01")
+    bare = tmp_path / "bare_python"
+    bare.write_text(f'#!/bin/sh\nexec "{sys.executable}" -S "$@"\n', encoding="utf-8")
+    bare.chmod(0o755)
+    probe = subprocess.run([str(bare), "-c", "import numpy"], capture_output=True)
+    assert probe.returncode != 0, "the bare interpreter must not see site-packages"
+    dest = tmp_path / "export"
+    result = subprocess.run(
+        ["sh", str(REPO / "scripts" / "export_submission.sh"), "HEAD", str(dest), str(model_dir)],
+        capture_output=True, text=True, env={"PATH": "/usr/bin:/bin", "PYTHON": str(bare)},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not (dest / "artifacts" / "unreferenced-private.csv").exists()
+    expected = {"model.json", "catboost_cap.cbm"}
+    if hybrid:
+        expected.update({"encoder/encoder.pt", "encoder/encoder.json"})
+    assert {p.relative_to(dest / "artifacts").as_posix() for p in (dest / "artifacts").rglob("*") if p.is_file()} == expected

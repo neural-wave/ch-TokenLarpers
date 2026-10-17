@@ -36,6 +36,36 @@ from check_hygiene import has_customer_identifier, is_data_path  # noqa: E402
 REDACTED = "<path containing a customer identifier>"
 
 
+def model_files(model: dict) -> list[str]:
+    """Sibling files a model.json references, as safe relative POSIX paths.
+
+    Standard library only, so the export runs with any interpreter.  Must mirror
+    ``pvdetect.model.referenced_files``, including the optional encoder pair.
+    Raises ``ValueError`` for absolute, parent-relative or otherwise unsafe names.
+    """
+    names = []
+    for section in ("classifier", "capacity"):
+        name = (model.get(section) or {}).get("catboost_file")
+        if not name:
+            continue
+        names.append(name)
+    embedding = model.get("embedding")
+    if embedding is not None:
+        refs = embedding.get("encoder_files")
+        if not isinstance(refs, dict) or set(refs) != {"weights", "metadata"}:
+            raise ValueError("embedding encoder_files must name weights and metadata")
+        names.extend(refs[key] for key in ("weights", "metadata"))
+    for name in names:
+        path = PurePosixPath(name)
+        if (path.is_absolute() or ".." in path.parts or "\\" in name
+                or any(c in name for c in "\r\n\x00") or not name
+                or path.as_posix() != name):
+            raise ValueError("unsafe referenced file name in model.json")
+    if len(names) != len(set(names)):
+        raise ValueError("duplicate model artifact reference")
+    return names
+
+
 def _id_in_path(path: str) -> bool:
     return has_customer_identifier(path.encode("utf-8", "surrogateescape"))
 

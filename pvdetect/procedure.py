@@ -274,12 +274,21 @@ def _select(oof: pd.DataFrame) -> dict:
         d_first = _d_mean(_err_days(oof["date_first"], t_dates)[insuff])
         if d_first > d_weak:
             rule = "first_date"
+    # B4: rescore the same threshold grid on the outputs that are actually submitted
+    # (chosen capacity kind × κ, chosen date rule). One pass; same tie-breaking.
+    final_dates = oof["date_first"] if rule == "first_date" else oof["date_weak"]
+    err_final = _err_days(final_dates, t_dates)
+    final_kwp = np.clip(kappa * oof[f"kwp_{cap_kind}"].to_numpy(float), 0.5, 500.0)
+    ape_final = ape_array(final_kwp, true_k)
+    thr_final, s_final = pick_threshold(threshold_scores(prob, t_pv, err_final, ape_final))
     return {
         "classifier": clf_kind,
-        "threshold": thr,
+        "threshold": thr_final,
+        "threshold_initial": thr,
         "inner_score_logreg": s_lr,
         "inner_score_catboost": s_cb,
-        "inner_score": s_cb if clf_kind == "catboost" else s_lr,
+        "inner_score": s_final,
+        "inner_score_initial": s_cb if clf_kind == "catboost" else s_lr,
         "bootstrap_p": boot,
         "capacity": cap_kind,
         "inner_P_ridge": P_r,
@@ -387,10 +396,12 @@ def fit(
         base_sel = {
             "classifier": "logreg",
             "threshold": 0.5,
+            "threshold_initial": 0.5,
             "capacity": "ridge",
             "kappa": 1.0,
             "insufficient_rule": "weak_candidate",
             "inner_score": float("nan"),
+            "inner_score_initial": float("nan"),
         }
     emb_sel = None
     if encoder is not None and feature_block in {"auto", "embedding"}:

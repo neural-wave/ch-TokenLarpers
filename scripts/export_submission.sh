@@ -5,9 +5,10 @@
 #
 # 1. Extracts `git archive COMMIT` into DEST (created if needed): no history.
 # 2. With MODEL_DIR: copies MODEL_DIR/model.json and exactly the files it
-#    references (pvdetect.model.referenced_files, evaluated with ${PYTHON:-python3}
-#    against the exported tree) into DEST/artifacts/.  Without MODEL_DIR no model
-#    file is copied (organizer-approved private channel instead).
+#    references (check_release.model_files, standard library only, so the default
+#    python3 works; it mirrors pvdetect.model.referenced_files) into
+#    DEST/artifacts/.  Without MODEL_DIR no model file is copied
+#    (organizer-approved private channel instead).
 # 3. Runs scripts/check_release.py on DEST with an allow list generated from
 #    model.json; any failure aborts with a non-zero exit.
 set -eu
@@ -21,7 +22,7 @@ COMMIT=$1
 DEST=$2
 MODEL_DIR=${3:-}
 PY=${PYTHON:-python3}
-case $PY in  # the referenced-file listing runs inside DEST, so a relative interpreter path must be absolute
+case $PY in  # normalise a relative interpreter path so it survives directory changes
     */*) PY=$(cd "$(dirname "$PY")" && pwd)/$(basename "$PY") ;;
 esac
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
@@ -46,18 +47,15 @@ set --
 if [ -n "$MODEL_DIR" ]; then
     [ -f "$MODEL_DIR/model.json" ] || abort "no model.json in $MODEL_DIR"
     MODEL_DIR=$(cd "$MODEL_DIR" && pwd)
-    REFS=$(cd "$DEST" && "$PY" -c '
+    REFS=$("$PY" -c '
 import json, sys
-from pathlib import PurePosixPath
-from pvdetect.model import referenced_files
+sys.path.insert(0, sys.argv[2])
+from check_release import model_files
 with open(sys.argv[1], encoding="utf-8") as handle:
     model = json.load(handle)
-for name in referenced_files(model):
-    path = PurePosixPath(name)
-    if path.is_absolute() or ".." in path.parts or "\n" in name or "\\" in name:
-        sys.exit("unsafe referenced file name in model.json")
-    print(path.as_posix())
-' "$MODEL_DIR/model.json") || abort "could not list the files referenced by model.json"
+for name in model_files(model):
+    print(name)
+' "$MODEL_DIR/model.json" "$SCRIPT_DIR") || abort "could not list the files referenced by model.json"
     mkdir -p "$DEST/artifacts"
     cp "$MODEL_DIR/model.json" "$DEST/artifacts/model.json"
     set -- --allow artifacts/model.json
