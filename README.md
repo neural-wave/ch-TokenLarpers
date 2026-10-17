@@ -2,6 +2,12 @@
 
 Detects photovoltaic installations, their commissioning date and nominal capacity (kWp) from 15-minute grid-withdrawal time series (AIL NeuralWave challenge). The authoritative plan is `IMPLEMENTATION_HANDOFF.md`.
 
+## Team
+
+- Alessandro Tognoni — data hygiene (check, scrubbing, commit hook), shared-fold comparability contract across branches, project overview and plan review.
+- Jeffre Daniel Martinez Marroquin — the `pvdetect` pipeline (loading, scoring, season-aware detection, date regimes, inner-CV selection, nested CV, synthetic generator, benchmarks) and the implementation plan.
+- Tarun Deepak — canonical preprocessing pipeline, synthetic PV data pipeline, time-series embeddings and the PatchTST window classifier, hackathon guidelines.
+
 ## Rules
 
 - No LLM in the training or inference pipeline; no weather, irradiation or location data; calendar features from the timestamps only.
@@ -93,4 +99,4 @@ Every full run starts with the pilot and is refused if the projection exceeds `-
 
 ## Status
 
-submit-v1: season-aware detection, date regimes, confounder features, inner-CV selection (logistic regression vs CatBoost, ridge vs CatBoost capacity, threshold, κ); synthetic-validated only; extensions header-only; unlabelled data unused.
+Procedure: season-aware changepoint and confounder features, three date regimes, inner-CV selection of classifier, threshold, capacity model, κ and date rule, scored by nested CV; `outer_informed_decisions=1` (selection-biased). Synthetic-validated only; real-data nested CV pending (P3); extensions header-only; unlabelled data unused.
