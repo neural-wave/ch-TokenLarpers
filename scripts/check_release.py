@@ -64,6 +64,9 @@ def model_files(model: dict) -> list[str]:
         if not name:
             continue
         names.append(name)
+    cnn_file = (model.get("classifier") or {}).get("fraunhofer_file")
+    if cnn_file:
+        names.append(cnn_file)
     embedding = model.get("embedding")
     if embedding is not None:
         refs = embedding.get("encoder_files")

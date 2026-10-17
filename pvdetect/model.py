@@ -93,6 +93,11 @@ def save_model(model: dict, path: str | Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     objects = model.get("_objects", {})
     for name, obj in objects.items():
+        if name == "fraunhofer":
+            import torch
+
+            torch.save(obj.state_dict(), str(path.parent / "fraunhofer.pt"))
+            continue
         if name not in {"catboost_clf", "catboost_cap"} or not hasattr(obj, "save_model"):
             raise ValueError(f"unexpected model object: {name}")
         obj.save_model(str(path.parent / f"{name}.cbm"), format="cbm")
@@ -130,6 +135,9 @@ def referenced_files(model: dict) -> list[str]:
         f = (model.get(section) or {}).get("catboost_file")
         if f:
             files.append(_safe_reference(f))
+    f_fh = (model.get("classifier") or {}).get("fraunhofer_file")
+    if f_fh:
+        files.append(_safe_reference(f_fh))
     embedding = model.get("embedding")
     if embedding is not None:
         refs = embedding.get("encoder_files")
@@ -156,6 +164,16 @@ def load_model(path: str | Path) -> dict:
             raise FileNotFoundError(f"model artifact not found: {fp}")
         name = Path(f).stem
         if name in {"encoder", ""}:
+            continue
+        if name == "fraunhofer":
+            import torch
+            from pvdetect.fraunhofer import CombinedClassifier, CNNBranch, MLPBranch
+
+            net = CombinedClassifier(MLPBranch(), CNNBranch())
+            device = "mps" if torch.backends.mps.is_available() else "cpu"
+            net.load_state_dict(torch.load(str(fp), map_location=device, weights_only=True))
+            net.to(device).eval()
+            objects[name] = net
             continue
         from catboost import CatBoostClassifier, CatBoostRegressor
 

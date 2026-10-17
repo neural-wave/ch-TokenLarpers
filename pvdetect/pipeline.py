@@ -159,10 +159,15 @@ def classifier_proba(
     names: list[str],
     kind: str | None = None,
     weekly: np.ndarray | None = None,
+    fraunhofer: np.ndarray | None = None,
 ) -> np.ndarray:
     """P(PV); `avg` (E2) is the mean of the logreg and CatBoost probabilities; `weekly` kinds need the
     weekly head's customer scores (`weekly`): `weekly` is that score, `avg_weekly` its mean with logreg."""
     kind = kind or clf["kind"]
+    if kind == "fraunhofer":
+        if fraunhofer is None:
+            raise ValueError("CNN classifier requires window probabilities and a loaded CNN artifact")
+        return fraunhofer
     if kind == "weekly":
         return weekly
     X = F[names].to_numpy(float)
@@ -245,7 +250,12 @@ def predict(model: dict, table: FeatureTable, ids: list[str]) -> tuple[pd.DataFr
     )
     clf = model["classifier"]
     weekly = customer_scores(clf["weekly"], table, ids, clim) if "weekly" in clf else None
-    prob = classifier_proba(clf, objects, F, model["feature_names"], weekly=weekly)
+    fh = None
+    if clf.get("kind") == "fraunhofer" and "fraunhofer" in objects:
+        from pvdetect.fraunhofer import fraunhofer_customer_scores
+
+        fh = fraunhofer_customer_scores(objects["fraunhofer"], table, ids)
+    prob = classifier_proba(clf, objects, F, model["feature_names"], weekly=weekly, fraunhofer=fh)
     cap = model["capacity"]
     log_kwp = capacity_log(cap, objects, F, model["capacity_feature_names"])
     if cap.get("band"):  # as scored in inner CV: band on the clipped κ=1 capacity, then κ and the clip

@@ -72,7 +72,7 @@ START_LAG_MIN_N = 3  # fewer present-at-start gaps: 0 (today) or, with `offset_t
 ALL_OPTIONS = frozenset(
     {
         "e1", "e2", "schedule", "weekly", "ctune", "offset_tri", "recur_strict", "sun", "recent", "smallpv",
-        "date_debias", "cap_ceiling", "onset_first", "tail_guard",
+        "date_debias", "cap_ceiling", "onset_first", "tail_guard", "fraunhofer",
     }
 )
 DEFAULT_OPTIONS = frozenset(
@@ -472,6 +472,16 @@ def _select(oof: pd.DataFrame, avg: bool = True) -> dict:
                 boot_weekly[kind] = bootstrap_prob_better(_proba(oof, clf_kind), thr, p_k, t_k, t_pv, err, ape_r)
                 if boot_weekly[kind] >= BOOTSTRAP_MIN:
                     clf_kind, thr = kind, t_k
+    if "p_fraunhofer" in oof.columns:
+        p_fh = _proba(oof, "fraunhofer")
+        t_fh, scores["fraunhofer"] = pick_threshold(threshold_scores(p_fh, t_pv, err, ape_r))
+        boot_weekly["fraunhofer"] = None
+        if scores["fraunhofer"] - scores[clf_kind] >= CLASSIFIER_MARGIN:
+            boot_weekly["fraunhofer"] = bootstrap_prob_better(
+                _proba(oof, clf_kind), thr, p_fh, t_fh, t_pv, err, ape_r
+            )
+            if boot_weekly["fraunhofer"] >= BOOTSTRAP_MIN:
+                clf_kind, thr = "fraunhofer", t_fh
     prob = _proba(oof, clf_kind)
     tp = t_pv & (prob >= thr)
     true_k = oof["t_kwp"].to_numpy(float)
@@ -915,6 +925,8 @@ def fit(
     base_names = feature_names(export)
     cap_names = capacity_feature_names(export)
     splits = inner_splits(labels, train_ids) if inner else []
+    if "fraunhofer" in options and not splits:
+        raise ValueError("fraunhofer requires customer-level inner CV")
     setting, unl_info = BASE_SETTING, {}
     names = base_names
     C, c_info = LOGREG_C, ({"logreg_C": LOGREG_C} if "ctune" in options else {})
@@ -1106,6 +1118,23 @@ def fit(
             embedding_projection = None
     else:
         emb_bootstrap = float("nan")
+    if "fraunhofer" in options:
+        from pvdetect.fraunhofer import inner_customer_scores
+
+        # The CNN sees the exact same customer folds as every earlier option.
+        # Its windows and their labels are constructed only from each fold's training customers.
+        cnn_oof = (emb_oof if block == "embedding" else option_oof).copy()
+        cnn_oof["p_fraunhofer"] = inner_customer_scores(table, labels, train_ids, splits)
+        cnn_sel = _select(cnn_oof, avg)
+        if cnn_sel["classifier"] == "fraunhofer":
+            cnn_sel["inner_score"] = _full_inner_score(cnn_oof, cnn_sel)
+            sel = cnn_sel
+            if labeller:
+                labeller = None
+                pseudo_info = {k: v for k, v in pseudo_info.items() if k != "pseudo_labeller"}
+                pseudo_info.update(pseudo="off", pseudo_disabled_reason="CNN trains on labelled customers only")
+        sel["inner_score_fraunhofer"] = cnn_sel["inner_score_fraunhofer"]
+        sel["bootstrap_p_fraunhofer"] = cnn_sel["bootstrap_p_fraunhofer"]
     if block == "embedding" and labeller:
         labeller = None
         pseudo_info = {k: v for k, v in pseudo_info.items() if k != "pseudo_labeller"}
@@ -1173,7 +1202,13 @@ def fit(
         sel["embedding_unavailable_reason"] = unavailable_reason
     uses_cb = sel["classifier"] in ("catboost", "avg")
     objects = {}
-    if uses_cb:
+    if sel["classifier"] == "fraunhofer":
+        from pvdetect.fraunhofer import build_window_dataset, train_fraunhofer
+
+        train_ds = build_window_dataset(table.customers, labels, train_ids)
+        fh_net = train_fraunhofer(train_ds, epochs=(40, 30, 20), batch_size=256, lr=1e-3, seed=0)
+        objects["fraunhofer"] = fh_net
+    elif uses_cb:
         objects["catboost_clf"] = comp.objects["catboost_clf"]
     if sel["capacity"] == "catboost":
         objects["catboost_cap"] = comp.objects["catboost_cap"]
@@ -1188,6 +1223,7 @@ def fit(
         "classifier": {
             "kind": sel["classifier"],
             "threshold": sel["threshold"],
+            "fraunhofer_file": "fraunhofer.pt" if sel["classifier"] == "fraunhofer" else None,
             "logreg": comp.logreg if sel["classifier"] in ("logreg", "avg", "avg_weekly") else None,
             "catboost_file": "catboost_clf.cbm" if uses_cb else None,
             **head,

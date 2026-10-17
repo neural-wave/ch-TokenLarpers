@@ -131,6 +131,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-tail-guard", action="store_true", help="drop the tail-guard detection option (≥45 valid days after τ, ≥2 post months)")
     ap.add_argument("--schedule", action="store_true", help="add the schedule-robust feature-block option")
     ap.add_argument("--sun", action="store_true", help="add the sunshine-coupling feature-block option")
+    ap.add_argument("--fraunhofer", action="store_true", help="add the Fraunhofer CNN+MLP candidate to inner CV")
     ap.add_argument(
         "--pseudo-pool",
         type=int,
@@ -159,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
         | ({"onset_first"} if args.no_onset_first else set())
         | ({"tail_guard"} if args.no_tail_guard else set())
     )
-    options = DEFAULT_OPTIONS - dropped | {o for o in ("schedule", "sun") if getattr(args, o)}
+    options = DEFAULT_OPTIONS - dropped | {o for o in ("schedule", "sun", "fraunhofer") if getattr(args, o)}
     if args.oof_out and not args.cv:
         ap.error("--oof-out requires --cv")
 
