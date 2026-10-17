@@ -41,7 +41,8 @@ def _source(path: Path, payload: dict[str,Any], labels: set[str], split: str)->E
             p=Path(value); p=(path.parent/p if not p.is_absolute() else p).resolve()
             if not p.is_file():raise FileNotFoundError(f"manifest source does not exist: {p}")
             paths.append(p)
-    return EpochSource(paths,role="unlabelled_measurements",labelled_ids=labels,manifest_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+    cache = path.parent / f"cache_{split}"
+    return EpochSource(paths,role="unlabelled_measurements",labelled_ids=labels,manifest_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),cache_dir=cache)
 
 def _canonical_ids(ids):return "\n".join(sorted(map(str,ids))).encode()
 def _json(path,value):path.write_text(json.dumps(value,sort_keys=True,indent=2,default=str)+"\n")
