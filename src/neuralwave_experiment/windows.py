@@ -2,6 +2,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+import functools
 import numpy as np
 import pandas as pd
 
@@ -22,12 +23,12 @@ class WindowBatch:
     center_dates: list[date]
     start_epochs: np.ndarray
 
+@functools.lru_cache(maxsize=16384)
 def _calendar(epoch: int) -> np.ndarray:
     t = pd.Timestamp(epoch, unit="s", tz="UTC").tz_convert("Europe/Zurich")
     tod = (t.hour * 3600 + t.minute * 60 + t.second) / 86400.0
     wd = t.weekday() / 7.0
     return np.array([np.sin(2*np.pi*tod), np.cos(2*np.pi*tod), np.sin(2*np.pi*wd), np.cos(2*np.pi*wd)], dtype=np.float32)
-
 def build_windows(measurements: pd.DataFrame, config: WindowConfig) -> WindowBatch:
     if config.context_length <= 0 or config.stride <= 0 or not (0 <= config.min_observed_fraction <= 1):
         raise ValueError("invalid WindowConfig")
@@ -52,17 +53,14 @@ def build_windows(measurements: pd.DataFrame, config: WindowConfig) -> WindowBat
         origin = int(epochs.min())
         end = int(epochs.max())
         grid = np.arange(origin, end + step, step, dtype=np.int64)
-        lookup: dict[int, float] = {}
-        for row in frame.itertuples(index=False):
-            e = int(getattr(row, "timestamp_epoch"))
-            status = str(getattr(row, "value_status"))
-            x = getattr(row, "energy_kwh")
-            try:
-                valid_value = status.lower() == "observed" and bool(np.isfinite(x))
-            except (TypeError, ValueError):
-                valid_value = False
-            if valid_value: lookup[e] = float(x)
-        present = np.array([lookup.get(int(e), np.nan) for e in grid], dtype=np.float64)
+        valid_mask = frame["value_status"].astype(str).str.lower().eq("observed").to_numpy(dtype=bool)
+        energies = pd.to_numeric(frame["energy_kwh"], errors="coerce").to_numpy(dtype=float)
+        if len(grid) == len(epochs) and (epochs == grid).all():
+            present = np.where(valid_mask, energies, np.nan)
+        else:
+            pos = (epochs - origin) // step
+            present = np.full(len(grid), np.nan, dtype=np.float64)
+            present[pos[valid_mask]] = energies[valid_mask]
         available = np.isfinite(present)
         if not available.any(): continue
         if len(grid) <= L:
