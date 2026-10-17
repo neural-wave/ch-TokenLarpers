@@ -1,6 +1,6 @@
-# AIL PV detection — implementation plan v3
+# AIL PV detection — implementation plan v3.1
 
-Supersedes v2 (`local://ail-pv-plan-v2.md`) and v1 (`local://ail-pv-milestone1-plan.md`). Repo: `/Users/jeffmartinez/orca/workspaces/ch-TokenLarpers/new-stack`, branch `Jeffremm10/new-stack` (currently only `README.md` and `.gitignore`).
+Supersedes v3, v2 (`local://ail-pv-plan-v2.md`) and v1 (`local://ail-pv-milestone1-plan.md`). Repo: `neural-wave/ch-TokenLarpers`, branch `Jeffremm10/new-stack`. P1–P2 are implemented (tags `submit-v0`, `submit-v1`); v3.1 adds phase P2.5 from review round 4.
 
 ## 0. Decisions and audit
 
@@ -54,6 +54,19 @@ The user dropped the isolation gate (encrypted image, existence check, outside-r
 |3|CNN used 3-fold inner CV vs up to 5 for the others|Correct|Every Tier A option, the CNN included, is compared on the same `inner_splits` customer folds. Windows are grouped by customer, and `fit` asserts it (Step 22)|
 |4|The benchmark workload could swallow the hackathon|Correct: 8 scenarios × 40 customers × nested CV|Mandatory pilot: one scenario at reduced size; the module projects full time and memory and refuses a full run over budget without `--force` (Step 13)|
 
+### 0.4c Review round 4 (team review of `docs/OVERVIEW.md` and the workflow proposal; applied in v3.1)
+
+|#|Point|Verdict|Resolution|
+|---|---|---|---|
+|1|The learned date offset drops errors over 60 days and caps at ±21 days, so a months-long label lag cannot be learned|Correct (`procedure.py:102,107`)|Widen to errors ≤180 days, cap ±120, keep shrinkage. No summer/winter split: 22 positives per season and regime leave a handful per cell (Step 2.5-B1)|
+|2|Inner scores are recorded but the inner-vs-outer gap is never printed|Correct|Print `inner=` and `gap=` on the `nested:` line (Step 2.5-B2)|
+|3|`OVERVIEW.md` names a "shoulder-hour deficit" feature that does not exist|Correct|Correct the doc (Step 2.5-B3)|
+|4|The benchmark report on `time-series-embeddings` publishes real customer IDs, per-customer values and a date; the repo is open-sourced after Sunday 11:00|Correct; active rule violation|Scrub it and add a commit-time hygiene check; the hand-in is an export of the final tree, not this history (Step 2.5-A)|
+|5|Six branches with separate loaders, splits and scoring make results incomparable|Correct|Not a package merge now: one shared split file, one prediction contract, one scorer (Step 2.5-C). Merge packages only after deliverables are safe (Step 2.5-F)|
+|6|Calibration on 32 training customers is noise|Agree|Dropped unless P3 shows unstable thresholds (Step 2.5-E4)|
+|7|PatchTST score as an option needs three preconditions: fix the late-install aggregation blind spot, measure per-fold training time (~120 trainings per nested run), accept torch in the submission environment|Agree|Last model item, only if P3 names F1 as the bottleneck (Step 2.5-E5)|
+|8|Every precision/recall item needs the real-data baseline (P3) first|Agree|P2.5-E items are gated on P3. P3 runs as soon as the data holder is ready; until then only P2.5-A to D proceed|
+
 ### 0.5 Gaps found before review (kept from v2)
 
 1. Night-load confounders (EV, heat pump, night-tariff boiler) reduce `log(mid/night)` the same way PV does, so selectivity features are added (Step 10).
@@ -70,18 +83,21 @@ The user dropped the isolation gate (encrypted image, existence check, outside-r
 flowchart LR
   P1[P1 Correctness + harness + baseline] --> T0((submit-v0))
   T0 --> P2[P2 Season-aware core, date regimes, LR vs CatBoost, benchmarks] --> T1((submit-v1))
-  T1 --> STOP{{STOP}} --> P3[P3 Real-data nested CV + error review: user]
+  T1 --> P25A[P2.5 A-D: hygiene, fixes, comparability contract, deliverables]
+  T1 --> P3[P3 Real-data nested CV + error review: data holder]
+  P25A & P3 --> P25E[P2.5 E: P3-gated model items]
   P3 --> P4[P4 Bottleneck fixes, then extensions] --> T2((submit-v2))
   P3 -- gates --> P5[P5 Unlabelled tooling, gated augmentation]
   P3 -- gates --> P6[P6 tsfresh then TS2Vec then CNN]
-  T2 & P5 & P6 --> P7[P7 Freeze + submission]
+  P25E & T2 & P5 & P6 --> P7[P7 Freeze + submission, Sunday 11:00]
 ```
 
 |Phase|Runs|Priority (review round 2)|Output|
 |---|---|---|---|
-|P1|Agent, synthetic|1 Ingestion, DST, scoring, tests|`submit-v0`|
-|P2|Agent, synthetic|2 Season-aware detection, 3 LR vs CatBoost, 6 benchmarks|`submit-v1`, then **STOP**|
-|P3|User, real data|4 Nested validation and error review|Bottleneck and gates, logged in `DECISIONS.md`|
+|P1|Agent, synthetic|1 Ingestion, DST, scoring, tests|`submit-v0` (done)|
+|P2|Agent, synthetic|2 Season-aware detection, 3 LR vs CatBoost, 6 benchmarks|`submit-v1` (done)|
+|P2.5|Teammate + agent; A–D need no real data, E needs P3|Review round 4|Hygiene, three fixes, shared contract, deliverables skeleton, gated model options|
+|P3|Data holder, real data|4 Nested validation and error review|Bottleneck and gates, logged in `DECISIONS.md`|
 |P4|Agent|5 Extensions, after any P3-named core fix|`submit-v2`|
 |P5|Agent, gated|Unlabelled tooling, augmentation|Inner-CV options|
 |P6|Agent, gated|7 tsfresh, 8 TS2Vec, 9 CNN|Inner-CV options|
@@ -542,7 +558,151 @@ Shorthand: `last365` = valid days within 365 days of the last valid day; summer 
 - **Gate (G):** `python -m pvdetect.benchmark --pilot`, then `python -m pvdetect.benchmark --suite holdout --log benchmarks/LOG.md` sized to the projection, run once.
 - **Finish:** clear `artifacts/`; commit; `git tag submit-v1`.
 
-**STOP. Report** changed files, tests, the dev and holdout benchmark tables, and risks. Hand off for P3.
+**STOP. Report** changed files, tests, the dev and holdout benchmark tables, and risks. Hand off for P2.5 and P3.
+
+## Phase 2.5 — Review round 4: hygiene, fixes, comparability, deliverables (teammate implements)
+
+Order and timing (deadline: everything published by **Sunday 11:00**):
+
+|When|Steps|Needs real data?|
+|---|---|---|
+|Now|A (hygiene), B (three fixes)|No|
+|As soon as the data holder is ready|P3 (unchanged, below)|Yes|
+|Today/tomorrow|C (shared split file, prediction contract, scorer)|No to build; yes to compare pipelines|
+|Saturday|D (deliverables skeleton), then E items that P3 justifies|D no; E yes|
+|Sunday morning|G (freeze, final run, publish before 11:00)|Yes|
+|Only after D is safe|F (package merge, CI)|No|
+
+Rules for P2.5: `pytest -q` stays green after every step; each step is its own commit; no step changes a Tier A margin or test threshold.
+
+### Step 2.5-A — Data hygiene (now)
+
+- **Scrub `benchmarks.md`** on `time-series-embeddings` (owner: its author). Keep aggregate metrics only. Remove:
+  - customer IDs (`POD\d+`);
+  - per-customer energy values, probabilities and dates;
+  - the per-customer "wild" tables.
+- **Hygiene check:** `scripts/check_hygiene.py`, run as a local git pre-commit hook (`scripts/install_hooks.sh` copies it to `.git/hooks/pre-commit`) and later in CI. It fails if any staged file:
+  - matches `*.csv`, `*.parquet`, `*.cbm`, `*.pt` or anything under `artifacts/`;
+  - contains the regex `\bPOD\d+\b` (real unlabelled IDs). Synthetic IDs are 6-digit numbers, and the bare word `POD` in the organizer filter rule doesn't match.
+  - Exit code 1 with the offending paths. The message never prints the matching line content.
+- **Hand-in:** the NW_26 repo receives an export of the final tree (`git archive` of the frozen commit), never this history, so scrubbed content in old commits is not published.
+- **Organizers (user):** ask whether semi-synthetic augmentation of the provided series is allowed (unblocks Step 19).
+- **Acceptance:**
+  - `tests/test_hygiene.py` stages, in a temp git repo, a file containing `POD12` → exit 1; a `.csv` file → exit 1; a clean `.py` file → exit 0.
+  - `README.md` documents `scripts/install_hooks.sh`.
+
+### Step 2.5-B — Three fixes from the review (now)
+
+**B1. Learnable label lag** (`pvdetect/procedure.py`, `fit_date_params`):
+- Add module constants:
+  - `OFFSET_ERROR_WINDOW = 180`: detected events whose error vs the label is within ±180 days contribute; was 60.
+  - `OFFSET_CAP = 120`: `offset_event = shrunk_median(errs, -OFFSET_CAP, OFFSET_CAP)`; was ±21.
+- Comment: labelled commissioning dates may lag the visible onset by months.
+- No season or regime split. A seasonal offset becomes a Tier A option only if P3 shows a seasonal date-error pattern (logged in `DECISIONS.md`).
+- **Acceptance** (`tests/test_regimes.py`, behaviour test through `fit_date_params` with a minimal stub table):
+  - 10 PV customers whose detected date is the label minus 90 days → `offset_event == 60` (= round(90·10/15)). The old rule gives 0, so this catches a regression.
+  - 2 such customers → `offset_event == 26`.
+  - Mixed errors `[0]*8 + [150]*2` → `offset_event == 0` (the median stays robust to two misdetections).
+
+**B2. Inner-vs-outer gap** (`pvdetect/procedure.py` `_select`, `train.py`):
+- `_select` adds `"inner_score"`: the inner score of the selected classifier at its chosen threshold (`s_lr` or `s_cb`). It is NaN when inner CV is skipped.
+- The `nested:` line adds `inner=<mean inner_score over all outer fits> gap=<inner − nested score mean>`. A NaN inner prints `inner=nan gap=nan`.
+- README: a gap above about 5 points means the in-fit selection is optimistic. Read it alongside selection stability.
+- **Acceptance:** the synthetic smoke `train.py --cv` prints finite `inner=` and `gap=`. No new permanent test, because it is formatting only.
+
+**B3. Doc correction** (`docs/OVERVIEW.md`):
+- Replace "a shoulder-hour deficit that maps to kWp" with "capacity from the midday pre-vs-post dip and a physics kWp estimate from the pre-install midday level and the width of the zero-reading window around solar noon".
+
+### Step 2.5-C — Comparability contract (one split file, one prediction file, one scorer)
+
+Goal: every pipeline (pvdetect, PatchTST, anything later) is scored identically on identical customer folds. No package merge.
+
+**C1. Shared split file**
+- Produced by `main`'s `python -m neuralwave_data.prepare ... --folds 5 --seed S`, which writes `splits.parquet` with columns `customer_id` (string) and `fold` (int64).
+- Seeds 0, 1, 2 give three repeat files.
+- `train.py --folds PATH[,PATH...]` reads each file (parquet via `pyarrow`; CSV with the Step 3 delimiter sniff) and uses it as one outer repeat, instead of `RepeatedStratifiedKFold`.
+- Add `pyarrow` to `requirements.in` and recompile `requirements.txt`.
+- Validation: every labelled customer has exactly one fold. Otherwise raise `ValueError(f"split file {path} does not cover labelled customers: {n} missing")`. Extra IDs are ignored.
+
+**C2. Shared out-of-fold prediction file**
+- `train.py --cv --oof-out PATH` writes one semicolon CSV over all repeats, using the `predictions.csv` formatting rules (TRUE/FALSE, `YYYY-MM-DD`, empty date and capacity when FALSE).
+- Columns: `customer_id;repeat;fold;prob;pv_installed;pv_installation_date;pv_capacity_kwp`.
+- No true labels, features or regimes in it. Those stay in the private `--report-dir` output.
+- Detection-only pipelines (current PatchTST) write empty date/capacity. They then score D = P = 0, and the comparison reports F1 separately so detection is still comparable.
+
+**C3. Scorer:** `python -m pvdetect.compare --labels LABELS OOF1 [OOF2 ...]`.
+- For each file and each repeat, compute the official `main_score` on that repeat's pooled rows.
+- Print one line per file: `file=<name> repeats=k score=M±SD f1=… D=… P=…`.
+- When two or more files share repeats and folds, also print `paired: <A> vs <B> mean_diff=… repeats_A_better=a/k`.
+- Aggregates only; never per-customer rows.
+- Any comparison used to choose a design is a Tier B decision: log it in `DECISIONS.md`.
+
+**C4. PatchTST on the shared contract** (owner: its author)
+- Rerun on the three shared split files.
+- Thresholds are tuned on training customers only (already the case).
+- Write the C2 file.
+
+**Acceptance (U tests):**
+- `--folds` with a split file missing one labelled customer raises the C1 message.
+- A C2 file written for a hand-built 4-customer case scores identically through `pvdetect.compare` and `python -m pvdetect.scoring` (repeat filtered).
+- Synthetic smoke: `train.py --cv --folds f0.csv,f1.csv --oof-out oof.csv`, then `python -m pvdetect.compare --labels labels.csv oof.csv`, prints one `file=` line with 2 repeats.
+
+### Step 2.5-D — Deliverables skeleton (Saturday; required by `guidelines.md` on `main`)
+
+- **`README.md`:** add every member's full name and role.
+- **`report/REPORT.md`:** an outline of at most 3 pages, with sections Title, Approach, Results, Challenges (including what didn't work), and AI agents/LLM usage. Results is filled from P3/P7 aggregate numbers only.
+- **`report/VIDEO_SCRIPT.md`:** a 2-minute script covering goal and relevance, the method in one diagram, key results, and a demo of `python inference.py test.csv`.
+- **Clean-environment install test**, documented in the README:
+  ```
+  uv venv /tmp/cleanroom --python 3.12
+  uv pip install --python /tmp/cleanroom/bin/python -r requirements.txt
+  ```
+  Then run the synthetic smoke inference from a temporary directory. It must succeed with plain `pip install -r requirements.txt`.
+- **Export procedure:** `git archive <frozen commit> | tar -x -C <NW_26 repo checkout>`, then commit there.
+
+### Step 2.5-E — Model items (only those P3 justifies; all are Tier A options inside `Procedure.fit`)
+
+Every item is added to the inner option pool. Inner CV chooses per fit with the Step 11 margin rule; outer scores never adopt it. Order:
+
+**E1. Persistence feature `summer_suppressed_week_frac`** (`features.py`, fitted part, because it uses `ds`):
+- Count the summer ISO weeks in `last365` with ≥4 valid days.
+- The feature is the fraction of those weeks whose weekly median `ds` is ≤ (median `ds` over winter days in `last365`) − 0.5.
+- NaN if there are fewer than 8 such weeks or fewer than 30 winter days.
+- Targets vacations and short shutdowns, which suppress only a few weeks.
+- R test: a customer with a 3-week `vacation` and no PV scores < 0.2; a summer-installed PV customer scores > 0.8.
+
+**E2. Probability averaging:** a third classifier option `avg` = mean of the logreg and CatBoost inner OOF probabilities.
+- Selected only if it beats the current best by ≥2.0 inner points with bootstrap ≥0.8.
+- The final model stores both sub-models. `model.json` `classifier.kind = "avg"`.
+
+**E3. Repeated inner CV:** `inner_splits` returns 3 repeats × `min(5, min_class)` folds (shuffle seeds 0, 1, 2).
+- Inner OOF predictions are averaged per customer across repeats before selection.
+- The cost is about 3× fit time: rerun `python -m pvdetect.benchmark --pilot`, and if the projection exceeds the budget use 2 repeats.
+- The label-flip leakage test must still pass unchanged.
+
+**E4. Probability calibration:** not implemented. Revisit only if the P3 `selection:` line shows a threshold range wider than 0.3 across outer fits (logged).
+
+**E5. PatchTST customer score as a feature option.** Last, and only if P3 names F1 as the bottleneck. Preconditions, each verified and recorded before integration:
+1. **Fix the late-install blind spot.** The P90 over all April–September windows dilutes installs with few post-install summer weeks. Use the P90 over windows in the customer's last 365 days of summer coverage, and add an R test with an install 10 weeks before the series end.
+2. **Timing.** Per-fold training time × (outer folds × repeats × (inner folds + 1)) must fit the benchmark budget (about 120 trainings per nested run at 5×4 outer, 5 inner). Measure with the pilot first.
+3. **Dependencies.** `torch` (CPU wheel) is accepted in `requirements.in`, and the inference runtime limit (P7, < 120 s for 20 customers) still holds.
+- The network trains inside each fit on that fit's training customers only (window labels per Step 22), on the common inner folds.
+
+### Step 2.5-F — Package merge and CI (only after Step 2.5-D is safe)
+
+- **One `pyproject.toml` with a `src/` layout.** `pvdetect` moves next to `neuralwave_data`.
+- **One loader,** following `main`'s stricter rules:
+  - explicit delimiter/decimal config;
+  - conflicting duplicate rows raise an error;
+  - the organizer `POD`-prefix filter, for unlabelled sources only.
+- **CI:** a GitHub Actions workflow running `pytest -q`, `ruff check` and `scripts/check_hygiene.py` on every PR. Merges go through reviewed PRs.
+- **Acceptance:** all existing tests pass after the move, and inference output is byte-identical on the synthetic smoke set before and after.
+
+### Step 2.5-G — Freeze (Sunday morning)
+
+- Final real-data `train.py --cv` on all 40, then P7 checks 3–7.
+- Fill the report Results section from aggregate lines.
+- Export to the NW_26 repo and publish before **11:00**.
 
 ## Phase 3 — Real-data evaluation (user)
 

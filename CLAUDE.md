@@ -38,11 +38,11 @@ Never run the holdout suite outside a phase gate.
 
 ## What exists
 
-Built from scratch per `IMPLEMENTATION_HANDOFF.md`; nothing is competition-validated.
+P1–P2 are implemented per `IMPLEMENTATION_HANDOFF.md` (tags `submit-v0`, `submit-v1`); nothing is competition-validated.
 
 ## Your immediate task
 
-Execute P1–P2, run the P2 gate benchmark, then STOP and report changed files, tests, benchmark results and risks.
+Execute Phase 2.5 of `IMPLEMENTATION_HANDOFF.md` in its stated order: Steps A–D now; Step E items only after P3 findings name them; Step F only after D is safe. Commit each step separately, keep `pytest -q` green, then STOP and report changed files, tests and risks.
 
 ## Exact submission contract
 
