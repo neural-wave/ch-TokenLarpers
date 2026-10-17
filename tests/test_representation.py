@@ -138,3 +138,31 @@ def test_hidden_targets_cannot_change_visible_pretraining_inputs(flat_visible):
     train_and_capture(altered)
     assert torch.equal(captured[0][1], captured[1][1])
     assert torch.allclose(captured[0][0], captured[1][0], atol=1e-4)
+
+
+@pytest.mark.parametrize("start", ["2024-03-30", "2024-10-26"])
+@pytest.mark.parametrize("length", [12, 300])
+def test_window_calendar_matches_local_time_through_dst_and_padding(start, length):
+    from neuralwave_experiment.windows import WindowConfig, build_windows
+
+    times = pd.date_range(start, periods=length, freq="15min", tz="UTC")
+    frame = pd.DataFrame({
+        "customer_id": "calendar-fixture",
+        "timestamp_epoch": times.as_unit("s").asi8,
+        "energy_kwh": np.arange(length, dtype=float) + 1,
+        "value_status": "observed",
+    })
+    batch = build_windows(frame, WindowConfig(
+        context_length=192, stride=96, min_observed_fraction=0.05,
+    ))
+    for start_epoch, actual in zip(batch.start_epochs, batch.calendar):
+        expected = []
+        for i in range(192):
+            local = pd.Timestamp(int(start_epoch) + i * 900, unit="s", tz="UTC").tz_convert("Europe/Zurich")
+            tod = (local.hour * 3600 + local.minute * 60) / 86400
+            weekday = local.weekday() / 7
+            expected.append([
+                np.sin(2*np.pi*tod), np.cos(2*np.pi*tod),
+                np.sin(2*np.pi*weekday), np.cos(2*np.pi*weekday),
+            ])
+        np.testing.assert_array_equal(actual, np.asarray(expected, dtype=np.float32))

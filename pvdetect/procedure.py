@@ -334,9 +334,9 @@ def _full_inner_score(oof: pd.DataFrame, sel: dict) -> float:
 def _score_precomputed(pred: pd.DataFrame, truth: pd.DataFrame):
     t_pv = truth["pv_installed"].to_numpy(bool)
     p_pv = pred["pv_installed"].to_numpy(bool)
-    t_dates = pd.to_datetime(truth["pv_installation_date"]).to_numpy("datetime64[D]").astype(float)
-    p_dates = pd.to_datetime(pred["pv_installation_date"]).to_numpy("datetime64[D]").astype(float)
-    days = np.abs(p_dates - t_dates)
+    t_dates = pd.to_datetime(truth["pv_installation_date"]).reset_index(drop=True)
+    p_dates = pd.to_datetime(pred["pv_installation_date"]).reset_index(drop=True)
+    days = np.abs((p_dates - t_dates).dt.days.to_numpy(float))
     d_i = np.where(np.isfinite(days), np.maximum(0.0, 1.0 - days / 30.0), 0.0)
 
     t_cap = truth["pv_capacity_kwp"].to_numpy(float)

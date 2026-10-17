@@ -127,3 +127,24 @@ def test_catboost_roundtrip_identical(tmp_path):
     save_model(model, tmp_path / "model.json")
     loaded = load_model(tmp_path / "model.json")
     np.testing.assert_array_equal(a.predict_proba(X), loaded["_objects"]["catboost_clf"].predict_proba(X))
+
+
+def test_fast_bootstrap_score_matches_official_missing_dates_and_duplicates():
+    from pvdetect.procedure import _score_precomputed, _score_from_arrays
+    from pvdetect.scoring import main_score
+
+    truth = pd.DataFrame({
+        "customer_id": ["a", "b", "c", "d"],
+        "pv_installed": [True, True, False, True],
+        "pv_installation_date": pd.to_datetime([None, "2023-01-01", None, "2023-04-01"]),
+        "pv_capacity_kwp": [5.0, 8.0, np.nan, 4.0],
+    })
+    pred = truth.copy()
+    pred["pv_installed"] = [True, True, True, False]
+    pred["pv_installation_date"] = pd.to_datetime([None, "2023-01-16", None, None])
+    pred["pv_capacity_kwp"] = [5.0, 6.0, 3.0, np.nan]
+    arrays = _score_precomputed(pred, truth)
+    for idx in (np.arange(4), np.array([0, 0, 1, 2]), np.array([2, 3, 2, 3])):
+        assert _score_from_arrays(*arrays, idx) == pytest.approx(
+            main_score(pred.iloc[idx], truth.iloc[idx])["score"]
+        )

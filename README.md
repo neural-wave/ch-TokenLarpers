@@ -112,6 +112,35 @@ The frozen encoder produces label-free customer summaries. Imputation, scaling a
 
 Before any scale increase, compare the same transformer trained from scratch and with masked pretraining, with matched windows, targets, aggregation, splits and tuning budgets. Evaluate calendar-time persistence/coverage, pre-installation alarms, onset error, late installations and non-PV alarms separately. Fresh blind customers are required for a final independent claim when available; more development seeds cannot replace them.
 
+#### Resumable labelled-sample learning curve
+
+Run privately as the data holder, with the same three outer split files for every arm:
+
+```bash
+PYTHONPATH=.:src OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -u scripts/run_learning_curve.py \
+  --timeseries <private>/energy.csv --labels <private>/labels.csv \
+  --splits <private>/split0.parquet,<private>/split1.parquet,<private>/split2.parquet \
+  --small-encoder <private>/small/encoder --medium-encoder <private>/medium/encoder \
+  --subsets 8,16,32 --out <private>/learning_curve_results.json
+```
+
+The CLI prints preprocessing stages and each fold's start/completion. It preserves
+the encoder's saved window configuration, including an uncapped window count.
+Calendar features are computed once per customer timeline and sliced into windows;
+raw frozen embeddings are reused across folds, while fitted projections stay fold-local.
+Missing commissioning dates receive zero date reward in fast bootstrap scoring,
+matching the official scorer.
+
+Every finished fold is saved atomically in `<out>.progress.json`; that file contains
+private predictions and must remain private. Aggregate results are saved after each
+completed arm. After interruption, repeat the identical command with `--resume`.
+Resume checks input/encoder hashes, source code, settings and runtime versions, and
+refuses mismatches. An already-completed run returns its saved results. Previous
+versions saved only at the end, so a timed-out old run cannot be resumed unless it
+actually produced a progress file. The CLI uses one Torch CPU thread by default
+(`--torch-threads` overrides it); no deadline is imposed by the script.
+
+
 ### Review plots (dev requirement: matplotlib)
 
 ```

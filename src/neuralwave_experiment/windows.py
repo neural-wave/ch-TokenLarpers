@@ -1,9 +1,7 @@
 """Regular, leakage-safe customer windows."""
 from __future__ import annotations
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
-from zoneinfo import ZoneInfo
-import functools
+from datetime import date
 import numpy as np
 import pandas as pd
 
@@ -24,14 +22,14 @@ class WindowBatch:
     center_dates: list[date]
     start_epochs: np.ndarray
 
-_ZURICH_TZ = ZoneInfo("Europe/Zurich")
-
-@functools.lru_cache(maxsize=131072)
-def _calendar(epoch: int) -> np.ndarray:
-    dt = datetime.fromtimestamp(epoch, tz=_ZURICH_TZ)
-    tod = (dt.hour * 3600 + dt.minute * 60 + dt.second) / 86400.0
-    wd = dt.weekday() / 7.0
-    return np.array([np.sin(2*np.pi*tod), np.cos(2*np.pi*tod), np.sin(2*np.pi*wd), np.cos(2*np.pi*wd)], dtype=np.float32)
+def _calendar(epochs: np.ndarray) -> np.ndarray:
+    local = pd.to_datetime(epochs, unit="s", utc=True).tz_convert("Europe/Zurich")
+    tod = (local.hour * 3600 + local.minute * 60 + local.second).to_numpy() / 86400.0
+    wd = local.dayofweek.to_numpy() / 7.0
+    return np.column_stack((
+        np.sin(2*np.pi*tod), np.cos(2*np.pi*tod),
+        np.sin(2*np.pi*wd), np.cos(2*np.pi*wd),
+    )).astype(np.float32)
 def build_windows(measurements: pd.DataFrame, config: WindowConfig) -> WindowBatch:
     if config.context_length <= 0 or config.stride <= 0 or not (0 <= config.min_observed_fraction <= 1):
         raise ValueError("invalid WindowConfig")
@@ -77,6 +75,9 @@ def build_windows(measurements: pd.DataFrame, config: WindowConfig) -> WindowBat
             limit = config.max_windows_per_customer
             chosen = np.linspace(0, len(starts_local) - 1, limit, dtype=np.int64)
             starts_local = [starts_local[int(i)] for i in np.unique(chosen)]
+        calendar_origin = starts_local[0]
+        calendar_end = starts_local[-1] + L * step
+        calendar = _calendar(np.arange(calendar_origin, calendar_end, step, dtype=np.int64))
         for start in starts_local:
             idx0 = int(round((start - origin) / step)); idx1 = idx0 + L
             x = np.zeros(L, dtype=np.float32); m = np.zeros(L, dtype=bool)
@@ -93,7 +94,8 @@ def build_windows(measurements: pd.DataFrame, config: WindowConfig) -> WindowBat
             mean = float(np.mean(observed_values)); std = float(np.std(observed_values))
             xn = np.zeros(L, dtype=np.float32); xn[m] = ((observed_values-center)/scale).astype(np.float32)
             ep = start + (L//2)*step
-            vals.append(xn[:,None]); masks.append(m[:,None]); cals.append(np.stack([_calendar(start+i*step) for i in range(L)]))
+            cal_start = (start - calendar_origin) // step
+            vals.append(xn[:,None]); masks.append(m[:,None]); cals.append(calendar[cal_start:cal_start+L])
             mags.append([center, scale, mean, std]); ids.append(str(customer)); dates.append(pd.Timestamp(ep, unit="s", tz="UTC").tz_convert("Europe/Zurich").date()); starts.append(start)
     if not vals:
         return WindowBatch(np.empty((0,L,1),np.float32), np.empty((0,L,1),bool), np.empty((0,L,4),np.float32), np.empty((0,4),np.float32), [], [], np.empty(0,np.int64))
