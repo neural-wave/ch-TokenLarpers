@@ -43,7 +43,7 @@ P1–P2 are implemented per `IMPLEMENTATION_HANDOFF.md` (tags `submit-v0`, `subm
 
 ## Your immediate task
 
-Execute Phase 2.5 of `IMPLEMENTATION_HANDOFF.md` in its stated order: Steps A–D now; Step E items only after P3 findings name them; Step F only after D is safe. Commit each step separately, keep `pytest -q` green, then STOP and report changed files, tests and risks.
+Execute Phase 2.5 of `IMPLEMENTATION_HANDOFF.md` (v3.2) in its execution order: A2, B, D, X first (no real data needed), then C; E only for the component the real-data results name; F only if time remains after G is safe. Never place a real-data model under this repository; real models reach the NW_26 repo only via `scripts/export_submission.sh`. Commit each step separately, keep `pytest -q` and `python scripts/check_hygiene.py --all` green, then STOP and report changed files, tests and risks.
 
 ## Exact submission contract
 

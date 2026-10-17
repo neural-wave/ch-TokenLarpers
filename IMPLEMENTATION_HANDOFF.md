@@ -1,6 +1,6 @@
-# AIL PV detection — implementation plan v3.1
+# AIL PV detection — implementation plan v3.2
 
-Supersedes v3, v2 (`local://ail-pv-plan-v2.md`) and v1 (`local://ail-pv-milestone1-plan.md`). Repo: `neural-wave/ch-TokenLarpers`, branch `Jeffremm10/new-stack`. P1–P2 are implemented (tags `submit-v0`, `submit-v1`); v3.1 adds phase P2.5 from review round 4.
+Supersedes v3.1, v3, v2 (`local://ail-pv-plan-v2.md`) and v1 (`local://ail-pv-milestone1-plan.md`). Repo: `neural-wave/ch-TokenLarpers`, branch `Jeffremm10/new-stack`. P1–P2 are implemented (tags `submit-v0`, `submit-v1`); Step 2.5-A is implemented (`51f6fb6`). v3.2 rewrites Phase 2.5 as the agreed pre-submission plan (review round 5).
 
 ## 0. Decisions and audit
 
@@ -67,6 +67,20 @@ The user dropped the isolation gate (encrypted image, existence check, outside-r
 |7|PatchTST score as an option needs three preconditions: fix the late-install aggregation blind spot, measure per-fold training time (~120 trainings per nested run), accept torch in the submission environment|Agree|Last model item, only if P3 names F1 as the bottleneck (Step 2.5-E5)|
 |8|Every precision/recall item needs the real-data baseline (P3) first|Agree|P2.5-E items are gated on P3. P3 runs as soon as the data holder is ready; until then only P2.5-A to D proceed|
 
+### 0.4d Review round 5 (team execution plan and its review; applied in v3.2)
+
+|#|Point|Verdict|Resolution|
+|---|---|---|---|
+|1|The hook blocks `artifacts/model.json` and every `.cbm`; `git add -f` does not bypass a pre-commit hook, so the old P7 packaging step could not work|Correct (verified against `is_data_path`)|The real model never enters this repo's history. It reaches the NW_26 repo only through `scripts/export_submission.sh`, with an exact-file allow list, or through an organizer-approved private channel (Steps 2.5-X, 2.5-G)|
+|2|pvdetect cannot use the shared split files until `--folds` exists|Correct|P3-baseline (existing CV) runs now; P3-matched runs after Step 2.5-C|
+|3|"No hook in NW_26" does not mean raw data stays blocked there|Correct|`scripts/check_release.py` audits every file of the export; allowed model files are still scanned for identifiers|
+|4|"No customer IDs in `model.json`" is necessary, not proof of safety: aggregates over 40 customers and CatBoost trees can encode individual values|Correct (`fallback_kwp` is a median of real capacities)|Organizer approval to publish, plus human review of the exact files before release (Steps 2.5-H, 2.5-G)|
+|5|Paired comparison must check each `(repeat, customer_id) → fold`, not repeat numbers; reuse one scorer|Correct|C3 fix in `oof_contract.paired_line`; pvdetect writes the shared file and scores with the existing CLI; no `pvdetect.compare`|
+|6|Extension false alarms lower the bonus|Correct (v3.1 said "no downside")|Optional after the core works; the bonus never goes below 0|
+|7|Old commits with real identifiers stay in `ch-TokenLarpers` after a clean export|Correct|Repo stays private until the team decides; decision recorded (Step 2.5-A2)|
+|8|The inner–outer gap is a warning signal, not a measure|Agree|README wording in B2|
+|9|Organizer approval gates the export, so ask early and plan a fallback|Added in review|Step 2.5-H today, with a private-channel fallback; export rehearsed on synthetic data now (Step 2.5-X)|
+
 ### 0.5 Gaps found before review (kept from v2)
 
 1. Night-load confounders (EV, heat pump, night-tariff boiler) reduce `log(mid/night)` the same way PV does, so selectivity features are added (Step 10).
@@ -96,7 +110,7 @@ flowchart LR
 |---|---|---|---|
 |P1|Agent, synthetic|1 Ingestion, DST, scoring, tests|`submit-v0` (done)|
 |P2|Agent, synthetic|2 Season-aware detection, 3 LR vs CatBoost, 6 benchmarks|`submit-v1` (done)|
-|P2.5|Teammate + agent; A–D need no real data, E needs P3|Review round 4|Hygiene, three fixes, shared contract, deliverables skeleton, gated model options|
+|P2.5|Teammates + agents; A2, B, C-build, D, H, X need no real data; E and G need it|Review rounds 4–5|Hygiene follow-ups, three fixes, shared-fold contract, deliverable drafts, organizer email, export rehearsal, targeted improvement, release|
 |P3|Data holder, real data|4 Nested validation and error review|Bottleneck and gates, logged in `DECISIONS.md`|
 |P4|Agent|5 Extensions, after any P3-named core fix|`submit-v2`|
 |P5|Agent, gated|Unlabelled tooling, augmentation|Inner-CV options|
@@ -560,149 +574,247 @@ Shorthand: `last365` = valid days within 365 days of the last valid day; summer 
 
 **STOP. Report** changed files, tests, the dev and holdout benchmark tables, and risks. Hand off for P2.5 and P3.
 
-## Phase 2.5 — Review round 4: hygiene, fixes, comparability, deliverables (teammate implements)
+## Phase 2.5 — Pre-submission plan (review rounds 4–5; teammates implement)
 
-Order and timing (deadline: everything published by **Sunday 11:00**):
+Deadline: everything published by **Sunday 11:00**. Rules for every step:
+- `pytest -q` stays green after every step; each step is its own commit;
+- `python scripts/check_hygiene.py --all` passes before every commit;
+- no step changes a Tier A margin or test threshold;
+- every choice informed by real-data validation results gets a `DECISIONS.md` line.
 
-|When|Steps|Needs real data?|
-|---|---|---|
-|Now|A (hygiene), B (three fixes)|No|
-|As soon as the data holder is ready|P3 (unchanged, below)|Yes|
-|Today/tomorrow|C (shared split file, prediction contract, scorer)|No to build; yes to compare pipelines|
-|Saturday|D (deliverables skeleton), then E items that P3 justifies|D no; E yes|
-|Sunday morning|G (freeze, final run, publish before 11:00)|Yes|
-|Only after D is safe|F (package merge, CI)|No|
+### Execution order
 
-Rules for P2.5: `pytest -q` stays green after every step; each step is its own commit; no step changes a Tier A margin or test threshold.
+|#|When|Work|Needs real data?|Owner|
+|---|---|---|---|---|
+|1|Today, first|A2 hygiene follow-ups, B fixes, D deliverable drafts, H organizer email, X export rehearsal on synthetic data|No|Agents/teammates; H by the user|
+|2|In parallel, when the data holder is ready|**P3-baseline:** the existing pvdetect nested CV on the real 40 (its own splits), private, aggregates only|Yes|Data holder|
+|3|After 1|C shared-fold contract on pvdetect, then **P3-matched:** both pipelines on the same three split files|Build no; run yes|Agent builds; data holder runs|
+|4|After 2–3|E: only the improvement the real results point to|Build no; evaluate yes|Agent builds; data holder evaluates|
+|5|Sunday morning|G: approved model export → release audit → clean offline inference → submit|Yes|Data holder + user|
+|—|Only if time remains after 5 is safe|F package merge and CI|No|Any|
 
-### Step 2.5-A — Data hygiene (now)
+**If time collapses**, do these in order and drop the rest:
+1. P3-baseline;
+2. B fixes;
+3. working packaged inference (X then G);
+4. report and video;
+5. shared-fold comparison (C);
+6. optional model experiments (E, extensions, F).
 
-- **Scrub `benchmarks.md`** on `time-series-embeddings` (owner: its author). Keep aggregate metrics only. Remove:
-  - customer IDs (`POD\d+`);
-  - per-customer energy values, probabilities and dates;
-  - the per-customer "wild" tables.
-- **Hygiene check:** `scripts/check_hygiene.py`, run as a local git pre-commit hook (`scripts/install_hooks.sh` copies it to `.git/hooks/pre-commit`) and later in CI. It fails if any staged file:
-  - matches `*.csv`, `*.parquet`, `*.cbm`, `*.pt` or anything under `artifacts/`;
-  - contains the regex `\bPOD\d+\b` (real unlabelled IDs). Synthetic IDs are 6-digit numbers, and the bare word `POD` in the organizer filter rule doesn't match.
-  - Exit code 1 with the offending paths. The message never prints the matching line content.
-- **Hand-in:** the NW_26 repo receives an export of the final tree (`git archive` of the frozen commit), never this history, so scrubbed content in old commits is not published.
-- **Organizers (user):** ask whether semi-synthetic augmentation of the provided series is allowed (unblocks Step 19).
-- **Acceptance:**
-  - `tests/test_hygiene.py` stages, in a temp git repo, a file containing an identifier of the real form (`POD` followed by digits, assembled at runtime so the test file passes the check itself) → exit 1; a `.csv` file → exit 1; a clean `.py` file → exit 0.
-  - `README.md` documents `scripts/install_hooks.sh`.
+A valid, reliable submission beats an unfinished model.
 
-### Step 2.5-B — Three fixes from the review (now)
+### Step 2.5-A — Data hygiene (done: `51f6fb6` on this branch, `2bba1c3` on `time-series-embeddings`)
+
+Delivered:
+- `scripts/check_hygiene.py`, `scripts/install_hooks.sh` and `tests/test_hygiene.py`;
+- `benchmarks.md` scrubbed to aggregates at the branch tip;
+- README section on the hook and the `git archive` hand-in.
+
+### Step 2.5-A2 — Hygiene follow-ups (today, first)
+
+1. **Every clone:** run `sh scripts/install_hooks.sh`; `python scripts/check_hygiene.py --all` must exit 0.
+2. **Tighten the identifier pattern** in `scripts/check_hygiene.py` (and the byte-identical copy on `time-series-embeddings`) to `re.compile(rb"(?i)\bPOD\d+")`.
+   - Drop the trailing `\b`: an identifier followed by `_` or letters currently slips through.
+   - Add `(?i)` so lowercase identifiers are caught.
+   - `PODSYN001` still passes, because a letter, not a digit, follows `POD`.
+   - Re-run `install_hooks.sh` afterwards: the hook is a copy.
+   - **Acceptance** (`tests/test_hygiene.py`; identifiers assembled at runtime as in the existing tests): an identifier immediately followed by `_x` → exit 1; a lowercase identifier → exit 1; `PODSYN001` → exit 0.
+3. **Log the PatchTST aggregation change.** Append to `DECISIONS.md`: `- 2026-10-17 | PatchTST customer aggregation changed to rolling 4-window median (commit 0e5b0ce) | pooled out-of-fold recall on the 40 consulted`.
+   - `DECISIONS.md` on this branch is the team log, so pvdetect estimates also print `selection-biased`. That is conservative and intended: the team procedure now includes choosing between pipelines.
+4. **Old history.** Commits `e303f6d`, `1f875b6`, `a65b552` and `086eda8` on `time-series-embeddings` contain real identifiers.
+   - Until the team decides (delete the branch after its content is carried over, or a coordinated `git filter-repo` rewrite), `ch-TokenLarpers` stays **private**. A repo admin confirms the visibility setting today.
+   - The NW_26 hand-in is always a clean export (Step 2.5-G), which does not carry this history.
+   - Record the decision in the README hygiene section.
+
+### Step 2.5-B — Three fixes from the review (today)
 
 **B1. Learnable label lag** (`pvdetect/procedure.py`, `fit_date_params`):
 - Add module constants:
-  - `OFFSET_ERROR_WINDOW = 180`: detected events whose error vs the label is within ±180 days contribute; was 60.
+  - `OFFSET_ERROR_WINDOW = 180`: detected events whose error vs the label is within ±180 days contribute; was 60 (line 102).
   - `OFFSET_CAP = 120`: `offset_event = shrunk_median(errs, -OFFSET_CAP, OFFSET_CAP)`; was ±21.
 - Comment: labelled commissioning dates may lag the visible onset by months.
-- No season or regime split. A seasonal offset becomes a Tier A option only if P3 shows a seasonal date-error pattern (logged in `DECISIONS.md`).
+- No season or regime split. A seasonal offset becomes a Tier A option only if the real results show a seasonal date-error pattern (logged).
 - **Acceptance** (`tests/test_regimes.py`, behaviour test through `fit_date_params` with a minimal stub table):
-  - 10 PV customers whose detected date is the label minus 90 days → `offset_event == 60` (= round(90·10/15)). The old rule gives 0, so this catches a regression.
+  - 10 PV customers whose detected date is the label minus 90 days → `offset_event == 60` (= round(90·10/15)). The old rule gives 0.
   - 2 such customers → `offset_event == 26`.
-  - Mixed errors `[0]*8 + [150]*2` → `offset_event == 0` (the median stays robust to two misdetections).
+  - Errors `[0]*8 + [150]*2` → `offset_event == 0`.
 
-**B2. Inner-vs-outer gap** (`pvdetect/procedure.py` `_select`, `train.py`):
-- `_select` adds `"inner_score"`: the inner score of the selected classifier at its chosen threshold (`s_lr` or `s_cb`). It is NaN when inner CV is skipped.
-- The `nested:` line adds `inner=<mean inner_score over all outer fits> gap=<inner − nested score mean>`. A NaN inner prints `inner=nan gap=nan`.
-- README: a gap above about 5 points means the in-fit selection is optimistic. Read it alongside selection stability.
-- **Acceptance:** the synthetic smoke `train.py --cv` prints finite `inner=` and `gap=`. No new permanent test, because it is formatting only.
+**B2. Inner-vs-outer gap** (`pvdetect/procedure.py` `_select`, `train.py` line 86):
+- `_select` adds `"inner_score"`: the inner score of the selected classifier at its chosen threshold (`s_lr` or `s_cb`); NaN when inner CV is skipped.
+- The `nested:` line adds `inner=<mean inner_score over outer fits> gap=<inner − nested score mean>`. NaN prints `inner=nan gap=nan`.
+- README wording: the gap is a **warning signal**, not a measure of overfitting. Inner and outer scores come from different customer sets and training sizes. A gap above about 5 points calls for a look at selection stability; it proves nothing alone.
+- **Acceptance:** the synthetic smoke `train.py --cv` prints finite `inner=` and `gap=`. No permanent test (formatting only).
 
-**B3. Doc correction** (`docs/OVERVIEW.md`):
+**B3. Doc correction** (`docs/OVERVIEW.md` line 18):
 - Replace "a shoulder-hour deficit that maps to kWp" with "capacity from the midday pre-vs-post dip and a physics kWp estimate from the pre-install midday level and the width of the zero-reading window around solar noon".
 
-### Step 2.5-C — Comparability contract (one split file, one prediction file, one scorer)
+### Step 2.5-C — Shared-fold contract on pvdetect (after A2/B; one scorer)
 
-Goal: every pipeline (pvdetect, PatchTST, anything later) is scored identically on identical customer folds. No package merge.
+The other branch already has the contract (`neuralwave_experiment/oof_contract.py`, commit `5199b6d`): split-file loading, the shared out-of-fold file, a scorer and a CLI. pvdetect only has to **produce** that file. **No second scorer is written.**
+- **Canonical comparison scorer:** `python -m neuralwave_experiment.oof_contract`.
+- `pvdetect.scoring` stays as pvdetect's internal scorer for inner selection and submission checks.
+- The two were cross-checked on 300 random prediction sets through the shared file, with a maximum score difference of 1.4e-14. Step F merges them into one module.
 
-**C1. Shared split file**
-- Produced by `main`'s `python -m neuralwave_data.prepare ... --folds 5 --seed S`, which writes `splits.parquet` with columns `customer_id` (string) and `fold` (int64).
-- Seeds 0, 1, 2 give three repeat files.
-- `train.py --folds PATH[,PATH...]` reads each file (parquet via `pyarrow`; CSV with the Step 3 delimiter sniff) and uses it as one outer repeat, instead of `RepeatedStratifiedKFold`.
-- Add `pyarrow` to `requirements.in` and recompile `requirements.txt`.
-- Validation: every labelled customer has exactly one fold. Otherwise raise `ValueError(f"split file {path} does not cover labelled customers: {n} missing")`. Extra IDs are ignored.
+**C1. `train.py --folds PATH[,PATH...]`**
+- Each file (`splits.parquet` from `python -m neuralwave_data.prepare ... --folds 5 --seed S`, or a CSV with `customer_id,fold`) is one outer repeat, in the given order, replacing `RepeatedStratifiedKFold`.
+- Same validation semantics as `oof_contract.load_split_file`:
+  - every labelled customer exactly once;
+  - integer folds;
+  - extra IDs ignored.
+- Error messages carry counts only, e.g. `ValueError(f"split file {path} does not cover labelled customers: {n} missing")`.
+- Add `pyarrow` to `requirements.in` and recompile `requirements.txt` (only if parquet input is used; CSV split files need nothing new).
+- `--folds` requires `--cv`. Without `--folds`, the current `RepeatedStratifiedKFold` behaviour is unchanged.
 
-**C2. Shared out-of-fold prediction file**
-- `train.py --cv --oof-out PATH` writes one semicolon CSV over all repeats, using the `predictions.csv` formatting rules (TRUE/FALSE, `YYYY-MM-DD`, empty date and capacity when FALSE).
-- Columns: `customer_id;repeat;fold;prob;pv_installed;pv_installation_date;pv_capacity_kwp`.
-- No true labels, features or regimes in it. Those stay in the private `--report-dir` output.
-- Detection-only pipelines (current PatchTST) write empty date/capacity. They then score D = P = 0, and the comparison reports F1 separately so detection is still comparable.
+**C2. `train.py --cv --oof-out PATH`**
+- Writes exactly `oof_contract.OOF_COLUMNS`: `customer_id;repeat;fold;prob;pv_installed;pv_installation_date;pv_capacity_kwp`.
+- Formatting: semicolons, `TRUE`/`FALSE`, `YYYY-MM-DD`, capacity `.2f`, prob `.6f`, empty date and capacity when FALSE.
+- `repeat` = position of the split file in `--folds` (or the internal repeat index); `fold` = the file's fold value.
+- No labels, features or regimes. Those stay in the private `--report-dir` output.
 
-**C3. Scorer:** `python -m pvdetect.compare --labels LABELS OOF1 [OOF2 ...]`.
-- For each file and each repeat, compute the official `main_score` on that repeat's pooled rows.
-- Print one line per file: `file=<name> repeats=k score=M±SD f1=… D=… P=…`.
-- When two or more files share repeats and folds, also print `paired: <A> vs <B> mean_diff=… repeats_A_better=a/k`.
-- Aggregates only; never per-customer rows.
-- Any comparison used to choose a design is a Tier B decision: log it in `DECISIONS.md`.
+**C3. Paired comparison checks fold assignments** (owner: the `oof_contract` author)
+- `paired_line` compares two files only if, for every shared repeat, the `customer_id → fold` mapping is identical.
+- Otherwise it prints `paired: <A> vs <B> skipped: fold assignments differ in repeat <r>`, with no identifiers.
+- Matching repeat numbers alone is not enough.
 
-**C4. PatchTST on the shared contract** (owner: its author)
-- Rerun on the three shared split files.
-- Thresholds are tuned on training customers only (already the case).
-- Write the C2 file.
+**C4. P3-matched run (data holder, private)**
+```
+python -m neuralwave_data.prepare <manifest> --out <private>/prep_s{0,1,2} --folds 5 --seed {0,1,2}
+python train.py --timeseries <dev energy> --labels <dev labels> --out <private>/pvdetect/model.json --cv \
+  --folds <private>/prep_s0/splits.parquet,<private>/prep_s1/splits.parquet,<private>/prep_s2/splits.parquet \
+  --oof-out <private>/pvdetect_oof.csv
+python -m neuralwave_experiment.task1_detector ... --splits <same three files> --oof-out <private>/patchtst_oof.csv
+python -m neuralwave_experiment.oof_contract --labels <dev labels> <private>/pvdetect_oof.csv <private>/patchtst_oof.csv
+```
+- Only the printed aggregate lines leave the private directory.
+- PatchTST writes empty date/capacity (D = P = 0), so compare F1 separately from the full score.
+- Log the comparison in `DECISIONS.md`.
 
-**Acceptance (U tests):**
-- `--folds` with a split file missing one labelled customer raises the C1 message.
-- A C2 file written for a hand-built 4-customer case scores identically through `pvdetect.compare` and `python -m pvdetect.scoring` (repeat filtered).
-- Synthetic smoke: `train.py --cv --folds f0.csv,f1.csv --oof-out oof.csv`, then `python -m pvdetect.compare --labels labels.csv oof.csv`, prints one `file=` line with 2 repeats.
+**Acceptance:**
+- **U:** `--folds` with a split file missing one labelled customer raises the C1 message.
+- **U (owner of C3):** two out-of-fold files with the same repeats but one customer's fold swapped → `skipped`; identical assignments → a `paired:` line.
+- **R:** on synthetic data, `train.py --cv --folds f0.csv,f1.csv --oof-out oof.csv` gives:
+  - per repeat, exactly one row per labelled customer, with `fold` equal to the split file;
+  - each repeat's `main_score` (via `pvdetect.scoring` on that repeat's rows) equal to the per-repeat nested score `train.py` computed.
 
-### Step 2.5-D — Deliverables skeleton (Saturday; required by `guidelines.md` on `main`)
+### Step 2.5-D — Deliverable drafts (today, small; required by `guidelines.md` on `main`)
 
-- **`README.md`:** add every member's full name and role.
-- **`report/REPORT.md`:** an outline of at most 3 pages, with sections Title, Approach, Results, Challenges (including what didn't work), and AI agents/LLM usage. Results is filled from P3/P7 aggregate numbers only.
-- **`report/VIDEO_SCRIPT.md`:** a 2-minute script covering goal and relevance, the method in one diagram, key results, and a demo of `python inference.py test.csv`.
-- **Clean-environment install test**, documented in the README:
-  ```
-  uv venv /tmp/cleanroom --python 3.12
-  uv pip install --python /tmp/cleanroom/bin/python -r requirements.txt
-  ```
-  Then run the synthetic smoke inference from a temporary directory. It must succeed with plain `pip install -r requirements.txt`.
-- **Export procedure:** `git archive <frozen commit> | tar -x -C <NW_26 repo checkout>`, then commit there.
+- **`README.md`:** every member's full name and role; a status line with the procedure and `outer_informed_decisions`.
+- **`report/REPORT.md`:** an outline of at most 3 pages: Title, Approach, Results (filled later from aggregate real-data lines only), Challenges (including what didn't work), AI agents/LLM usage.
+- **`report/VIDEO_SCRIPT.md`:** 2 minutes covering goal and relevance, the method in one diagram, key results, and a demo of `python inference.py test.csv`.
+- **Model-file safety test** (`tests/test_release.py`):
+  - fit on `generate_dataset(12, seed=5)` and `save_model`;
+  - neither `model.json` nor any `.cbm` byte string contains any training `customer_id`.
+  - This is necessary but **not sufficient**. Step 2.5-G adds human review and organizer approval.
 
-### Step 2.5-E — Model items (only those P3 justifies; all are Tier A options inside `Procedure.fit`)
+### Step 2.5-H — Organizer email (user, today)
 
-Every item is added to the inner option pool. Inner CV chooses per fit with the Step 11 margin rule; outer scores never adopt it. Order:
+Ask in one message:
+1. May semi-synthetic augmentation of the provided series be used in the competitive model (unblocks Step 19)?
+2. May the trained model files (JSON parameters including aggregate statistics over the 40 development customers, and CatBoost model files) be published in the open-sourced NW_26 repo?
+3. If not, what private channel should deliver them (e.g. direct upload or Swisstransfer), placed by the organizers into `artifacts/` next to `inference.py`?
+
+Record the answers in the README under "Organizer clarifications". Until answer 2 arrives, plan for the private channel. `inference.py` already loads `artifacts/model.json` automatically, so the private route needs no code change.
+
+### Step 2.5-X — Export rehearsal on synthetic data (today)
+
+**`scripts/export_submission.sh COMMIT DEST MODEL_DIR`**
+1. `git archive COMMIT | tar -x -C DEST` (clean tree, no history).
+2. Copy `MODEL_DIR/model.json` and exactly the files it references (`pvdetect.model.referenced_files`) into `DEST/artifacts/`.
+3. Run `python scripts/check_release.py DEST --allow artifacts/model.json --allow artifacts/<each referenced file>`.
+   - The allow list is generated from `model.json`, never a wildcard or directory.
+   - A non-zero exit aborts the export.
+
+**`scripts/check_release.py DEST --allow PATH ...`**
+- Walks every file under `DEST` (not git-based, because the NW_26 repo has no hook).
+- Reuses `is_data_path` and the identifier pattern from `check_hygiene.py`.
+- Exits 1 if:
+  - any non-allowed file is a data path;
+  - **any** file, allowed ones included, contains an identifier of the real form;
+  - an allowed path is missing.
+- Prints paths only.
+
+**Rehearsal**
+- Train a synthetic model to `/tmp/nw26_model/`, export to `/tmp/nw26_rehearsal/`, and the release check passes.
+- `uv venv /tmp/cleanroom --python 3.12 && uv pip install --python /tmp/cleanroom/bin/python -r /tmp/nw26_rehearsal/requirements.txt`.
+- From a fresh temp dir, with the network blocked (a wrapper that patches `socket.socket` to raise, then calls `inference.main`), run inference on the synthetic test CSV. Checks:
+  - exact header; one row per input customer;
+  - two runs → identical `shasum`;
+  - `generate_dataset(20, seed=9)` completes in < 120 s.
+
+**Acceptance (U, `tests/test_release.py`):** in a temp export dir,
+- `model.json` plus one allowed `.cbm` → exit 0;
+- an extra `.csv` → exit 1;
+- an allowed file containing a runtime-assembled real-form identifier → exit 1;
+- a `.cbm` not on the allow list → exit 1;
+- a missing allowed file → exit 1.
+
+### Step 2.5-E — Targeted improvement (only what the real results point to)
+
+**Pick by the largest points lost** in the P3 aggregates:
+- `70·(1 − f1)` → detection: E1 persistence feature, E2 probability averaging.
+- `15·f1·(1 − D)` → dates: onset/offset work. Read the per-regime `dates:` line first; B1 already widens the offset.
+- `15·f1·(1 − P)` → capacity: capacity-estimator work. Start from the capacity features and the κ/ridge-vs-CatBoost selection line.
+
+Every item is a Tier A option inside `Procedure.fit`. Inner CV chooses per fit with the Step 11 margin rule, and outer scores never adopt it. Re-evaluating after an item is a logged Tier B decision.
 
 **E1. Persistence feature `summer_suppressed_week_frac`** (`features.py`, fitted part, because it uses `ds`):
-- Count the summer ISO weeks in `last365` with ≥4 valid days.
-- The feature is the fraction of those weeks whose weekly median `ds` is ≤ (median `ds` over winter days in `last365`) − 0.5.
-- NaN if there are fewer than 8 such weeks or fewer than 30 winter days.
-- Targets vacations and short shutdowns, which suppress only a few weeks.
+- Summer ISO weeks in `last365` with ≥4 valid days.
+- The feature is the fraction of those weeks whose weekly median `ds` ≤ (median `ds` over winter days in `last365`) − 0.5.
+- NaN with fewer than 8 such weeks or fewer than 30 winter days.
 - R test: a customer with a 3-week `vacation` and no PV scores < 0.2; a summer-installed PV customer scores > 0.8.
 
-**E2. Probability averaging:** a third classifier option `avg` = mean of the logreg and CatBoost inner OOF probabilities.
+**E2. Probability averaging:** a classifier option `avg` = mean of the logreg and CatBoost probabilities.
 - Selected only if it beats the current best by ≥2.0 inner points with bootstrap ≥0.8.
-- The final model stores both sub-models. `model.json` `classifier.kind = "avg"`.
+- `model.json` `classifier.kind = "avg"` stores both sub-models.
 
-**E3. Repeated inner CV:** `inner_splits` returns 3 repeats × `min(5, min_class)` folds (shuffle seeds 0, 1, 2).
-- Inner OOF predictions are averaged per customer across repeats before selection.
-- The cost is about 3× fit time: rerun `python -m pvdetect.benchmark --pilot`, and if the projection exceeds the budget use 2 repeats.
-- The label-flip leakage test must still pass unchanged.
+**E3. Repeated inner CV (conditional):** 3 repeats × `min(5, min_class)` folds, inner OOF averaged per customer.
+- Only if the `selection:` line shows unstable choices (an option chosen in 30–70% of outer fits).
+- Re-run `benchmark --pilot`; use 2 repeats if over budget. The label-flip test must pass unchanged.
 
-**E4. Probability calibration:** not implemented. Revisit only if the P3 `selection:` line shows a threshold range wider than 0.3 across outer fits (logged).
+**E4. Calibration:** not implemented unless the threshold range across outer fits exceeds 0.3 (logged).
 
-**E5. PatchTST customer score as a feature option.** Last, and only if P3 names F1 as the bottleneck. Preconditions, each verified and recorded before integration:
-1. **Fix the late-install blind spot.** The P90 over all April–September windows dilutes installs with few post-install summer weeks. Use the P90 over windows in the customer's last 365 days of summer coverage, and add an R test with an install 10 weeks before the series end.
-2. **Timing.** Per-fold training time × (outer folds × repeats × (inner folds + 1)) must fit the benchmark budget (about 120 trainings per nested run at 5×4 outer, 5 inner). Measure with the pilot first.
-3. **Dependencies.** `torch` (CPU wheel) is accepted in `requirements.in`, and the inference runtime limit (P7, < 120 s for 20 customers) still holds.
-- The network trains inside each fit on that fit's training customers only (window labels per Step 22), on the common inner folds.
+**E5. GPU/PatchTST challenger (last):** only if detection remains the weakest component after E1–E2 **and** PatchTST wins P3-matched on matched folds **and** on the full score. Preconditions, each verified and recorded:
+1. The late-install fix (reported done in `0e5b0ce`) is confirmed by an R test with an install 10 weeks before the series end.
+2. Training time per fit × the number of fits in a nested run fits the benchmark budget (measured with the pilot).
+3. `torch` (CPU wheel) is accepted in `requirements.in`, and inference stays under 120 s for 20 customers.
+- Integration: the PatchTST customer score becomes a feature-block option, trained inside each fit on that fit's training customers and the common inner folds.
 
-### Step 2.5-F — Package merge and CI (only after Step 2.5-D is safe)
+**Extensions (optional, after the core submission works):** P4 Steps 15–16.
+- Extension false alarms lower the bonus (they reduce `F1_ext`), but the bonus never drops below 0 and the main score is unaffected. So attempting never scores below header-only.
+- Do not ship extension predictions unless the synthetic no-extension tests stay at zero events.
 
-- **One `pyproject.toml` with a `src/` layout.** `pvdetect` moves next to `neuralwave_data`.
-- **One loader,** following `main`'s stricter rules:
+**Unlabelled-data modelling:** remains P5/P6, gated.
+
+### Step 2.5-F — Package merge and CI (only if time remains after G is safe)
+
+- One `pyproject.toml` with a `src/` layout; one loader following `main`'s stricter rules:
   - explicit delimiter/decimal config;
-  - conflicting duplicate rows raise an error;
+  - conflicting duplicates raise;
   - the organizer `POD`-prefix filter, for unlabelled sources only.
-- **CI:** a GitHub Actions workflow running `pytest -q`, `ruff check` and `scripts/check_hygiene.py` on every PR. Merges go through reviewed PRs.
-- **Acceptance:** all existing tests pass after the move, and inference output is byte-identical on the synthetic smoke set before and after.
+- One scorer module.
+- CI: GitHub Actions running `pytest -q`, `ruff check` and `check_hygiene.py --all` on every PR.
+- **Acceptance:** all tests pass; inference output is byte-identical on the synthetic smoke set before and after.
 
-### Step 2.5-G — Freeze (Sunday morning)
+### Step 2.5-G — Freeze and release (Sunday morning)
 
-- Final real-data `train.py --cv` on all 40, then P7 checks 3–7.
-- Fill the report Results section from aggregate lines.
-- Export to the NW_26 repo and publish before **11:00**.
+1. **Prerequisite:** organizer answer 2 (publish) or answer 3 (private channel) is recorded.
+2. **Final fit (data holder):** `train.py --cv --out <private>/final/model.json` on all 40 with the selected procedure. Record the aggregate lines privately; the README gets the aggregate score and `outer_informed_decisions`.
+3. **Human review of the exact model files** (user, before any copy leaves the private dir). In `model.json`:
+   - `capacity.fallback_kwp` is the median of the real training capacities (with an even count, the mean of two real labels);
+   - the `impute` vectors are medians over 40 customers;
+   - `climatology` holds aggregate weekly curves;
+   - `selection` holds inner scores.
+   - `.cbm` files may hold split thresholds near individual customers' values.
+   - Decide to publish or to deliver privately, per the organizer answer.
+4. **Export:**
+   - `scripts/export_submission.sh <frozen commit> <NW_26 checkout> <private>/final` (includes the release audit);
+   - for the private route, export without the model files and deliver them through the agreed channel.
+5. **Clean offline inference:** clean venv from the exported `requirements.txt`, Wi-Fi off, `python inference.py <dev energy CSV>` from a temp dir. Then check:
+   - 41 lines with the exact header;
+   - every TRUE row has a date and a capacity > 0;
+   - two runs give identical files.
+   - Repeat on the synthetic test set.
+6. **Publish:** commit in the NW_26 repo together with the report and the video link, and publish before **11:00**.
 
 ## Phase 3 — Real-data evaluation (user)
 
@@ -896,10 +1008,10 @@ Findings relayed to agents are generalized, e.g. "night-load FPs dominate", "`pr
 
 ## Phase 7 — Freeze and submission
 
-1. **Final fit (user):** `train.py --cv --out artifacts/model.json` on all 40. Record the nested lines; the `selection-biased` label states how many outer-informed decisions preceded it.
+1. **Final fit (data holder):** `train.py --cv --out <private>/final/model.json` on all 40 (never `artifacts/` inside this repo). Record the nested lines; the `selection-biased` label states how many outer-informed decisions preceded it.
 2. **Holdout gate (G):** one final logged run.
-3. **Package:** `git add -f artifacts/`; README status gets the final procedure, `outer_informed_decisions`, and the limits.
-4. **Clean room:** `uv venv /tmp/cleanroom --python 3.12 && uv pip install -r requirements.txt`, then `inference.py` from `/tmp/pvsyn_test` with networking off.
+3. **Package:** export per Step 2.5-G (`scripts/export_submission.sh`). Model files enter only the NW_26 export (or the organizers' private channel), never `ch-TokenLarpers` history; the hygiene hook blocks them here by design. README status gets the final procedure, `outer_informed_decisions`, and the limits.
+4. **Clean room:** clean venv from the exported `requirements.txt`, then `inference.py` from a temp dir with networking off (Step 2.5-G item 5).
 5. **Determinism:** two inference runs → identical `shasum` for both files.
 6. **Runtime:** `generate_dataset(20, seed=9)` inference completes in < 120 s on CPU; profile if over.
 7. **Contract:** rerun `pytest -q`.
