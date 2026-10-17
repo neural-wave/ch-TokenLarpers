@@ -72,6 +72,19 @@ Loads `artifacts/model.json` (plus sibling files) automatically and writes to th
 
 The loader sniffs `;`/`,` separators and comma decimals, accepts epoch seconds or milliseconds, drops duplicate timestamps, and maps every reading to fixed UTC+1 so DST days (92/100 rows) become ordinary 96-slot days.
 
+## Submission export
+
+The trained model never enters this repository's history: the hygiene hook blocks `artifacts/` and every `.cbm`. It reaches the NW_26 repository only through the export script below or through the organizer-approved private channel (files placed into `artifacts/` next to `inference.py`, which loads them automatically).
+
+```
+PYTHON=python sh scripts/export_submission.sh COMMIT DEST [MODEL_DIR]
+python scripts/check_release.py DEST --allow artifacts/model.json [--allow artifacts/catboost_clf.cbm ...]
+```
+
+`export_submission.sh` extracts `git archive COMMIT` into `DEST` (clean tree, no history). With `MODEL_DIR` it copies `MODEL_DIR/model.json` and exactly the files that model references (`pvdetect.model.referenced_files`) into `DEST/artifacts/`; without it (private-channel route) no model file is copied. It then runs `check_release.py` with an allow list generated from `model.json`, never a wildcard, and aborts non-zero on any failure; an aborted `DEST` must not be committed.
+
+`check_release.py` walks every file under `DEST` on the filesystem (the NW_26 repository has no hook; `.git` directories are skipped) and exits 1 when a file not on the allow list is a data or model dump, when an allowed path is missing, or when any file, allowed model files included, contains a real customer identifier. It prints paths and reasons only. Passing it is necessary, not sufficient: the export also needs human review and organizer approval (Step 2.5-G).
+
 ## Synthetic smoke run
 
 ```
