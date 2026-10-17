@@ -140,3 +140,5 @@ Until answer 2 arrives we plan for the private channel. `inference.py` loads `ar
 ## Status
 
 Procedure: season-aware changepoint and confounder features, three date regimes, inner-CV selection of classifier, threshold, capacity model, κ and date rule, scored by nested CV; `outer_informed_decisions=1` (selection-biased). Synthetic-validated only; real-data nested CV pending (P3); extensions header-only; unlabelled data unused.
+
+Export rehearsal (Step 2.5-X2, synthetic model, 2026-10-17): pass. `export_submission.sh` with the default `python3`, release audit passed; fresh venv from the exported `requirements.txt` (Python 3.12.14); inference with sockets blocked on `generate_dataset(20, seed=9)` wrote 21 lines with the exact header, identical output across two runs, 35.9 s cold and 4.3 s warm (budget 120 s).

@@ -26,6 +26,10 @@ Filled after the real-data run (P3) from aggregate lines only: `nested:`, `dates
 
 `outer_informed_decisions=1`, so the estimate is labelled selection-biased.
 
+How to read the numbers. Every number we report rests on 40 labelled customers. Cutting their histories into thousands of weekly windows does not create thousands of independent cases. The spread across CV repeats shows how much the result depends on the particular split of those 40 customers; it is not new data. The bootstrap interval resamples fixed out-of-fold predictions and leaves out the uncertainty of model selection. Capacity cannot be read off directly from grid withdrawal: load, orientation, shading, inverter limits and batteries can produce the same readings, so kWp is an estimate.
+
+<!-- figures: synthetic and labelled "synthetic customer" only; real data only as aggregate lines, and only if the organizers allow (Step 2.5-D-pub). No real-customer plots, traces, dates or per-customer predictions. -->
+
 Synthetic holdout benchmark (P2 gate, 40 customers, 2 repeats, code `3d2e5cd`, before the Phase 2.5 fixes). These numbers are synthetic and are not evidence of competition accuracy:
 
 | scenario | score |
@@ -41,11 +45,12 @@ Synthetic holdout benchmark (P2 gate, 40 customers, 2 repeats, code `3d2e5cd`, b
 
 ## Challenges
 
-- The raw changepoint fired on seasonal drops. Spring looks like a new PV system. Deseasonalizing and a year-over-year check fixed most of it.
-- The labelled date lags the onset we can see. We learn an offset instead of trusting the visible break.
-- Night loads such as heat pumps and storage heaters shift consumption in ways that mimic PV. Dedicated confounder features help; they do not solve it.
+- The raw changepoint fired on seasonal drops: spring looks like a new PV system. On synthetic data, deseasonalizing and a year-over-year recurrence check removed most of these false detections.
+- The labelled commissioning date may lag the onset that is visible in the data. We do not assume a fixed lag; an offset is learned from the training customers inside each fit.
+- Night loads such as heat pumps and storage heaters shift consumption in ways that mimic PV. Dedicated confounder features separate them on synthetic data; they do not solve it in general.
 - With 40 labelled customers, any choice made by looking at results overfits. We moved all tuning inside the fit and log every outer-informed decision.
 - Different branches scored on different splits, so numbers were not comparable. We fixed shared customer folds and a common out-of-fold format.
+<!-- team: keep or drop the next item (Step 2.5-D-pub); if dropped, keep only the controls. -->
 - Data hygiene: a benchmark report on one branch exposed customer identifiers and per-customer values. We scrubbed it at the branch tip, added a commit hook that blocks data files and identifiers, keep the repository private until the old commits are removed, and hand in only a clean export without history.
 - What did not work: (to fill after P3).
 
