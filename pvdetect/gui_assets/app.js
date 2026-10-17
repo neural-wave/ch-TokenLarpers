@@ -537,20 +537,23 @@
       below: ["below the nested CI · possible overfitting", "c-orange"],
     }[lb.vs_nested] || ["no nested CI recorded", "c-muted"];
     const forced = lb.forced || lb.forced_overrides > 0 || lb.code_changed_since_freeze;
+    const later = lb.prior_looks > 0;
     const tag = lb.forced
       ? `Forced re-open · look ${lb.opens} · recorded`
-      : lb.forced_overrides > 0
-        ? `Single look · ${lb.forced_overrides} forced override(s) recorded`
-        : lb.code_changed_since_freeze
-          ? "Single look · code changed after freeze"
-          : "Single look · opened once";
+      : later
+        ? `Round ${lb.round} · look ${lb.look} · earlier looks changed no decision of this round`
+        : lb.forced_overrides > 0
+          ? `Single look · ${lb.forced_overrides} forced override(s) recorded`
+          : lb.code_changed_since_freeze
+            ? "Single look · code changed after freeze"
+            : "Single look · opened once";
     const about = `The frozen run (${lb.run}) scored once on the sealed lock-box customers it never saw: ${lb.customers} customers, ${lb.pv} with PV. The 90% interval resamples those customers (2000 draws). Compared with the nested cross-validation interval of the same run on the development customers; the result changes nothing about the submitted model.`;
     return [
       h("hr"),
       h(
         "div",
         { className: "wcard" },
-        h("div", { className: "wcard-top" }, info(about), h("span", { className: "wcard-label" }, icon("lock", 28), "Lock-box · single look")),
+        h("div", { className: "wcard-top" }, info(about), h("span", { className: "wcard-label" }, icon("lock", 28), later ? `Lock-box · look ${lb.look}` : "Lock-box · single look")),
         h("div", { className: "wcard-row" }, fig(n(lb.score, 1), `score · 90% CI ${n(ci[0], 1)}–${n(ci[1], 1)}`, "c-mint"), fig(n(lb.f1, 3), `F1 · n ${lb.customers ?? "–"}`, "c-mint", true)),
         h("p", { className: "metric-line num" }, "Precision ", h("b", { text: n(lb.precision) }), " · recall ", h("b", { text: n(lb.recall) }), " · D ", h("b", { text: n(lb.D) }), " · P ", h("b", { text: n(lb.P) })),
         h("p", { className: "metric-line num" }, `Nested CV ${n(nested.score, 1)} [${n(nci[0], 1)}, ${n(nci[1], 1)}] · lock-box `, h("b", { className: where[1], text: where[0] })),

@@ -247,6 +247,44 @@ def test_open_verifies_seal_looks_once_and_final_refits(tiny, fake_train, fake_i
     assert "stage: final" in out and "lockbox opened: yes opens=2" in out and "decisions: used=0/1" in out
 
 
+def test_round_reuses_the_seal_carries_looks_and_keeps_the_split(tiny, fake_train, fake_inference, capsys, tmp_path):
+    d, r2 = tiny.dir, tmp_path / "private2"
+    _seal(tiny)
+    _lb("develop", "--dir", d, "base")
+    _lb("freeze", "--dir", d, "base")
+    _lb("open", "--dir", d)
+    with pytest.raises(SystemExit, match=r"config differs in \['outer_folds'\]"):
+        _lb("round", "--dir", r2, "--from", d, "--config", _config(tmp_path, outer_folds=4))
+    assert not (r2 / "state.json").exists()
+    (d / "lockbox_labels.csv").write_bytes((d / "lockbox_labels.csv").read_bytes() + b"\n")
+    with pytest.raises(SystemExit, match="lockbox_labels.csv in --from does not match"):
+        _lb("round", "--dir", r2, "--from", d, "--config", _config(tmp_path, decision_budget=5))
+    (d / "lockbox_labels.csv").write_bytes((d / "lockbox_labels.csv").read_bytes()[:-1])
+
+    assert _lb("round", "--dir", r2, "--from", d, "--config", _config(tmp_path, decision_budget=5)) == 0
+    with pytest.raises(SystemExit, match="already holds a protocol"):
+        _lb("round", "--dir", r2, "--from", d, "--config", _config(tmp_path, decision_budget=5))
+    st = _state(SimpleNamespace(dir=r2))
+    assert (st["stage"], st["round"], st["prior_looks"], st["opens"], st["config"]["decision_budget"]) == ("sealed", 2, 1, 0, 5)
+    for name in ("dev.csv", "lockbox.csv", "lockbox_labels.csv", "splits_s17.csv", "splits_s42.csv", "seal.json"):
+        assert (r2 / name).read_bytes() == (d / name).read_bytes()
+
+    _lb("develop", "--dir", r2, "base")
+    _lb("freeze", "--dir", r2, "base")
+    capsys.readouterr()
+    assert _lb("open", "--dir", r2) == 0  # the round's first open needs no --force
+    out = capsys.readouterr().out
+    assert "look 2 (round 2" in out
+    res = json.loads((r2 / "lockbox_result.json").read_text())
+    assert (res["round"], res["prior_looks"], res["look"], res["opens"], res["single_look"], res["forced"]) == (2, 1, 2, 1, False, False)
+    panel = saved_lockbox(r2 / "runs" / "base" / "model.json")
+    assert (panel["look"], panel["round"]) == (2, 2)
+    with pytest.raises(SystemExit, match="already opened"):
+        _lb("open", "--dir", r2)
+    assert _lb("status", "--dir", r2) == 0
+    assert "round=2 prior_looks=1" in capsys.readouterr().out
+
+
 def test_ci_position_against_nested_interval():
     nested = {"ci90": [60.0, 70.0]}
     assert [lockbox.vs_nested(s, nested) for s in (59.9, 60.0, 70.0, 70.1)] == ["below", "inside", "inside", "above"]

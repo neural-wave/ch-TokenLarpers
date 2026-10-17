@@ -30,3 +30,16 @@ Implementation notes: the tool never writes to the repository, so `compare` prin
 - Adopt a candidate in stage 2 only if `pvdetect.compare` verdict = `improvement` on all three split seeds pooled; else keep baseline.
 - After freeze, the lock-box result changes nothing; if it falls below the nested 90 % interval, report "possible overfitting" and still submit the frozen model (no re-tuning on the lock-box).
 - Budget exhausted → freeze.
+
+## Round 2: improvement loop on the same seal (pre-registered before any round-2 run)
+
+`python -m pvdetect.lockbox round --dir <private>/round2 --from <private>/lockbox` starts a new development round on the round-1 seal: the same 30 dev and 10 lock-box customers and the same three split files (hashes verified, files hardlinked). Config `configs/lockbox_round2.json` changes only `decision_budget` (10); `round` refuses any change to the split keys.
+
+Loop (each iteration):
+1. **Baseline** — `develop` the current `main` (defaults) on the dev set; `pvdetect.diagnose` names the component that loses the most points.
+2. **Error review (dev out-of-fold only)** — the data holder inspects the dev customers that lose those points (per-customer errors, plots) and writes mechanism descriptions without customer identifiers or values.
+3. **Candidates** — parallel workers implement one mechanism each as a Tier A option (inner CV decides per fit), on synthetic dev scenarios that reproduce the mechanism, with tests; each on its own branch.
+4. **Comparison** — each candidate branch is `develop`ed on the same split files and `compare`d with the iteration's baseline (one decision each, one `DECISIONS.md` line each). A candidate is merged into `main` only on verdict `improvement`; `within_noise` and `worse` are not merged. The merged state is the next iteration's baseline.
+5. Stop when the budget is spent or at the freeze time.
+
+Then `freeze` the last baseline, `open` once (look 2: no round-2 decision used look 1, which changed nothing), `final` on all 40, export, offline smoke. The lock-box customers are never inspected individually in any round. Every round-2 comparison is outer-informed, so the nested estimate is reported as selection-biased with its decision count; the lock-box look is the unbiased check of the final procedure.

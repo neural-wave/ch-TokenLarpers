@@ -311,9 +311,9 @@ def saved_lockbox(model_path: Path) -> dict | None:
         return None
     if not isinstance(doc, dict) or doc.get("schema") != SCHEMA:
         return None
-    keep = ("run", "opened_at", "opens", "forced", "forced_overrides", "code_changed_since_freeze", "customers", "pv",
-            "score", "ci90", "precision", "recall", "f1", "D", "P", "counts", "nested", "vs_nested", "decisions_used",
-            "decision_budget")
+    keep = ("run", "opened_at", "opens", "round", "prior_looks", "look", "forced", "forced_overrides",
+            "code_changed_since_freeze", "customers", "pv", "score", "ci90", "precision", "recall", "f1", "D", "P",
+            "counts", "nested", "vs_nested", "decisions_used", "decision_budget")
     return {k: doc.get(k) for k in keep}
 
 

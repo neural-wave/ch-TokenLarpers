@@ -1,6 +1,7 @@
 """Evaluation protocol v2: nested CV on a development set, one sealed stratified lock-box, full refit.
 
     python -m pvdetect.lockbox seal    --dir PRIVATE --energy E --labels L [--config configs/lockbox.json]
+    python -m pvdetect.lockbox round   --dir NEW --from PRIVATE [--config configs/lockbox_round2.json]
     python -m pvdetect.lockbox develop --dir PRIVATE NAME [--unlabelled U] [-- TRAIN_FLAGS ...]
     python -m pvdetect.lockbox compare --dir PRIVATE A B [--force]
     python -m pvdetect.lockbox freeze  --dir PRIVATE NAME
@@ -12,8 +13,9 @@ Plan: docs/evaluation_lockbox_plan.md. PRIVATE (outside the repository) holds ev
 (stage, timestamps, git commit, config hash, runs, decisions used, forced overrides), `seal.json`, the
 dev / lock-box files, the shared outer split files and one folder per run. Stages refuse to run out of
 order: seal → develop / compare (≤ decision_budget comparisons) → freeze → open (once) → final.
-Every stage prints aggregate lines only. On real data the output is AIL-derived: keep it with the team,
-never in an agent session.
+`round` starts a new development round on the same seal (same dev / lock-box customers and split files,
+hashes verified, hardlinked): only the decision budget may change, and earlier lock-box looks are carried
+over (`prior_looks`) so every later look is reported as such. Every stage prints aggregate lines only.
 """
 
 from __future__ import annotations
@@ -50,6 +52,8 @@ RESULT_FILE = "lockbox_result.json"
 SCHEMA = 1
 STAGES = ("sealed", "frozen", "opened", "final")
 CONFIG_KEYS = ("seed", "lockbox_size", "strata", "outer_seeds", "outer_folds", "decision_budget")
+SPLIT_KEYS = ("seed", "lockbox_size", "strata", "outer_seeds", "outer_folds")  # fixed across rounds
+SEALED_FILES = ("dev.csv", "dev_labels.csv", "lockbox.csv", "lockbox_labels.csv")
 BOOTSTRAP_B = 2000
 BOOTSTRAP_SEED = 0
 CI_LEVEL = 0.90
@@ -328,6 +332,68 @@ def seal(args) -> int:
     return 0
 
 
+def _link_or_copy(src: Path, dst: Path) -> None:
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+
+
+def new_round(args) -> int:
+    """New development round on an existing seal: the same customers, lock-box and split files."""
+    d = _private_dir(args.dir, create=True)
+    if (d / STATE_FILE).exists():
+        raise _refuse(f"--dir already holds a protocol ({STATE_FILE} exists)")
+    src = _private_dir(args.source)
+    if src == d:
+        raise _refuse("--from and --dir must differ")
+    old = _load_state(src)
+    seal_doc = json.loads((src / SEAL_FILE).read_text(encoding="utf-8"))
+    for key, name in (("lockbox_csv_sha256", "lockbox.csv"), ("lockbox_labels_sha256", "lockbox_labels.csv")):
+        if _sha256_file(src / name) != seal_doc[key]:
+            raise _refuse(f"{name} in --from does not match its seal.json")
+    cfg = load_config(args.config)
+    changed = [k for k in SPLIT_KEYS if cfg[k] != old["config"][k]]
+    if changed:
+        raise _refuse(f"a new round keeps the sealed split; config differs in {changed}")
+    for name in (*SEALED_FILES, *(p.name for p in _split_files(src, cfg))):
+        if not (src / name).is_file():
+            raise _refuse(f"{name} missing in --from")
+        _link_or_copy(src / name, d / name)
+    shutil.copy2(src / SEAL_FILE, d / SEAL_FILE)
+    now, (commit, dirty), chash = _now(), _git(), config_hash(cfg)
+    prior = int(old.get("prior_looks", 0)) + int(old["opens"])
+    _save_state(
+        d,
+        {
+            "schema": SCHEMA,
+            "stage": "sealed",
+            "timestamps": {"sealed": seal_doc["sealed_at"], "round_started": now},
+            "git": {"commit": commit, "dirty": dirty},
+            "config_path": str(Path(args.config).resolve()),
+            "config": cfg,
+            "config_hash": chash,
+            "seal_config_hash": seal_doc["config_hash"],
+            "round": int(old.get("round", 1)) + 1,
+            "previous_round": str(src),
+            "prior_looks": prior,
+            "runs": {},
+            "decisions": [],
+            "decisions_used": 0,
+            "forced": [],
+            "frozen": None,
+            "opens": 0,
+            "lockbox": None,
+            "final": None,
+        },
+    )
+    print(
+        f"round: {int(old.get('round', 1)) + 1} on the seal of {src.name} | prior lock-box looks={prior} | "
+        f"decision_budget={cfg['decision_budget']} config_hash={chash[:12]}"
+    )
+    return 0
+
+
 def develop(args, extra: list[str]) -> int:
     d = _private_dir(args.dir)
     st = _load_state(d)
@@ -449,7 +515,8 @@ def open_lockbox(args) -> int:
     for key, name in (("lockbox_csv_sha256", "lockbox.csv"), ("lockbox_labels_sha256", "lockbox_labels.csv")):
         if _sha256_file(d / name) != seal_doc[key]:
             raise _refuse(f"{name} does not match seal.json; the lock-box was modified after sealing")
-    if seal_doc["config_hash"] != st["config_hash"]:
+    expected = st.get("seal_config_hash", st["config_hash"])
+    if seal_doc["config_hash"] != expected:
         raise _refuse("state.json and seal.json disagree on the config hash")
     truth = load_labels(d / "lockbox_labels.csv")
     if _sha256_ids(truth["customer_id"]) != seal_doc["lockbox_ids_sha256"]:
@@ -479,12 +546,16 @@ def open_lockbox(args) -> int:
         _force(st, "open", "lock-box opened again")
     st["opens"] += 1
     st["timestamps"].setdefault("opened", []).append(now)
+    prior = int(st.get("prior_looks", 0))
     result = {
         "schema": SCHEMA,
-        "single_look": True,
+        "single_look": prior + st["opens"] == 1,
         "run": fr["run"],
         "opened_at": now,
         "opens": st["opens"],
+        "round": int(st.get("round", 1)),
+        "prior_looks": prior,
+        "look": prior + st["opens"],
         "forced": forced,
         "forced_overrides": len(st["forced"]),
         "code_changed_since_freeze": code_changed,
@@ -514,7 +585,8 @@ def open_lockbox(args) -> int:
     _advance(st, "opened")
     _save_state(d, st)
     c = summary["counts"]
-    print(f"lockbox: run={fr['run']} customers={len(truth)} pv={result['pv']} opens={st['opens']} (single look)")
+    look = f"look {prior + st['opens']} (round {result['round']}; earlier rounds' looks changed no decision of this round)" if prior else "single look"
+    print(f"lockbox: run={fr['run']} customers={len(truth)} pv={result['pv']} opens={st['opens']} ({look})")
     print(
         f"lockbox: score={summary['score']:.2f} ci90=[{lo:.2f},{hi:.2f}] f1={_fmt(summary['f1'], 3)} "
         f"D={_fmt(summary['D'], 3)} P={_fmt(summary['P'], 3)} precision={_fmt(summary['precision'], 3)} "
@@ -579,7 +651,8 @@ def status(args) -> int:
     d = _private_dir(args.dir)
     st = _load_state(d)
     cfg = st["config"]
-    print(f"stage: {st['stage']} (sealed {st['timestamps']['sealed']}) config_hash={st['config_hash'][:12]}")
+    rnd = f" round={st.get('round', 1)} prior_looks={st.get('prior_looks', 0)}" if st.get("round", 1) > 1 else ""
+    print(f"stage: {st['stage']} (sealed {st['timestamps']['sealed']}) config_hash={st['config_hash'][:12]}{rnd}")
     for name, info in st["runs"].items():
         n = info["nested"] or {}
         print(
@@ -612,6 +685,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--energy", required=True)
     p.add_argument("--labels", required=True)
     p.add_argument("--config", default=str(DEFAULT_CONFIG))
+    p = sub.add_parser("round", parents=[common], help="new development round on an existing seal")
+    p.add_argument("--from", dest="source", required=True, help="previous protocol folder (its seal is reused)")
+    p.add_argument("--config", default=str(REPO / "configs" / "lockbox_round2.json"))
     p = sub.add_parser("develop", parents=[common], help="nested CV of one candidate on the dev set")
     p.add_argument("name")
     p.add_argument("--unlabelled")
@@ -635,7 +711,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("train.py flags after -- are accepted by develop only")
     if args.stage == "develop":
         return develop(args, extra)
-    return {"seal": seal, "compare": compare, "freeze": freeze, "open": open_lockbox, "final": final, "status": status}[
+    return {"seal": seal, "round": new_round, "compare": compare, "freeze": freeze, "open": open_lockbox, "final": final,
+            "status": status}[
         args.stage
     ](args)
 
