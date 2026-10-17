@@ -120,21 +120,34 @@ def _zero_window_h(dates: np.ndarray, M: np.ndarray, v: pd.DataFrame) -> float:
     return float(np.mean(hours))
 
 
+DAILY_LABEL_FREE = ("seasonal_contrast", "early_contrast", "summer_zero_frac", "log_mean_daily_kwh", "night_kw")
+
+
+def daily_label_free_features(daily: pd.DataFrame) -> dict[str, float]:
+    """The label-free features computable from the daily frame alone (also used for unlabelled data)."""
+    out = dict.fromkeys(DAILY_LABEL_FREE, np.nan)
+    v = daily[daily["valid"]]
+    if v.empty:
+        return out
+    out["seasonal_contrast"] = _contrast(last365(v))
+    out["early_contrast"] = _contrast(first365(v))
+    su = last365(v)
+    su = su[su["month"].isin(SUMMER)]
+    out["summer_zero_frac"] = float(su["zero"].mean()) if len(su) else np.nan
+    out["log_mean_daily_kwh"] = float(np.log1p(max(0.0, v["total"].mean())))
+    out["night_kw"] = 4 * float(v["night"].median())
+    return out
+
+
 def label_free_features(cd) -> dict[str, float]:
     """Features that never depend on labels or fitted artifacts (cacheable across folds)."""
     out = dict.fromkeys(LABEL_FREE + EXPORT_FEATURES, np.nan)
     if cd is None or cd.n_valid == 0:
         return out
     v = cd.daily[cd.daily["valid"]]
-    out["seasonal_contrast"] = _contrast(last365(v))
-    out["early_contrast"] = _contrast(first365(v))
+    out.update(daily_label_free_features(cd.daily))
     out["dip_center_hour"] = _dip_center_hour(cd.dates, cd.M, v)
-    su = last365(v)
-    su = su[su["month"].isin(SUMMER)]
-    out["summer_zero_frac"] = float(su["zero"].mean()) if len(su) else np.nan
     out["zero_window_h"] = _zero_window_h(cd.dates, cd.M, v)
-    out["log_mean_daily_kwh"] = float(np.log1p(max(0.0, v["total"].mean())))
-    out["night_kw"] = 4 * float(v["night"].median())
     out["neg_frac"] = cd.neg_frac
     out["export_kw"] = 4 * max(0.0, -cd.q001)
     return out

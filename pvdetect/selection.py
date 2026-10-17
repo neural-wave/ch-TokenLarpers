@@ -88,3 +88,28 @@ def bootstrap_prob_better(
         sb = score_arrays(t_pv[i], prob_b[i] >= t_b, err_days[i], ape[i])
         wins += sb > sa
     return wins / B
+
+
+def bootstrap_prob_better_outputs(
+    t_pv: np.ndarray,
+    pred_a: np.ndarray,
+    err_a: np.ndarray,
+    ape_a: np.ndarray,
+    pred_b: np.ndarray,
+    err_b: np.ndarray,
+    ape_b: np.ndarray,
+    B: int = 500,
+    seed: int = 0,
+) -> float:
+    """Inner-only: share of paired customer resamples where submitted outputs B beat A.
+
+    Each configuration brings its own final outputs (prediction, date error, capacity APE)."""
+    rng = np.random.default_rng(seed)
+    n = t_pv.size
+    wins = 0
+    for _ in range(B):
+        i = rng.integers(0, n, n)
+        sa = score_arrays(t_pv[i], pred_a[i], err_a[i], ape_a[i])
+        sb = score_arrays(t_pv[i], pred_b[i], err_b[i], ape_b[i])
+        wins += sb > sa
+    return wins / B

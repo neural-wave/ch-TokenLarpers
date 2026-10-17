@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,7 @@ from pvdetect.model import save_model
 from pvdetect.output import write_oof
 from pvdetect.pipeline import build_feature_table, predict
 from pvdetect.procedure import export_enabled_for, fit
+from pvdetect.unlabelled import accumulate_file, build_unlabelled_prior
 
 REPO = Path(__file__).resolve().parent
 
@@ -41,7 +43,36 @@ def _selection_line(infos: list[dict]) -> str:
     ]
     if rule:
         parts.append("insufficient_rule " + " ".join(f"{k}={v}/{n}" for k, v in sorted(rule.items())))
+    clim = Counter(i.get("climatology") for i in infos if i.get("climatology"))
+    if clim:
+        parts.append(
+            f"climatology labelled={clim.get('labelled_nonpv', 0)}/{n} unlabelled={clim.get('unlabelled_0.5', 0)}/{n}"
+        )
+    scale = Counter(i.get("evidence_scale") for i in infos if i.get("evidence_scale"))
+    if scale:
+        parts.append(f"evidence_scale none={scale.get('none', 0)}/{n} spread={scale.get('unlabelled_spread', 0)}/{n}")
     return "selection: " + " | ".join(parts)
+
+
+def _attach_unlabelled(table, dev_ids: list[str], args):
+    """Stream the unlabelled file (dev customers excluded), build the label-free prior, attach it."""
+    dailies, rep = accumulate_file(
+        args.unlabelled,
+        chunksize=args.unlabelled_chunksize,
+        id_prefix=args.unlabelled_id_prefix,
+        exclude_ids=set(dev_ids),
+    )
+    prior = build_unlabelled_prior(dailies)
+    del dailies
+    out = Path(args.out).parent
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "clim_unlabelled.json").write_text(json.dumps(prior.to_json(), indent=2))
+    option = "enabled" if prior.passed else f"disabled reason={prior.reason}"
+    print(
+        f"unlabelled: customers={prior.n_customers} used_q50={prior.n_q[0.5]} sensitivity={prior.sensitivity:.3f} "
+        f"option={option} rows_excluded_labelled={rep['rows_excluded_labelled']}"
+    )
+    return replace(table, unlabelled=prior)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -55,6 +86,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--report-dir")
     ap.add_argument("--folds", help="comma-separated split files (customer_id, fold); each file is one outer repeat")
     ap.add_argument("--oof-out", help="write the shared out-of-fold prediction file (requires --cv)")
+    ap.add_argument("--unlabelled", help="unlabelled timeseries CSV for label-free Tier A options (Step 18)")
+    ap.add_argument("--unlabelled-chunksize", type=int, default=500_000)
+    ap.add_argument("--unlabelled-id-prefix", default="POD", help='keep only ids with this prefix ("" keeps all)')
     args = ap.parse_args(argv)
     if args.folds and not args.cv:
         ap.error("--folds requires --cv")
@@ -79,6 +113,8 @@ def main(argv: list[str] | None = None) -> int:
         f"rows_total={rep['rows_total']} rows_bad_epoch={rep['rows_bad_epoch']} "
         f"rows_bad_energy={rep['rows_bad_energy']} rows_duplicate={rep['rows_duplicate']}"
     )
+    if args.unlabelled:
+        table = _attach_unlabelled(table, loaded.customer_ids, args)
 
     if args.cv:
         if fold_maps is not None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pandas as pd
@@ -22,10 +22,11 @@ from pvdetect.pipeline import (
     regimes_and_dates,
     to_kwp,
 )
-from pvdetect.season import Climatology, fit_climatology
+from pvdetect.season import Climatology, climatology_from_curves, fit_climatology
 from pvdetect.selection import (
     ape_array,
     bootstrap_prob_better,
+    bootstrap_prob_better_outputs,
     choose_kappa,
     pick_threshold,
     threshold_scores,
@@ -35,6 +36,7 @@ CLASSIFIER_MARGIN = 2.0
 BOOTSTRAP_MIN = 0.8
 CAPACITY_MARGIN = 0.03
 NO_CUT = -1e9  # contrast_cut when the present_at_start regime is disabled
+BASE_SETTING = ("labelled_nonpv", "none")  # (climatology, evidence_scale); the conservative baseline
 # Labelled commissioning dates may lag the visible onset by months.
 OFFSET_ERROR_WINDOW = 180
 OFFSET_CAP = 120
@@ -121,6 +123,7 @@ def _fit_components(
     cap_names: list[str],
     clf_kinds: tuple[str, ...],
     cap_kinds: tuple[str, ...],
+    setting: tuple[str, str] = BASE_SETTING,
 ) -> Components:
     from catboost import CatBoostClassifier, CatBoostRegressor
 
@@ -128,7 +131,7 @@ def _fit_components(
     y = sub["pv_installed"].to_numpy(bool)
     dates = {c: d.date() for c, d in sub.loc[y, "pv_installation_date"].items() if pd.notna(d)}
     nonpv = [c for c, on in zip(ids, y) if not on]
-    clim = fit_climatology(table.dailies(), nonpv, dates)
+    clim = _climatology(table, nonpv, dates, setting)
     F, cps = compute_features(table, ids, clim)
     date_params = fit_date_params(table, lab, ids, F, cps)
     X = F[names].to_numpy(float)
@@ -160,10 +163,25 @@ def _fit_components(
     return Components(clim, F, cps, date_params, logreg, ridge, ridge_export, fallback, objects)
 
 
-def _inner_oof(table, labels, lab, train_ids, splits, names, cap_names) -> pd.DataFrame:
+def _climatology(table: FeatureTable, nonpv: list[str], pv_dates: dict, setting: tuple[str, str]) -> Climatology:
+    """Climatology for one fit; unlabelled options use the label-free prior's curves/spread."""
+    clim_kind, scale_kind = setting
+    dailies = table.dailies()
+    if clim_kind == "unlabelled_0.5":
+        clim = climatology_from_curves(table.unlabelled.curves_q[0.5], dailies, pv_dates, "unlabelled_0.5")
+    else:
+        clim = fit_climatology(dailies, nonpv, pv_dates)
+    if scale_kind == "unlabelled_spread":
+        clim = replace(clim, evidence_scale=table.unlabelled.evidence_scale)
+    return clim
+
+
+def _inner_oof(table, labels, lab, train_ids, splits, names, cap_names, setting=BASE_SETTING) -> pd.DataFrame:
     rows = []
     for tr, va in splits:
-        comp = _fit_components(table, lab, tr, names, cap_names, ("logreg", "catboost"), ("ridge", "catboost"))
+        comp = _fit_components(
+            table, lab, tr, names, cap_names, ("logreg", "catboost"), ("ridge", "catboost"), setting
+        )
         Fva, cps_va = compute_features(table, va, comp.clim)
         p_lr = classifier_proba({"logreg": comp.logreg}, {}, Fva, names, "logreg")
         p_cb = (
@@ -270,14 +288,79 @@ def _select(oof: pd.DataFrame) -> dict:
     }
 
 
+def _final_outputs(oof: pd.DataFrame, sel: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The outputs a configuration would submit: (prediction, date error days, capacity APE)."""
+    pred = oof[f"p_{sel['classifier']}"].to_numpy(float) >= sel["threshold"]
+    dates = oof["date_first"] if sel["insufficient_rule"] == "first_date" else oof["date_weak"]
+    err = _err_days(dates, oof["t_date"].to_numpy("datetime64[ns]"))
+    ape = ape_array(sel["kappa"] * oof[f"kwp_{sel['capacity']}"].to_numpy(float), oof["t_kwp"].to_numpy(float))
+    return pred, err, ape
+
+
+def _adopt(base: tuple[pd.DataFrame, dict], cand: tuple[pd.DataFrame, dict]) -> tuple[bool, float | None]:
+    """Step 11 margin rule on final inner scores plus a paired bootstrap of the submitted outputs."""
+    (oof_b, sel_b), (oof_c, sel_c) = base, cand
+    if not sel_c["inner_score"] - sel_b["inner_score"] >= CLASSIFIER_MARGIN:
+        return False, None
+    t_pv = oof_b["t_pv"].to_numpy(bool)
+    boot = bootstrap_prob_better_outputs(t_pv, *_final_outputs(oof_b, sel_b), *_final_outputs(oof_c, sel_c))
+    return boot >= BOOTSTRAP_MIN, boot
+
+
+def _choose_unlabelled(table, labels, lab, train_ids, splits, names, cap_names, oof, sel):
+    """Climatology first, then evidence_scale on top; every option on the same inner splits."""
+    prior = table.unlabelled
+    setting, cur = BASE_SETTING, (oof, sel)
+    info: dict = {}
+    options: dict = {}
+
+    def evaluate(cand_setting):
+        c_oof = _inner_oof(table, labels, lab, train_ids, splits, names, cap_names, cand_setting)
+        return c_oof, _select(c_oof)
+
+    if prior.passed:
+        cand_setting = ("unlabelled_0.5", "none")
+        cand = evaluate(cand_setting)
+        adopt, boot = _adopt(cur, cand)
+        options["climatology"] = {
+            "labelled_nonpv": cur[1]["inner_score"],
+            "unlabelled_0.5": cand[1]["inner_score"],
+            "bootstrap_p": boot,
+        }
+        if adopt:
+            setting, cur = cand_setting, cand
+    else:
+        info["unlabelled_disabled_reason"] = prior.reason
+    if prior.evidence_scale is not None:
+        cand_setting = (setting[0], "unlabelled_spread")
+        cand = evaluate(cand_setting)
+        adopt, boot = _adopt(cur, cand)
+        options["evidence_scale"] = {
+            "none": cur[1]["inner_score"],
+            "unlabelled_spread": cand[1]["inner_score"],
+            "bootstrap_p": boot,
+        }
+        if adopt:
+            setting, cur = cand_setting, cand
+    else:
+        info["evidence_scale_disabled_reason"] = "unlabelled spread unusable"
+    return setting, cur[1], {"climatology": setting[0], "evidence_scale": setting[1], **info, "unlabelled_options": options}
+
+
 def fit(table: FeatureTable, labels: pd.DataFrame, train_ids: list[str], *, inner: bool = True) -> dict:
     lab = labels.set_index("customer_id")
     export = export_enabled_for(table, train_ids)
     names = feature_names(export)
     cap_names = capacity_feature_names(export)
     splits = inner_splits(labels, train_ids) if inner else []
+    setting, unl_info = BASE_SETTING, {}
     if splits:
-        sel = _select(_inner_oof(table, labels, lab, train_ids, splits, names, cap_names))
+        oof = _inner_oof(table, labels, lab, train_ids, splits, names, cap_names)
+        sel = _select(oof)
+        if table.unlabelled is not None:
+            setting, sel, unl_info = _choose_unlabelled(
+                table, labels, lab, train_ids, splits, names, cap_names, oof, sel
+            )
     else:
         sel = {
             "classifier": "logreg",
@@ -289,7 +372,11 @@ def fit(table: FeatureTable, labels: pd.DataFrame, train_ids: list[str], *, inne
             "inner_score": float("nan"),
             "inner_score_initial": float("nan"),
         }
-    comp = _fit_components(table, lab, train_ids, names, cap_names, ("logreg", sel["classifier"]), (sel["capacity"],))
+        if table.unlabelled is not None:
+            unl_info = {"climatology": setting[0], "evidence_scale": setting[1]}
+    comp = _fit_components(
+        table, lab, train_ids, names, cap_names, ("logreg", sel["classifier"]), (sel["capacity"],), setting
+    )
     if sel["classifier"] == "catboost" and "catboost_clf" not in comp.objects:
         sel["classifier"] = "logreg"
         sel["inner_score"] = sel["inner_score_logreg"]
@@ -297,6 +384,7 @@ def fit(table: FeatureTable, labels: pd.DataFrame, train_ids: list[str], *, inne
         sel["capacity"] = "ridge"
     date = {**comp.date_params, "insufficient_rule": sel["insufficient_rule"]}
     sel.update(offset_event=date["offset_event"], start_lag=date["start_lag"], contrast_cut=date["contrast_cut"])
+    sel.update(unl_info)
     objects = {}
     if sel["classifier"] == "catboost":
         objects["catboost_clf"] = comp.objects["catboost_clf"]

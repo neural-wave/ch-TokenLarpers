@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -88,6 +89,19 @@ def _parse_frame(raw: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     )
     counts = {"rows_bad_epoch": int(bad_epoch.sum()), "rows_bad_energy": int(bad_energy.sum())}
     return frame, counts
+
+
+def iter_chunks(path: str | Path, chunksize: int = 500_000) -> Iterator[tuple[pd.DataFrame, dict]]:
+    """Typed `(frame, counts)` per chunk; same header check, sniffing and parsing as `load_timeseries`.
+
+    Null customer ids become "" (not "nan") so streaming consumers can count and drop them."""
+    with _read(path, chunksize=chunksize) as reader:
+        for raw in reader:
+            raw = raw.rename(columns=lambda c: c.strip())
+            raw["customer_id"] = raw["customer_id"].fillna("")
+            frame, counts = _parse_frame(raw)
+            yield frame, {"rows_total": len(raw), **counts}
+
 
 
 def local_dates(epoch_s: np.ndarray) -> np.ndarray:

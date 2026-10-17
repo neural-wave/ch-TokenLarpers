@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -19,6 +20,9 @@ from pvdetect.features import (
 from pvdetect.io import LoadedTimeseries, day_matrix
 from pvdetect.model import linear_score, sigmoid
 from pvdetect.season import Climatology
+
+if TYPE_CHECKING:
+    from pvdetect.unlabelled import UnlabelledPrior
 
 EXT_COLUMNS = ["customer_id", "extension_date", "pv_capacity_after_extension_kwp"]
 SIGNED_SHARE = 0.01
@@ -37,11 +41,13 @@ class CustomerData:
 
 @dataclass(frozen=True)
 class FeatureTable:
-    """Label-free per-customer data. `cache` holds label-free derived values only (§2 cache rule)."""
+    """Label-free per-customer data. `cache` holds label-free derived values only (§2 cache rule);
+    `unlabelled` is the optional label-free, fold-independent prior from the unlabelled series."""
 
     ids: list[str]
     customers: dict[str, CustomerData | None]
     cache: dict = field(default_factory=dict)
+    unlabelled: UnlabelledPrior | None = None
 
     def dailies(self) -> dict[str, pd.DataFrame]:
         return {c: d.daily for c, d in self.customers.items() if d is not None}
