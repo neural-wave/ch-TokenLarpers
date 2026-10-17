@@ -45,7 +45,6 @@ def test_lowercase_identifier_is_refused(tmp_path: Path):
     assert identifier not in result.stdout + result.stderr
 
 
-
 def test_staged_csv_is_refused(tmp_path: Path):
     result = _stage_and_check(tmp_path, "sample.csv", "customer_id;energy\nA;1\n")
     assert result.returncode == 1
