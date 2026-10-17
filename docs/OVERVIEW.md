@@ -15,7 +15,7 @@ Knowledge lives in hand-built physics features:
 - a season-aware, deseasonalized daytime signal;
 - exact-zero clipping statistics (import-only meters clip PV surplus to zero);
 - a change-point detector with a year-over-year recurrence check;
-- a shoulder-hour deficit that maps to kWp.
+- capacity from the midday pre-vs-post dip and a physics kWp estimate from the pre-install midday level and the width of the zero-reading window around solar noon.
 
 The learned part is small: a logistic or CatBoost classifier on 21 features, a decision threshold, a ridge or CatBoost capacity model and one scale factor. All of these are chosen by inner CV inside a single fit procedure (`Procedure.fit`). Nested CV on the 40 labelled customers is the only real evidence, and every human decision informed by outer results gets a line in `DECISIONS.md`.
 
