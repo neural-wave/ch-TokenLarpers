@@ -38,3 +38,8 @@ def test_offset_lag_is_shrunk_for_few_customers():
 
 def test_offset_median_ignores_minority_lag():
     assert _offset([0] * 8 + [150] * 2) == 0
+
+
+def test_offset_window_admits_errors_up_to_180_days():
+    assert _offset([170] * 10) == 113  # round(170 * 10/15); outside the old 60-day window
+    assert _offset([190] * 10) == 0  # beyond the window: no event contributes
