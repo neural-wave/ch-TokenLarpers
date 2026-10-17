@@ -35,3 +35,15 @@ neuralwave-prepare = "neuralwave_data.prepare:main"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+ignore = ["E702"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F401", "F841", "E402", "E701", "E741"]
+"pvdetect/procedure.py" = ["F841"]
+"train.py" = ["E731", "E741"]

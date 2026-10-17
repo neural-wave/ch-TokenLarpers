@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import datetime as dt
 from dataclasses import dataclass, replace
 
 import numpy as np
