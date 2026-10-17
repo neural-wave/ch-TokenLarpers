@@ -266,33 +266,47 @@ def _season(value: date) -> str:
 
 def _epoch_sequence(index: WindowIndex, cfg: WindowStreamConfig, epoch: int) -> list[tuple[int, int]]:
     rng = np.random.default_rng(np.random.SeedSequence([int(cfg.seed), int(epoch)]))
-    available = [s for s in ("DJF", "MAM", "JJA", "SON") if any(s in ss for ss in index._seasons)]
-    if not available: return []
-    buckets: dict[str, list[tuple[int, int]]] = {s: [] for s in available}
-    for ci, ss in enumerate(index._seasons):
-        for wi, season in enumerate(ss):
-            if season in buckets: buckets[season].append((ci, wi))
-    for values in buckets.values(): rng.shuffle(values)
+    n_cust = len(index._customer_ids)
+    if n_cust == 0 or index.n_windows == 0:
+        return []
     budget = min(cfg.windows_per_epoch, index.n_windows)
+
+    # Group window indices by customer and season
+    cust_windows: list[dict[str, list[int]]] = []
+    for ci, ss in enumerate(index._seasons):
+        cw: dict[str, list[int]] = {}
+        for wi, s in enumerate(ss):
+            cw.setdefault(s, []).append(wi)
+        for s_list in cw.values():
+            rng.shuffle(s_list)
+        cust_windows.append(cw)
+
+    # Order customers randomly for this epoch
+    cust_order = rng.permutation(n_cust).tolist()
+
+    # Round-robin draw across customers, alternating seasons per customer
     picks: list[tuple[int, int]] = []
-    if cfg.season_quota == "proportional":
-        for s in available:
-            count = min(len(buckets[s]), max(1, int(round(budget * len(buckets[s]) / index.n_windows))))
-            picks.extend(buckets[s][:count])
-        picks = picks[:budget]
-    else:
-        quota = budget // len(available)
-        remainder = budget % len(available)
-        for i, s in enumerate(available):
-            count = min(len(buckets[s]), quota + (1 if i < remainder else 0))
-            count = min(len(buckets[s]), max(count, cfg.min_windows_per_available_season))
-            picks.extend(buckets[s][:count])
-        if len(picks) < budget:
-            rest = [x for s in available for x in buckets[s] if x not in set(picks)]
-            rng.shuffle(rest); picks.extend(rest[:budget-len(picks)])
-    # Round-robin customers after season selection prevents one long customer from
-    # consuming the front of an epoch.
-    rng.shuffle(picks)
+    active = list(cust_order)
+    cust_season_idx = {ci: 0 for ci in range(n_cust)}
+
+    while active and len(picks) < budget:
+        next_active = []
+        for ci in active:
+            cw = cust_windows[ci]
+            avail_seasons = [s for s, wlist in cw.items() if wlist]
+            if not avail_seasons:
+                continue
+            s_idx = cust_season_idx[ci] % len(avail_seasons)
+            s_target = avail_seasons[s_idx]
+            cust_season_idx[ci] += 1
+            wi = cw[s_target].pop()
+            picks.append((ci, wi))
+            if len(picks) >= budget:
+                break
+            if any(wlist for wlist in cw.values()):
+                next_active.append(ci)
+        active = next_active
+
     return picks[:budget]
 
 

@@ -108,3 +108,30 @@ def test_interrupted_cpu_resume_reproduces_model_and_sampler(tmp_path, stop_step
         device="cpu", resume=final_snapshots[-1], validation_source=validation)
     assert completed.history == full.history and completed.progress == full.progress
     assert all(torch.equal(full_model.state_dict()[name], resumed_model.state_dict()[name]) for name in full_model.state_dict())
+def test_customer_round_robin_sampling_coverage(tmp_path):
+    parts = []
+    for i in range(6):
+        parts.append(_rows(f"POD-CUST-{i}", 0, 32))
+    path = tmp_path / "measurements.parquet"
+    pd.concat(parts, ignore_index=True).to_parquet(path, index=False)
+    source = EpochSource(path, role="unlabelled_measurements", cache_dir=tmp_path / "cache")
+    stream_cfg = WindowStreamConfig(WindowConfig(context_length=16, stride=8, min_observed_fraction=.5), max_windows_per_customer=8, windows_per_epoch=6, batch_size=2, seed=7)
+    batches = list(source.iter_window_batches(stream_cfg))
+    cids = [cid for b, _ in batches for cid in b.customer_ids]
+    assert len(cids) == 6
+    assert set(cids) == {f"POD-CUST-{i}" for i in range(6)}
+
+
+def test_early_stopping_and_best_checkpoint_saved(tmp_path):
+    path = tmp_path / "measurements.parquet"; _rows("POD-TRAIN", 0, 32).to_parquet(path, index=False)
+    source = EpochSource(path, role="unlabelled_measurements", cache_dir=tmp_path / "cache")
+    val_source = EpochSource.from_frame(_rows("POD-VAL", 0, 32))
+    stream_cfg = WindowStreamConfig(WindowConfig(context_length=16, stride=8, min_observed_fraction=.5), max_windows_per_customer=8, windows_per_epoch=2, batch_size=2, seed=3)
+    train_cfg = PretrainConfig(epochs=4, batch_size=2, learning_rate=.001, amp=False, seed=11, early_stopping_patience=2)
+    enc_cfg = EncoderConfig(context_length=16, patch_length=4, d_model=8, n_heads=2, n_layers=1, dropout=0.)
+    model = build_encoder(enc_cfg, backend="official_patchtst")
+    saved_payloads = []
+    result = pretrain_encoder_stream(model, source, stream_cfg, train_cfg, device="cpu",
+                                    validation_source=val_source, checkpoint=lambda p: saved_payloads.append(p))
+    assert result.progress.get("best_validation_loss") < float("inf")
+    assert any(p.get("is_best") for p in saved_payloads)

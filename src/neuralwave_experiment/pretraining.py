@@ -20,14 +20,17 @@ class PretrainConfig:
     amp: bool = True
     amp_dtype: str = "float16"
     seed: int = 17
+    early_stopping_patience: int | None = None
     def __post_init__(self):
         if self.encoder_backend != "official_patchtst": raise ValueError("pretraining production backend must be official_patchtst")
         if self.epochs < 0 or self.batch_size <= 0 or self.learning_rate <= 0 or not (0 < self.mask_ratio < 1): raise ValueError("invalid pretraining settings")
         if self.amp_dtype not in {"float16", "bfloat16", "fp16", "bf16"}: raise ValueError("amp_dtype must be float16 or bfloat16")
+        if self.early_stopping_patience is not None and self.early_stopping_patience <= 0: raise ValueError("early_stopping_patience must be positive")
     def as_dict(self):
         return {"encoder_backend": self.encoder_backend, "epochs": self.epochs, "batch_size": self.batch_size,
                 "learning_rate": self.learning_rate, "weight_decay": self.weight_decay, "mask_ratio": self.mask_ratio,
-                "grad_clip_norm": self.grad_clip_norm, "amp": self.amp, "amp_dtype": self.amp_dtype, "seed": self.seed}
+                "grad_clip_norm": self.grad_clip_norm, "amp": self.amp, "amp_dtype": self.amp_dtype, "seed": self.seed,
+                "early_stopping_patience": self.early_stopping_patience}
 
 @dataclass
 class PretrainResult:
@@ -117,18 +120,21 @@ def pretrain_encoder_stream(model: torch.nn.Module, source: EpochSource, stream:
     scaler=torch.amp.GradScaler("cuda",enabled=amp_enabled and dtype is torch.float16)
     index=source.index_windows(stream); mask_rng=np.random.default_rng(config.seed)
     sampler=WindowSamplerState(source_order_sha256=index.source_order_sha256,index_sha256=index.index_sha256)
-    progress={"epoch":0,"global_step":0,"windows_seen":0,"batches_seen":0,"running_loss":0.,"last_completed_step":0,"validation_history":[],"pending_validation":False}; history=[]
+    progress={"epoch":0,"global_step":0,"windows_seen":0,"batches_seen":0,"running_loss":0.,"last_completed_step":0,"validation_history":[],"pending_validation":False,"unique_customers_seen":0,"best_validation_loss":float("inf"),"best_validation_step":0,"best_validation_epoch":0,"patience_counter":0}; history=[]
+    customers_seen = set()
     if resume is not None:
         state=resume.get("state",resume); model.load_state_dict(state["model"],strict=True);opt.load_state_dict(state["optimizer"])
         if state.get("scaler") is not None:scaler.load_state_dict(state["scaler"])
         sampler=WindowSamplerState.from_dict(state["sampler"]);progress.update(state.get("progress",{}));history=list(state.get("history",[]))
+        customers_seen = set(progress.get("customers_seen_list", []))
         if state.get("rng") is not None:
             from .checkpoint import restore_rng_state
             restore_rng_state(state["rng"],mask_rng)
-    def emit_checkpoint():
+    best_model_state: dict[str, torch.Tensor] | None = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()} if resume is not None and progress.get("best_validation_loss", float("inf")) < float("inf") else None
+    def emit_checkpoint(is_best: bool = False):
         if checkpoint is not None:
             from .checkpoint import capture_rng_state
-            checkpoint({"schema":"patchtst-unlabelled-pretrain-v1","state":{"model":model.state_dict(),"optimizer":opt.state_dict(),"scaler":scaler.state_dict() if scaler.is_enabled() else None,"sampler":sampler.as_dict(),"progress":dict(progress),"rng":capture_rng_state(mask_rng),"history":list(history)}})
+            checkpoint({"schema":"patchtst-unlabelled-pretrain-v1","is_best":is_best,"state":{"model":model.state_dict(),"optimizer":opt.state_dict(),"scaler":scaler.state_dict() if scaler.is_enabled() else None,"sampler":sampler.as_dict(),"progress":dict(progress),"rng":capture_rng_state(mask_rng),"history":list(history)}})
 
     def validate_pending():
         if not progress["pending_validation"]:
@@ -140,16 +146,32 @@ def pretrain_encoder_stream(model: torch.nn.Module, source: EpochSource, stream:
                     val_loss,_=_batch_loss(model,val_batch,config.mask_ratio,validation_rng,device,torch.autocast(device_type=device,dtype=dtype,enabled=amp_enabled))
                 if val_loss is not None:val_losses.append(float(val_loss.detach().cpu()))
             if not val_losses:raise ValueError("validation source had no valid reconstruction targets")
-            progress["validation_history"].append(float(np.mean(val_losses)))
+            val_mean = float(np.mean(val_losses))
+            progress["validation_history"].append(val_mean)
+            nonlocal best_model_state, stopped
+            if val_mean < progress["best_validation_loss"]:
+                progress["best_validation_loss"] = val_mean
+                progress["best_validation_step"] = progress["global_step"]
+                progress["best_validation_epoch"] = progress["epoch"]
+                progress["patience_counter"] = 0
+                best_model_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                emit_checkpoint(is_best=True)
+            else:
+                progress["patience_counter"] += 1
+                if config.early_stopping_patience is not None and progress["patience_counter"] >= config.early_stopping_patience:
+                    progress["status"] = "early_stopped"
+                    stopped = True
             model.train()
         progress["pending_validation"] = False
-
     validate_pending()
     stopped=False
     for epoch in range(int(progress.get("epoch",0)),config.epochs):
         losses=[]
         for batch,next_sampler in source.iter_window_batches(stream,state=sampler):
             opt.zero_grad(set_to_none=True);loss,traces=_batch_loss(model,batch,config.mask_ratio,mask_rng,device,torch.autocast(device_type=device,dtype=dtype,enabled=amp_enabled));sampler=next_sampler
+            customers_seen.update(batch.customer_ids)
+            progress["unique_customers_seen"] = len(customers_seen)
+            progress["customers_seen_list"] = sorted(customers_seen)
             progress["epoch"]=sampler.epoch;progress["batches_seen"]+=1;progress["windows_seen"]+=len(batch.values)
             progress["pending_validation"] = sampler.epoch > epoch
             if loss is not None:

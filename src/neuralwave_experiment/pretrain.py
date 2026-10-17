@@ -50,7 +50,7 @@ def main(argv=None):
     ap=argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--manifest",required=True,type=Path);ap.add_argument("--exclude-labels",required=True,type=Path)
     ap.add_argument("--out",required=True,type=Path);ap.add_argument("--config",required=True,type=Path)
-    ap.add_argument("--device",choices=["cpu","cuda"],required=True);ap.add_argument("--resume",type=Path);ap.add_argument("--max-steps",type=int)
+    ap.add_argument("--device",choices=["cpu","cuda"],required=True);ap.add_argument("--resume",type=Path);ap.add_argument("--max-steps",type=int);ap.add_argument("--early-stopping-patience",type=int)
     args=ap.parse_args(argv)
     if args.max_steps is not None and args.max_steps <= 0:raise ValueError("--max-steps must be positive")
     if args.out.exists() and any(args.out.iterdir()) and args.resume is None:raise FileExistsError("output directory must be new and empty")
@@ -64,7 +64,7 @@ def main(argv=None):
     train_index=train_source.index_windows(train_index_cfg);val_index=val_source.index_windows(train_index_cfg)
     if set(train_index._customer_ids)&set(val_index._customer_ids):raise ValueError("training and validation unlabelled customers overlap")
     enc_cfg=EncoderConfig(context_length=int(config["context_length"]),patch_length=int(config["patch_length"]),d_model=int(config["d_model"]),n_heads=int(config["n_heads"]),n_layers=int(config["n_layers"]),dropout=float(config["dropout"]))
-    train_cfg=PretrainConfig(epochs=int(config["epochs"]),batch_size=int(config["batch_size"]),learning_rate=float(config["learning_rate"]),weight_decay=float(config["weight_decay"]),mask_ratio=float(config["mask_ratio"]),grad_clip_norm=float(config["grad_clip_norm"]),amp=bool(config["amp"]),amp_dtype=str(config["amp_dtype"]),seed=int(config["seed"]))
+    train_cfg=PretrainConfig(epochs=int(config["epochs"]),batch_size=int(config["batch_size"]),learning_rate=float(config["learning_rate"]),weight_decay=float(config["weight_decay"]),mask_ratio=float(config["mask_ratio"]),grad_clip_norm=float(config["grad_clip_norm"]),amp=bool(config["amp"]),amp_dtype=str(config["amp_dtype"]),seed=int(config["seed"]),early_stopping_patience=args.early_stopping_patience)
     random.seed(train_cfg.seed);np.random.seed(train_cfg.seed);torch.manual_seed(train_cfg.seed);model=build_encoder(enc_cfg,backend="official_patchtst")
     resume=None
     if args.resume:
@@ -72,13 +72,17 @@ def main(argv=None):
     def sink(payload):
         state=payload.get("state",payload); step=int(state.get("progress",{}).get("global_step",0)); meta={"config":config,"source_manifest_sha256":train_source.manifest_sha256,"source_bytes_sha256":train_source.source_bytes_sha256,"source_order_sha256":train_index.source_order_sha256,"index_sha256":train_index.index_sha256,"validation_source_bytes_sha256":val_source.source_bytes_sha256,"validation_source_order_sha256":val_index.source_order_sha256,"validation_index_sha256":val_index.index_sha256,"device":args.device,"amp":bool(train_cfg.amp and args.device=="cuda"),"amp_dtype":train_cfg.amp_dtype}
         save_pretrain_checkpoint(args.out/f"checkpoint_step_{step:08d}.pt",state,meta);save_pretrain_checkpoint(args.out/"checkpoint_latest.pt",state,meta)
+        if payload.get("is_best") or (step > 0 and step == state.get("progress",{}).get("best_validation_step",0)):
+            save_pretrain_checkpoint(args.out/"checkpoint_best.pt",state,meta)
     result=pretrain_encoder_stream(model,train_source,train_index_cfg,train_cfg,device=args.device,resume=resume,checkpoint=sink,validation_source=val_source,validation_stream=train_index_cfg,max_steps=args.max_steps)
-    if args.max_steps is not None and result.progress.get("epoch",0)<train_cfg.epochs:
+    if args.max_steps is not None and result.progress.get("epoch",0)<train_cfg.epochs and result.progress.get("status")!="early_stopped":
         _json(args.out/"run.json",{"status":"paused","history":result.history,"validation_history":result.progress.get("validation_history",[]),"progress":result.progress,"source_role":"unlabelled_measurements","labels_used":False})
         return 0
+    if (args.out / "checkpoint_best.pt").is_file():
+        load_pretrain_checkpoint(args.out / "checkpoint_best.pt", model=model)
     source_info={"population":"unlabelled_only","labels_used":False,"train_customer_count":train_index.n_customers,"val_customer_count":val_index.n_customers,"train_exclusion_hash":hashlib.sha256(_canonical_ids(labels)).hexdigest(),"val_exclusion_hash":hashlib.sha256(_canonical_ids(labels)).hexdigest(),"manifest_sha256":train_source.manifest_sha256}
     export_encoder_artifact(args.out/"encoder",model,encoder_config={"context_length":enc_cfg.context_length,"patch_length":enc_cfg.patch_length,"d_model":enc_cfg.d_model,"n_heads":enc_cfg.n_heads,"n_layers":enc_cfg.n_layers,"dropout":enc_cfg.dropout},window_config={"context_length":train_index_cfg.window.context_length,"stride":train_index_cfg.window.stride,"min_observed_fraction":train_index_cfg.window.min_observed_fraction,"max_windows_per_customer":train_index_cfg.window.max_windows_per_customer},source=source_info)
-    _json(args.out/"run.json",{"history":result.history,"validation_history":result.progress.get("validation_history",[]),"progress":result.progress,"source_role":"unlabelled_measurements","labels_used":False})
+    _json(args.out/"run.json",{"status":result.progress.get("status","completed"),"history":result.history,"validation_history":result.progress.get("validation_history",[]),"progress":result.progress,"source_role":"unlabelled_measurements","labels_used":False})
     return 0
 
 if __name__=="__main__":raise SystemExit(main())
