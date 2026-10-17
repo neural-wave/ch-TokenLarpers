@@ -888,6 +888,12 @@ Every item is a Tier A option inside `Procedure.fit`. Inner CV chooses per fit w
 
 **Unlabelled-data modelling:** remains P5/P6, gated.
 
+### Step 2.5-GUI — Optional local GUI (done, synthetic-verified)
+
+- Scope from the GUI plan (`new-stack/docs/GUI_PLAN.md`): `gui.py` + `pvdetect/gui.py` (loopback stdlib server, spawn worker, synthetic check, diagnostics) and `pvdetect/gui_assets/` (vanilla HTML/CSS/JS, no external resources). `inference.py` exposes `run_inference`; the CLI contract is unchanged.
+- Changes no model gate, Tier A option, threshold, release priority or dependency. The GUI is not part of the submission interface and is never needed by `inference.py`.
+- Verified on synthetic data only: browser downloads byte-identical to an isolated CLI run; malformed input, missing model, cancel, clear and shutdown cleanup exercised; only the loopback origin contacted.
+
 ### Step 2.5-F — Package merge and CI (only if time remains after G is safe)
 
 - One `pyproject.toml` with a `src/` layout; one loader following `main`'s stricter rules:
