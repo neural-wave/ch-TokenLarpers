@@ -83,18 +83,18 @@ The decision threshold $\theta$ is tuned via grid search **strictly on the 32 tr
 
 ### Error Analysis (Out of 40 Total Customers)
 The model classified **37 out of 40 customers correctly**. Only 3 errors occurred:
-* **Missed PV (1 False Negative): `POD37`**
-  * True installation date: **October 17, 2025**.
-  * The dataset ends in **December 2025**.
-  * In Switzerland, late autumn and winter have almost zero solar irradiance. Because `POD37` commissioned right as winter began, there was no sunny summer period recorded in their active history to register a signature.
-* **False Alarms (2 False Positives): `POD52` and `POD59`**
+* **Missed PV (1 False Negative): `Customer FN-1`**
+  * True installation date: Late autumn 2025.
+  * The dataset ends in December 2025.
+  * In Switzerland, late autumn and winter have almost zero solar irradiance. Because `Customer FN-1` commissioned right as winter began, there was no sunny summer period recorded in their active history to register a signature.
+* **False Alarms (2 False Positives): `Customer FP-1` and `Customer FP-2`**
   * Non-PV customers whose seasonal consumption profiles exhibited natural midday drops that marginally crossed the aggregation threshold.
 
 ---
 
 ## 6. Generalization on Completely Unseen, Unlabelled Data
 
-To test the model in the wild on data completely outside the 40 development cases, we sampled 5 unlabelled customers (`POD74` through `POD78`) from the separate 7.4 GB `energy_consumption_unlabelled_dev.csv` file. 
+To test the model in the wild on data completely outside the 40 development cases, we sampled 5 unlabelled customers (`Site U-01` through `Site U-05`) from the separate 7.4 GB `energy_consumption_unlabelled_dev.csv` file. 
 
 The trained PatchTST model had never seen these customers, their timestamps, or their readings:
 
@@ -102,27 +102,27 @@ The trained PatchTST model had never seen these customers, their timestamps, or 
 ==================================================
 === PREDICTIONS ON UNSEEN UNLABELLED CUSTOMERS ===
 ==================================================
-Customer POD74:
+Customer Site U-01:
   -> Model Decision:     NO PV (Standard Demand)
   -> PV Activity Score:  0.0040 (Threshold = 0.50)
   -> Midday avg kWh:     37.16 | Night avg kWh: 19.71 (Commercial daytime peak)
 --------------------------------------------------
-Customer POD75:
+Customer Site U-02:
   -> Model Decision:     NO PV (Standard Demand)
   -> PV Activity Score:  0.0023 (Threshold = 0.50)
   -> Midday avg kWh:     22.15 | Night avg kWh: 15.77 (Standard load)
 --------------------------------------------------
-Customer POD76:
+Customer Site U-03:
   -> Model Decision:     NO PV (Standard Demand)
   -> PV Activity Score:  0.0024 (Threshold = 0.50)
   -> Midday avg kWh:     64.84 | Night avg kWh: 27.63 (High-load industrial)
 --------------------------------------------------
-Customer POD77:
+Customer Site U-04:
   -> Model Decision:     NO PV (Standard Demand)
   -> PV Activity Score:  0.2404 (Threshold = 0.50)
   -> Midday avg kWh:     0.69  | Night avg kWh: 0.13  (Small flat)
 --------------------------------------------------
-Customer POD78:
+Customer Site U-05:
   -> Model Decision:     PV INSTALLED
   -> PV Activity Score:  0.7530 (Threshold = 0.50)
   -> Peak Window Prob:   0.9144 (91.4% confidence!)
@@ -131,40 +131,40 @@ Customer POD78:
 ```
 
 ### Key Takeaway from Unlabelled Inference:
-1. **Non-PV rejection:** Non-PV customers (`POD74`–`POD77`) produce clean near-zero scores ($0.002$–$0.004$). The model is not fooled by heavy daytime consumption spikes (e.g. `POD76` drawing 65 kWh at noon).
-2. **Solar adoption detection in the wild:** `POD78` produced a minimum probability of **$0.0044$** early in their record, which then jumped to a peak of **$0.9144$** in sunny seasons. The model detected solar adoption on a completely unseen household.
+1. **Non-PV rejection:** Non-PV customers (`Site U-01`–`Site U-04`) produce clean near-zero scores ($0.002$–$0.004$). The model is not fooled by heavy daytime consumption spikes (e.g. `Site U-03` drawing 65 kWh at noon).
+2. **Solar adoption detection in the wild:** `Site U-05` produced a minimum probability of **$0.0044$** early in their record, which then jumped to a peak of **$0.9144$** in sunny seasons. The model detected solar adoption on a completely unseen household.
 
-### Extended Wild Generalization: 20 Additional Unseen Customers (POD79 to POD98)
+### Extended Wild Generalization: 20 Additional Unseen Customers (Site U-06 to Site U-25)
 
-To stress-test the model across a broader range of real-world Swiss customer profiles, we evaluated 20 additional, consecutive unlabelled customers (`POD79` through `POD98`) extracted from `energy_consumption_unlabelled_dev.csv` (over 1.5 million interval readings).
+To stress-test the model across a broader range of real-world Swiss customer profiles, we evaluated 20 additional, consecutive unlabelled customers (`Site U-06` through `Site U-25`) extracted from `energy_consumption_unlabelled_dev.csv` (over 1.5 million interval readings).
 
 | Customer ID | Model Decision | Aggregated Score | Min Window Prob | Max Window Prob | Midday Avg (kWh) | Night Avg (kWh) | Physical Interpretation |
 |---|---|---:|---:|---:|---:|---:|---|
-| **`POD79`** | `NO PV` | 0.0638 | 0.0028 | 0.2752 | 17.99 | 12.26 | Standard commercial demand |
-| **`POD80`** | **`PV INSTALLED`** | 0.6910 | 0.0112 | 0.8973 | 10.46 | 1.52 | Mid-record solar adoption |
-| **`POD81`** | **`PV INSTALLED`** | 0.9977 | 0.8228 | 0.9981 | 10.98 | 5.15 | Pre-existing PV (active across all 4 years) |
-| **`POD82`** | `NO PV` | 0.3219 | 0.0038 | 0.9737 | 20.08 | 18.33 | Commercial load; summer dip insufficient for $P_{90}$ |
-| **`POD83`** | **`PV INSTALLED`** | 0.6096 | 0.0052 | 0.9706 | 3.05 | 0.75 | Clear physical adoption ($0.005 \rightarrow 0.971$) |
-| **`POD84`** | **`PV INSTALLED`** | 0.9936 | 0.0032 | 0.9941 | 3.16 | 1.02 | Clean residential adoption ($0.003 \rightarrow 0.994$) |
-| **`POD85`** | `NO PV` | 0.1584 | 0.0058 | 0.2749 | 3.41 | 2.16 | Non-PV residential load |
-| **`POD86`** | **`PV INSTALLED`** | 0.9983 | 0.0027 | 0.9984 | 1.84 | 1.95 | Clean residential adoption ($0.003 \rightarrow 0.998$) |
-| **`POD87`** | **`PV INSTALLED`** | 0.9984 | 0.9435 | 0.9984 | 45.82 | 53.13 | High-load pre-existing PV ($p > 0.94$ everywhere) |
-| **`POD88`** | `NO PV` | 0.2625 | 0.0032 | 0.9872 | 0.70 | 0.39 | Low-demand customer with seasonal variations |
-| **`POD89`** | **`PV INSTALLED`** | 0.5751 | 0.0029 | 0.9552 | 3.98 | 3.05 | Mid-record solar adoption ($0.003 \rightarrow 0.955$) |
-| **`POD90`** | **`PV INSTALLED`** | 0.7707 | 0.0066 | 0.8157 | 2.23 | 0.40 | Clean solar adoption |
-| **`POD91`** | **`PV INSTALLED`** | 0.7122 | 0.0037 | 0.9436 | 23.93 | 7.71 | Medium commercial solar adoption |
-| **`POD92`** | **`PV INSTALLED`** | 0.9982 | 0.0061 | 0.9986 | 23.98 | 35.82 | High-demand solar adoption |
-| **`POD93`** | **`PV INSTALLED`** | 0.8533 | 0.0053 | 0.8991 | 20.46 | 0.70 | High daytime generation |
-| **`POD94`** | `NO PV` | 0.0288 | 0.0029 | 0.7952 | 5.03 | 3.41 | Non-PV; single-window spike ignored by $P_{90}$ |
-| **`POD95`** | `NO PV` | 0.1724 | 0.0031 | 0.3564 | 11.86 | 9.02 | Stable commercial load |
-| **`POD96`** | **`PV INSTALLED`** | 0.9980 | 0.0022 | 0.9981 | 75.51 | 64.04 | Heavy industrial PV adoption |
-| **`POD97`** | `NO PV` | 0.0022 | 0.0020 | 0.0022 | 100.71 | 47.80 | Heavy factory (100 kWh noon); probability dead flat at 0.002 |
-| **`POD98`** | **`PV INSTALLED`** | 0.7913 | 0.0045 | 0.8837 | 13.22 | 1.18 | Clean solar adoption |
+| **`Site U-06`** | `NO PV` | 0.0638 | 0.0028 | 0.2752 | 17.99 | 12.26 | Standard commercial demand |
+| **`Site U-07`** | **`PV INSTALLED`** | 0.6910 | 0.0112 | 0.8973 | 10.46 | 1.52 | Mid-record solar adoption |
+| **`Site U-08`** | **`PV INSTALLED`** | 0.9977 | 0.8228 | 0.9981 | 10.98 | 5.15 | Pre-existing PV (active across all 4 years) |
+| **`Site U-09`** | `NO PV` | 0.3219 | 0.0038 | 0.9737 | 20.08 | 18.33 | Commercial load; summer dip insufficient for $P_{90}$ |
+| **`Site U-10`** | **`PV INSTALLED`** | 0.6096 | 0.0052 | 0.9706 | 3.05 | 0.75 | Clear physical adoption ($0.005 \rightarrow 0.971$) |
+| **`Site U-11`** | **`PV INSTALLED`** | 0.9936 | 0.0032 | 0.9941 | 3.16 | 1.02 | Clean residential adoption ($0.003 \rightarrow 0.994$) |
+| **`Site U-12`** | `NO PV` | 0.1584 | 0.0058 | 0.2749 | 3.41 | 2.16 | Non-PV residential load |
+| **`Site U-13`** | **`PV INSTALLED`** | 0.9983 | 0.0027 | 0.9984 | 1.84 | 1.95 | Clean residential adoption ($0.003 \rightarrow 0.998$) |
+| **`Site U-14`** | **`PV INSTALLED`** | 0.9984 | 0.9435 | 0.9984 | 45.82 | 53.13 | High-load pre-existing PV ($p > 0.94$ everywhere) |
+| **`Site U-15`** | `NO PV` | 0.2625 | 0.0032 | 0.9872 | 0.70 | 0.39 | Low-demand customer with seasonal variations |
+| **`Site U-16`** | **`PV INSTALLED`** | 0.5751 | 0.0029 | 0.9552 | 3.98 | 3.05 | Mid-record solar adoption ($0.003 \rightarrow 0.955$) |
+| **`Site U-17`** | **`PV INSTALLED`** | 0.7707 | 0.0066 | 0.8157 | 2.23 | 0.40 | Clean solar adoption |
+| **`Site U-18`** | **`PV INSTALLED`** | 0.7122 | 0.0037 | 0.9436 | 23.93 | 7.71 | Medium commercial solar adoption |
+| **`Site U-19`** | **`PV INSTALLED`** | 0.9982 | 0.0061 | 0.9986 | 23.98 | 35.82 | High-demand solar adoption |
+| **`Site U-20`** | **`PV INSTALLED`** | 0.8533 | 0.0053 | 0.8991 | 20.46 | 0.70 | High daytime generation |
+| **`Site U-21`** | `NO PV` | 0.0288 | 0.0029 | 0.7952 | 5.03 | 3.41 | Non-PV; single-window spike ignored by $P_{90}$ |
+| **`Site U-22`** | `NO PV` | 0.1724 | 0.0031 | 0.3564 | 11.86 | 9.02 | Stable commercial load |
+| **`Site U-23`** | **`PV INSTALLED`** | 0.9980 | 0.0022 | 0.9981 | 75.51 | 64.04 | Heavy industrial PV adoption |
+| **`Site U-24`** | `NO PV` | 0.0022 | 0.0020 | 0.0022 | 100.71 | 47.80 | Heavy factory (100 kWh noon); probability dead flat at 0.002 |
+| **`Site U-25`** | **`PV INSTALLED`** | 0.7913 | 0.0045 | 0.8837 | 13.22 | 1.18 | Clean solar adoption |
 
 ### Three Distinct Physical Archetypes Recognized in the Wild:
-1. **The Heavy Industrial Non-PV Site (`POD97`):** Consumes over 100 kWh during midday and 48 kWh at night. The model output is dead flat at **$0.0020$–$0.0022$**, completely unbothered by the immense power volume.
-2. **The Clean Mid-Record Adoption (`POD83`, `POD84`, `POD86`, `POD89`, `POD92`, `POD96`):** The model registers baseline probabilities of **$0.002$–$0.006$** early in history, and then jumps sharply to **$0.95$–$0.998$** post-commissioning.
-3. **The Pre-Existing Solar Site (`POD81`, `POD87`):** The model registers high probabilities ($0.82$–$0.998$) across their entire 4-year history, correctly identifying that the installation was commissioned prior to the recording start.
+1. **The Heavy Industrial Non-PV Site (`Site U-24`):** Consumes over 100 kWh during midday and 48 kWh at night. The model output is dead flat at **$0.0020$–$0.0022$**, completely unbothered by the immense power volume.
+2. **The Clean Mid-Record Adoption (`Site U-10`, `Site U-11`, `Site U-13`, `Site U-16`, `Site U-19`, `Site U-23`):** The model registers baseline probabilities of **$0.002$–$0.006$** early in history, and then jumps sharply to **$0.95$–$0.998$** post-commissioning.
+3. **The Pre-Existing Solar Site (`Site U-08`, `Site U-14`):** The model registers high probabilities ($0.82$–$0.998$) across their entire 4-year history, correctly identifying that the installation was commissioned prior to the recording start.
 ---
 
 ## 7. Direct Progression to Tasks 2 and 3
@@ -182,8 +182,8 @@ The probability trace $\mathbf{p} = [p_1, \dots, p_T]$ produced by PatchTST form
 Across the 40 real development customers evaluated out-of-fold:
 * **True Positives:** 21 / 22 PV customers correctly detected.
 * **True Negatives:** 16 / 18 non-PV customers correctly rejected.
-* **False Alarms:** 2 customers (`POD52`, `POD59`).
-* **Missed PV:** 1 customer (`POD37`).
+* **False Alarms:** 2 customers (`Customer FP-1`, `Customer FP-2`).
+* **Missed PV:** 1 customer (`Customer FN-1`).
 * **Overall Accuracy:** $37 / 40 = \mathbf{92.5\%}$.
 * **Exact F1 Formula:** $\frac{2 \times 21}{2 \times 21 + 2 + 1} = \frac{42}{45} = \mathbf{0.9333}$.
 
@@ -202,8 +202,8 @@ The validity of the score rests on three leak-prevention mechanisms:
 
 ### D. Three Physical Failure Modes on the Hidden Test Set
 On the 20 hidden test cases, three physical edge cases could cause detection errors:
-1. **Late Autumn/Winter Commissioning (Observed in `POD37`):**
-   * If a system is commissioned in November 2025 and the dataset ends in December 2025, Swiss winter overcast skies produce negligible solar generation. The daytime depression is too faint to overcome normal household heating/lighting variations.
+1. **Late Autumn/Winter Commissioning (Observed in `Customer FN-1`):**
+   * If a system is commissioned late in the year and the dataset ends shortly after, Swiss winter overcast skies produce negligible solar generation. The daytime depression is too faint to overcome normal household heating/lighting variations.
 2. **100% Daytime Self-Consumption (Behind-the-Meter Saturation):**
    * If a customer installs a small PV array (e.g. 2 kWp) but operates continuous heavy daytime loads (e.g. industrial refrigeration, heat pumps, EV chargers), all solar energy is consumed locally. The grid import profile never exhibits a net midday dip, making PV mathematically unidentifiable from grid import alone.
 3. **Battery Energy Storage Systems (BESS):**
