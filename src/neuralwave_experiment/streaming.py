@@ -253,19 +253,23 @@ class EpochSource:
         for series in self.iter_customers():
             if self.role == "unlabelled_measurements" and series.customer_id in self._labelled_ids:
                 raise ValueError("unlabelled source overlaps labelled customer IDs")
-            window_cfg = WindowConfig(context_length=cfg.window.context_length, stride=cfg.window.stride,
-                                      min_observed_fraction=cfg.window.min_observed_fraction,
-                                      max_windows_per_customer=min(cfg.max_windows_per_customer,
-                                                                    cfg.window.max_windows_per_customer or cfg.max_windows_per_customer))
-            windows = build_windows(series.frame, window_cfg)
-            if len(windows.values) == 0: continue
             shard = self._shard_path(series.customer_id, cfg)
-            if not shard.exists():
+            if shard.exists():
+                with np.load(shard, allow_pickle=False) as z:
+                    dates_arr = z["center_dates"]
+                cust_seasons = tuple(_season(date.fromisoformat(str(d))) for d in dates_arr)
+            else:
+                window_cfg = WindowConfig(context_length=cfg.window.context_length, stride=cfg.window.stride,
+                                          min_observed_fraction=cfg.window.min_observed_fraction,
+                                          max_windows_per_customer=min(cfg.max_windows_per_customer,
+                                                                        cfg.window.max_windows_per_customer or cfg.max_windows_per_customer))
+                windows = build_windows(series.frame, window_cfg)
+                if len(windows.values) == 0: continue
                 np.savez_compressed(shard, values=windows.values, observed=windows.observed,
                                     calendar=windows.calendar, magnitude=windows.magnitude,
                                     start_epochs=windows.start_epochs,
                                     center_dates=np.asarray([d.isoformat() for d in windows.center_dates], dtype="U10"))
-            cust_seasons = tuple(_season(d) for d in windows.center_dates)
+                cust_seasons = tuple(_season(d) for d in windows.center_dates)
             for s in cust_seasons: season_counts[s] += 1
             customers.append(series.customer_id); shards.append(str(shard)); seasons.append(cust_seasons); n_windows += len(cust_seasons)
         source_order = hashlib.sha256("\n".join(customers).encode()).hexdigest()
