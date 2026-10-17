@@ -136,3 +136,58 @@ def test_cnn_artifact_roundtrip_preserves_customer_scores(cnn_data, tmp_path):
     loaded = load_model(path)
     actual = fh.fraunhofer_customer_scores(loaded["_objects"]["fraunhofer"], table, table.ids)
     np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
+
+
+def test_persistent_evidence_survives_long_preinstallation_history():
+    dates = np.datetime64("2022-01-03") + np.arange(156) * np.timedelta64(7, "D")
+    probabilities = np.r_[np.full(152, 0.05), [0.92, 0.85, 0.96, 0.88]]
+    assert fh._persistent_week_score(probabilities, dates) == pytest.approx(0.85)
+    assert fh._persistent_week_score(probabilities[-4:], dates[-4:]) == pytest.approx(0.85)
+
+
+@pytest.mark.parametrize("high_weeks", [[], [0], [0, 1, 2], [0, 2, 4, 6]])
+def test_isolated_or_short_bursts_do_not_establish_persistence(high_weeks):
+    dates = np.datetime64("2024-01-01") + np.arange(8) * np.timedelta64(7, "D")
+    probabilities = np.full(8, 0.1)
+    probabilities[high_weeks] = 0.99
+    assert fh._persistent_week_score(probabilities, dates) == pytest.approx(0.1)
+
+
+def test_missing_week_breaks_run_and_dates_are_ordered():
+    dates = np.datetime64("2024-01-01") + np.array([0, 1, 3, 4]) * np.timedelta64(7, "D")
+    assert fh._persistent_week_score(np.full(4, 0.9), dates) == 0.0
+    assert fh._persistent_week_score(np.full(3, 0.9), dates[:3]) == 0.0
+    dates = np.datetime64("2024-01-01") + np.arange(4) * np.timedelta64(7, "D")
+    order = [2, 0, 3, 1]
+    assert fh._persistent_week_score(np.array([0.9, 0.8, 0.7, 0.6])[order], dates[order]) == pytest.approx(0.6)
+
+
+def test_customer_weights_equalize_history_mass_and_weight_class_balance():
+    owners = np.array(["a", "a"] + ["b"] * 6)
+    labels = np.array([0., 1.] + [1.] * 6, dtype=np.float32)
+    weights, positive_weight = fh._training_weights(owners, labels)
+    assert weights[owners == "a"].sum() == pytest.approx(4.)
+    assert weights[owners == "b"].sum() == pytest.approx(4.)
+    assert positive_weight == pytest.approx(1. / 3.)
+
+
+def test_repeating_one_customer_history_preserves_loss_and_gradient():
+    owners = np.array(["a", "a", "b", "b"])
+    labels = np.array([0., 1., 0., 0.], dtype=np.float32)
+    features = torch.tensor([[1., 0.], [0., 1.], [1., 1.], [-1., 1.]])
+
+    def objective(indices):
+        weights, positive_weight = fh._training_weights(owners[indices], labels[indices])
+        coefficient = torch.tensor([0.3, -0.2], requires_grad=True)
+        losses = torch.nn.functional.binary_cross_entropy_with_logits(
+            features[indices] @ coefficient, torch.tensor(labels[indices]),
+            pos_weight=torch.tensor(positive_weight), reduction="none",
+        )
+        loss = (losses * torch.tensor(weights)).mean()
+        loss.backward()
+        return loss.detach(), coefficient.grad
+
+    loss, gradient = objective(np.arange(4))
+    repeated_loss, repeated_gradient = objective(np.array([0, 1] + [2, 3] * 9))
+    torch.testing.assert_close(repeated_loss, loss)
+    torch.testing.assert_close(repeated_gradient, gradient)

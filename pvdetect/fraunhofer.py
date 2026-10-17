@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 KDE_GRID = np.linspace(-5.0, 15.0, 100, dtype=np.float32)
 KDE_H = 0.25
+PERSISTENCE_WEEKS = 4
 
 
 def fast_kde_batch(X: np.ndarray, grid: np.ndarray = KDE_GRID, h: float = KDE_H) -> np.ndarray:
@@ -230,6 +231,16 @@ class CombinedClassifier(nn.Module):
         return self.head(f_comb).squeeze(-1)
 
 
+def _training_weights(customer_ids: np.ndarray, labels: np.ndarray) -> tuple[np.ndarray, float]:
+    """Equal customer mass, with class balance measured under that same mass."""
+    _, owner, counts = np.unique(customer_ids, return_inverse=True, return_counts=True)
+    weights = len(labels) / (len(counts) * counts[owner])
+    n_pos = float(np.dot(weights, labels))
+    n_neg = float(np.dot(weights, 1.0 - labels))
+    pos_weight = max(0.1, n_neg / n_pos) if n_pos > 0 else 1.0
+    return weights.astype(np.float32), pos_weight
+
+
 def train_fraunhofer(
     train_ds: WindowDataset,
     epochs: tuple[int, int, int] = (40, 30, 20),
@@ -247,16 +258,16 @@ def train_fraunhofer(
     n = len(train_ds.labels)
     if n == 0:
         raise ValueError("CNN training requires at least one labelled, sufficiently covered week")
-    n_pos = float(train_ds.labels.sum())
-    n_neg = n - n_pos
-    pos_weight = torch.tensor([max(0.1, n_neg / max(1.0, n_pos))], dtype=torch.float32, device=device)
-    loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    weights, positive_weight = _training_weights(train_ds.customer_ids, train_ds.labels)
+    pos_weight = torch.tensor([positive_weight], dtype=torch.float32, device=device)
+    loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction="none")
 
     x_kde = torch.from_numpy(train_ds.kdes).to(device)
     x_seq = torch.from_numpy(train_ds.series).to(device)
     y = torch.from_numpy(train_ds.labels).to(device)
 
-    dataset = TensorDataset(x_kde, x_seq, y)
+    sample_weights = torch.from_numpy(weights).to(device)
+    dataset = TensorDataset(x_kde, x_seq, y, sample_weights)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     mlp = MLPBranch().to(device)
@@ -266,10 +277,10 @@ def train_fraunhofer(
     opt_mlp = torch.optim.Adam(mlp.parameters(), lr=lr)
     mlp.train()
     for _ in range(epochs[0]):
-        for b_kde, _, b_y in loader:
+        for b_kde, _, b_y, b_weight in loader:
             opt_mlp.zero_grad()
             logits, _ = mlp(b_kde)
-            loss = loss_fn(logits, b_y)
+            loss = (loss_fn(logits, b_y) * b_weight).mean()
             loss.backward()
             opt_mlp.step()
 
@@ -277,10 +288,10 @@ def train_fraunhofer(
     opt_cnn = torch.optim.Adam(cnn.parameters(), lr=lr)
     cnn.train()
     for _ in range(epochs[1]):
-        for _, b_seq, b_y in loader:
+        for _, b_seq, b_y, b_weight in loader:
             opt_cnn.zero_grad()
             logits, _ = cnn(b_seq)
-            loss = loss_fn(logits, b_y)
+            loss = (loss_fn(logits, b_y) * b_weight).mean()
             loss.backward()
             opt_cnn.step()
 
@@ -297,10 +308,10 @@ def train_fraunhofer(
     opt_head = torch.optim.Adam(model.head.parameters(), lr=lr)
     model.head.train()
     for _ in range(epochs[2]):
-        for b_kde, b_seq, b_y in loader:
+        for b_kde, b_seq, b_y, b_weight in loader:
             opt_head.zero_grad()
             logits = model(b_kde, b_seq)
-            loss = loss_fn(logits, b_y)
+            loss = (loss_fn(logits, b_y) * b_weight).mean()
             loss.backward()
             opt_head.step()
 
@@ -335,14 +346,32 @@ def predict_fraunhofer(
     return np.concatenate(probs).astype(np.float32)
 
 
+def _persistent_week_score(probabilities: np.ndarray, dates: np.ndarray) -> float:
+    """Strongest four-calendar-week run, limited by its weakest weekly score.
+
+    Missing/rejected weeks break a run. Histories with fewer than four
+    consecutive usable weeks have no supported persistent evidence.
+    """
+    if len(probabilities) < PERSISTENCE_WEEKS:
+        return 0.0
+    order = np.argsort(dates)
+    dates = np.asarray(dates)[order].astype("datetime64[D]")
+    probabilities = np.asarray(probabilities)[order]
+    best = 0.0
+    for start in range(len(dates) - PERSISTENCE_WEEKS + 1):
+        stop = start + PERSISTENCE_WEEKS
+        if np.all(np.diff(dates[start:stop]) == np.timedelta64(7, "D")):
+            best = max(best, float(probabilities[start:stop].min()))
+    return best
+
+
 def fraunhofer_customer_scores(
     model: CombinedClassifier,
     table,
     ids: Sequence[str],
-    percentile: float = 90.0,
     device: str | torch.device | None = None,
 ) -> np.ndarray:
-    """Compute 90th-percentile customer-level PV probabilities for the given customer IDs."""
+    """Score persistent PV evidence without dilution by earlier non-PV history."""
     if device is None:
         device = next(model.parameters()).device
     ds = build_window_dataset(table.customers, labels_df=None, ids=ids)
@@ -353,7 +382,7 @@ def fraunhofer_customer_scores(
     for cid in ids:
         mask = ds.customer_ids == cid
         if mask.any():
-            scores.append(float(np.percentile(probs[mask], percentile)))
+            scores.append(_persistent_week_score(probs[mask], ds.week_start_dates[mask]))
         else:
             scores.append(0.0)
     return np.array(scores, dtype=np.float32)
