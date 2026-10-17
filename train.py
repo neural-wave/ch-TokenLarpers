@@ -13,6 +13,7 @@ import pandas as pd
 from pvdetect.evaluation import REGIMES, count_decisions, load_split_file, nested_cv, outer_splits, splits_from_fold_map
 from pvdetect.io import load_extension_labels, load_labels, load_timeseries
 from pvdetect.model import save_model
+from pvdetect.output import write_oof
 from pvdetect.pipeline import build_feature_table, predict
 from pvdetect.procedure import export_enabled_for, fit
 
@@ -53,9 +54,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--outer-repeats", type=int, default=4)
     ap.add_argument("--report-dir")
     ap.add_argument("--folds", help="comma-separated split files (customer_id, fold); each file is one outer repeat")
+    ap.add_argument("--oof-out", help="write the shared out-of-fold prediction file (requires --cv)")
     args = ap.parse_args(argv)
     if args.folds and not args.cv:
         ap.error("--folds requires --cv")
+    if args.oof_out and not args.cv:
+        ap.error("--oof-out requires --cv")
 
     loaded = load_timeseries(args.timeseries)
     labels = load_labels(args.labels)
@@ -120,6 +124,16 @@ def main(argv: list[str] | None = None) -> int:
             print(_selection_line(res.fit_infos))
             if args.report_dir:
                 _write_report(Path(args.report_dir), res, labels)
+            if args.oof_out:
+                if fold_maps is None:
+                    fold_maps = [{c: j for j, (_, test) in enumerate(r) for c in test} for r in splits]
+                write_oof(
+                    pd.concat(
+                        [p.assign(repeat=r, fold=p["customer_id"].map(fold_maps[r])) for r, p in enumerate(res.oof)],
+                        ignore_index=True,
+                    ),
+                    Path(args.oof_out),
+                )
 
     model = fit(table, labels, ids)
     save_model(model, args.out)

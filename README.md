@@ -53,6 +53,23 @@ Inside each fit, inner CV on the training customers chooses: logistic regression
 
 Dates come from one of three regimes: `event` (detected changepoint + learned offset), `present_at_start` (PV already present when data starts: first date − learned lag), `insufficient` (weak candidate or first date, chosen by inner CV).
 
+### Shared-fold comparison
+
+Pipelines on different branches are compared through one split file set, one prediction contract and one scorer, not a package merge. `--folds F0,F1,...` replaces the internal repeated stratified folds: each split file (`splits.parquet` from `neuralwave_data.prepare`, or a `;`/`,` CSV with `customer_id,fold`) is one outer repeat, in the given order, and must assign every labelled customer to exactly one integer fold (extra IDs are ignored; errors report counts only). `--oof-out PATH` writes the shared out-of-fold file `customer_id;repeat;fold;prob;pv_installed;pv_installation_date;pv_capacity_kwp` (`repeat` = position of the split file, `fold` = its fold value), with no labels, features or regimes. The canonical comparison scorer is `python -m neuralwave_experiment.oof_contract` on the `time-series-embeddings` branch; `pvdetect.scoring` stays pvdetect's internal scorer.
+
+Matched run (data holder, private directory only):
+
+```
+python -m neuralwave_data.prepare <manifest> --out <private>/prep_s{0,1,2} --folds 5 --seed {0,1,2}
+python train.py --timeseries <dev energy> --labels <dev labels> --out <private>/pvdetect/model.json --cv \
+  --folds <private>/prep_s0/splits.parquet,<private>/prep_s1/splits.parquet,<private>/prep_s2/splits.parquet \
+  --oof-out <private>/pvdetect_oof.csv
+python -m neuralwave_experiment.task1_detector ... --splits <same three files> --oof-out <private>/patchtst_oof.csv
+python -m neuralwave_experiment.oof_contract --labels <dev labels> <private>/pvdetect_oof.csv <private>/patchtst_oof.csv
+```
+
+Only the printed aggregate lines leave the private directory. PatchTST writes empty date and capacity (D = P = 0), so compare F1 separately from the full score. The comparison is a Tier B decision and gets a `DECISIONS.md` line.
+
 ### Review plots (dev requirement: matplotlib)
 
 ```

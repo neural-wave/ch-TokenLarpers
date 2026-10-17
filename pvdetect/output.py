@@ -10,6 +10,7 @@ import pandas as pd
 
 PRED_HEADER = ["customer_id", "pv_installed", "pv_installation_date", "pv_capacity_kwp"]
 EXT_HEADER = ["customer_id", "extension_date", "pv_capacity_after_extension_kwp"]
+OOF_HEADER = ["customer_id", "repeat", "fold", "prob", "pv_installed", "pv_installation_date", "pv_capacity_kwp"]
 
 
 def _date(v) -> str:
@@ -46,3 +47,26 @@ def write_extensions(ext: pd.DataFrame, out_dir: Path) -> None:
         w.writerow(EXT_HEADER)
         for row in ext.itertuples(index=False):
             w.writerow([str(row.customer_id), _date(row.extension_date), _kwp(row.pv_capacity_after_extension_kwp)])
+
+
+def write_oof(pred: pd.DataFrame, path: Path) -> None:
+    """Shared out-of-fold file (`oof_contract.OOF_COLUMNS`), sorted by repeat, fold, customer_id."""
+    rows = sorted(pred.itertuples(index=False), key=lambda r: (int(r.repeat), int(r.fold), str(r.customer_id)))
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f, delimiter=";", lineterminator="\n")
+        w.writerow(OOF_HEADER)
+        for row in rows:
+            on = bool(row.pv_installed)
+            w.writerow(
+                [
+                    str(row.customer_id),
+                    str(int(row.repeat)),
+                    str(int(row.fold)),
+                    f"{float(row.prob):.6f}",
+                    "TRUE" if on else "FALSE",
+                    _date(row.pv_installation_date) if on else "",
+                    _kwp(row.pv_capacity_kwp) if on else "",
+                ]
+            )
