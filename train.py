@@ -101,6 +101,17 @@ def main(argv: list[str] | None = None) -> int:
                 f"D={res.mean('D'):.3f} P={res.mean('P'):.3f} inner={_fmt(inner, 2)} gap={_fmt(inner - res.mean('score'), 2)} "
                 f"outer_informed_decisions={k}{biased}"
             )
+            # Exact split of 100 − score = 100·(1−F1) + 15·F1·(1−D) + 15·F1·(1−P), averaged over repeats.
+            lost = {
+                "detection": np.mean([100 * (1 - s["f1"]) for s in res.repeat_scores]),
+                "dates": np.mean([15 * s["f1"] * (1 - s["D"]) for s in res.repeat_scores]),
+                "capacity": np.mean([15 * s["f1"] * (1 - s["P"]) for s in res.repeat_scores]),
+            }
+            print(
+                "points_lost: "
+                + " ".join(f"{k}={v:.2f}" for k, v in lost.items())
+                + f" largest={max(lost, key=lost.get)}"
+            )
             by = {r: [x["by_regime"][r] for x in res.regimes] for r in REGIMES}
             print(
                 "dates: "

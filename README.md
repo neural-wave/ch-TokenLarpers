@@ -45,7 +45,7 @@ History and visibility: commits `e303f6d`, `1f875b6`, `a65b552` and `086eda8` on
 python train.py --timeseries energy.csv --labels labels.csv --out <private>/model.json [--cv] [--outer-repeats 4] [--report-dir DIR] [--folds F0,F1,...] [--oof-out PATH]
 ```
 
-`--cv` runs nested customer-level cross-validation of the whole training procedure and prints aggregate lines only: `data:` (including whether readings are signed, which switches export features on), `nested:` (score ± SD over repeats, bootstrap 90% interval, F1/D/P, `inner=`/`gap=` for the inner-vs-outer score gap, and `outer_informed_decisions=k`), `dates:` (date accuracy per regime), `regime_confusion:`, `selection:` (how often each inner-CV choice was made). The final model is always fit on all labelled customers. `--report-dir` writes the repeat-0 out-of-fold table (`oof_repeat0.csv`) and selection records. A model trained on real data goes to a private path outside this repository; it reaches the NW_26 repository only through the export below (`## Submission export`).
+`--cv` runs nested customer-level cross-validation of the whole training procedure and prints aggregate lines only: `data:` (including whether readings are signed, which switches export features on), `nested:` (score ± SD over repeats, bootstrap 90% interval, F1/D/P, `inner=`/`gap=` for the inner-vs-outer score gap, and `outer_informed_decisions=k`), `points_lost:` (the exact split of `100 − score` into detection `100·(1−F1)`, dates `15·F1·(1−D)` and capacity `15·F1·(1−P)`, with the largest named; it picks the Step 2.5-E branch), `dates:` (date accuracy per regime), `regime_confusion:`, `selection:` (how often each inner-CV choice was made). These lines are AIL-derived: they stay with the team and never go into an agent session (organizer answer 6). The final model is always fit on all labelled customers. `--report-dir` writes the repeat-0 out-of-fold table (`oof_repeat0.csv`) and selection records. A model trained on real data goes to a private path outside this repository; it reaches the NW_26 repository only through the export below (`## Submission export`).
 
 Inside each fit, inner CV on the training customers chooses: logistic regression vs CatBoost (CatBoost needs ≥2.0 points and a stable bootstrap), the decision threshold, ridge vs CatBoost capacity, a capacity factor κ, and the date rule for weak-evidence customers. The week-of-year climatology (from labelled non-PV training customers) deseasonalizes the changepoint signal; candidates whose step recurs at the same time in other years are rejected.
 
@@ -68,7 +68,7 @@ python -m neuralwave_experiment.task1_detector ... --splits <same three files> -
 python -m neuralwave_experiment.oof_contract --labels <dev labels> <private>/pvdetect_oof.csv <private>/patchtst_oof.csv
 ```
 
-Only the printed aggregate lines leave the private directory. PatchTST writes empty date and capacity (D = P = 0), so compare F1 separately from the full score. The comparison is a Tier B decision and gets a `DECISIONS.md` line.
+Only the printed aggregate lines leave the private directory, and only to teammates, never to an agent. PatchTST writes empty date and capacity (D = P = 0), so compare F1 separately from the full score. The comparison is a Tier B decision and gets a `DECISIONS.md` line.
 
 ### Review plots (dev requirement: matplotlib)
 
@@ -113,7 +113,7 @@ Design credit: the visual design (dark Quartz layout, palette, chart styling and
 
 ## Submission export
 
-The trained model never enters this repository's history: the hygiene hook blocks `artifacts/` and every `.cbm`. It reaches the NW_26 repository only through the export script below or through the organizer-approved private channel (files placed into `artifacts/` next to `inference.py`, which loads them automatically).
+The trained model never enters this repository's history: the hygiene hook blocks `artifacts/` and every `.cbm`. It reaches the NW_26 repository through the export script below, which the organizers allow (answer 2): the exported repository carries `artifacts/model.json` and its sibling files next to `inference.py`, which loads them automatically.
 
 ```
 sh scripts/export_submission.sh COMMIT DEST [MODEL_DIR]
@@ -151,13 +151,18 @@ Every full run starts with the pilot and is refused if the projection exceeds `-
 
 ## Organizer clarifications
 
-Questions for the organizers (Step 2.5-H, sent by the team); answers get recorded here.
+Questions for the organizers (Step 2.5-H and the team's Discord questions); answers get recorded here.
 
-1. May semi-synthetic augmentation of the provided series be used in the competitive model? *Awaiting answer.*
-2. May the trained model files (JSON parameters with aggregate statistics over the 40 development customers, and CatBoost model files) be published in the open-sourced NW_26 repo? *Awaiting answer.*
-3. If not, which private channel should deliver them (e.g. direct upload or Swisstransfer), with the organizers placing them into `artifacts/` next to `inference.py`? *Awaiting answer.*
-
-Until answer 2 arrives we plan for the private channel. `inference.py` loads `artifacts/model.json` automatically, so that route needs no code change.
+1. May semi-synthetic augmentation of the provided series be used in the competitive model? *Awaiting answer* (not covered by the answers below; Step 19 stays gated).
+2. May the trained model files be published in the NW_26 repo? **Yes** (2026-10-17): a pre-trained model may be included in the repository. `scripts/export_submission.sh COMMIT DEST MODEL_DIR` copies it into `DEST/artifacts/`; the private channel is no longer needed.
+3. Sunrise/sunset or solar elevation computed for an assumed location? **No**: it counts as location data, and the customers are spread across Switzerland. Calendar features from the timestamps only (the pipeline uses fixed UTC+1 clock windows).
+4. Pseudo-labelling / self-training on the unlabelled series? **Yes**, semi-supervised and hybrid approaches are allowed.
+5. Are the 20 hidden test customers in the unlabelled set? **No**, there is no overlap.
+6. May per-customer or aggregate statistics derived from AIL data be shared with an LLM coding assistant? **No**, not even aggregates. Real-data outputs (`train.py --cv` lines, review plots, OOF files) stay with the data holder and are never pasted into an agent session or a file an agent reads.
+7. Test data: same 2022–2025 period, already filtered to the evaluated POD customers.
+8. Evaluation: no internet; any Python version (document it); no formal time or memory limit, fast is appreciated.
+9. Date scoring: linear, 1.0 at 0 days, 0.5 at 15 days, 0 at ≥ 30 days (matches `pvdetect.scoring`).
+10. Installs before 2022: none in the labelled set; possible in the unlabelled set (never checked).
 
 ## Status
 
