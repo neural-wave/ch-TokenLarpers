@@ -6,6 +6,8 @@ Status note (2026-10-17, `main`): evaluation protocol v2 (`docs/evaluation_lockb
 
 Status note (2026-10-17, `main`): recall-targeted Tier A options `recent` and `smallpv` (label-free feature blocks) are in the default inner pool, with dev scenarios `late_install` and `small_pv`; inner CV decides per fit, and `--no-recent` / `--no-smallpv` remove them. Synthetic only; nothing is validated on real data (README, "Recall-targeted options").
 
+Status note (2026-10-17, `main`): Tier A options `date_debias` (per-regime median signed date error of the fit's own inner out-of-fold true positives, cross-fitted across inner folds in the comparison, stored as `date.date_bias`) and `cap_ceiling` (capacity band `[q05/1.5, q95×1.5]` of the fit's labelled kWp with the training-median fallback, stored as `capacity.band`; the [0.5, 500] clip stays) are in the default pool, scored after pseudo-labelling on the selected inner OOF by the margin rule, with `--no-date-debias` / `--no-cap-ceiling`. Unlocked from the categorical failure modes of the frozen run's out-of-fold diagnosis (late date bias, capacity at the clip; no numbers). Synthetic (Tier R) only: `label_lead_60` late bias corrected; `cap_outlier` clip hit replaced inside the band; neither is evidence of real accuracy.
+
 ## 0. Decisions and audit
 
 ### 0.1 User decision: no isolation gate
