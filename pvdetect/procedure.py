@@ -331,23 +331,53 @@ def _full_inner_score(oof: pd.DataFrame, sel: dict) -> float:
     pred, truth = _full_inner_predictions(oof, sel)
     return float(main_score(pred, truth)["score"])
 
+def _score_precomputed(pred: pd.DataFrame, truth: pd.DataFrame):
+    t_pv = truth["pv_installed"].to_numpy(bool)
+    p_pv = pred["pv_installed"].to_numpy(bool)
+    t_dates = pd.to_datetime(truth["pv_installation_date"]).to_numpy("datetime64[D]").astype(float)
+    p_dates = pd.to_datetime(pred["pv_installation_date"]).to_numpy("datetime64[D]").astype(float)
+    days = np.abs(p_dates - t_dates)
+    d_i = np.where(np.isfinite(days), np.maximum(0.0, 1.0 - days / 30.0), 0.0)
+
+    t_cap = truth["pv_capacity_kwp"].to_numpy(float)
+    p_cap = pred["pv_capacity_kwp"].to_numpy(float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ape = np.abs(p_cap - t_cap) / t_cap
+    p_i = np.where(np.isfinite(ape) & (p_cap > 0) & (t_cap > 0), np.maximum(0.0, 1.0 - ape / 0.5), 0.0)
+    return t_pv, p_pv, d_i, p_i
+
+
+def _score_from_arrays(t_pv, p_pv, d_i, p_i, idx):
+    t_idx = t_pv[idx]
+    p_idx = p_pv[idx]
+    tp_mask = t_idx & p_idx
+    tp = int(tp_mask.sum())
+    if tp == 0:
+        return 0.0
+    fp = int((~t_idx & p_idx).sum())
+    fn = int((t_idx & ~p_idx).sum())
+    f1 = 2.0 * tp / (2.0 * tp + fp + fn)
+    D = float(d_i[idx][tp_mask].mean())
+    P = float(p_i[idx][tp_mask].mean())
+    return float(f1 * (70.0 + 15.0 * D + 15.0 * P))
+
 
 def _paired_bootstrap_stability(
     base_oof: pd.DataFrame, base_sel: dict, emb_oof: pd.DataFrame, emb_sel: dict, B: int = 1000
 ) -> float:
-    from pvdetect.scoring import main_score
-
     bp, truth = _full_inner_predictions(base_oof, base_sel)
     ep, _ = _full_inner_predictions(emb_oof, emb_sel)
+    tb, pb, db, capb = _score_precomputed(bp, truth)
+    te, pe, de, cape = _score_precomputed(ep, truth)
     rng = np.random.default_rng(0)
+    n = len(truth)
     better = 0
     for _ in range(B):
-        idx = rng.integers(0, len(truth), len(truth))
-        sb = main_score(bp.iloc[idx], truth.iloc[idx])["score"]
-        se = main_score(ep.iloc[idx], truth.iloc[idx])["score"]
+        idx = rng.integers(0, n, n)
+        sb = _score_from_arrays(tb, pb, db, capb, idx)
+        se = _score_from_arrays(te, pe, de, cape, idx)
         better += se > sb
     return better / B
-
 
 def fit(
     table: FeatureTable,
