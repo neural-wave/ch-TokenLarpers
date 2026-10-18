@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neuralwave-data"
+version = "0.1.0"
+description = "Privacy-safe NeuralWave preprocessing and canonical data contract"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "numpy>=1.24,<2",
+  "pandas>=2.0,<3",
+  "pyarrow>=12,<18",
+  "scikit-learn>=1.2,<2",
+  "scipy>=1.11,<2",
+  "ruptures>=1.1.9,<2",
+  "tzdata>=2024.1",
+  "catboost>=1.2.7,<2",
+  "torch>=2.4,<3",
+]
+
+[project.optional-dependencies]
+experiment = []
+
+[tool.setuptools.packages.find]
+where = ["src", "."]
+include = ["neuralwave_data*", "neuralwave_experiment*", "pvdetect*"]
+
+[project.scripts]
+neuralwave-prepare = "neuralwave_data.prepare:main"
+
+[tool.setuptools.package-data]
+"neuralwave_experiment.vendor.patchtst" = ["LICENSE", "NOTICE", "README.txt"]
+"pvdetect" = ["gui_assets/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+ignore = ["E702"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F401", "F841", "E402", "E701", "E741"]
+"pvdetect/procedure.py" = ["F841"]
+"train.py" = ["E731", "E741"]

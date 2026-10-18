@@ -1,5 +1,12 @@
 # AIL PV detection from consumption profiles
 
+> **Submission:** everything the jury needs is in [`submission/`](submission/). Run it with
+> `pip install -r submission/requirements.txt` (Python 3.11–3.13), then
+> `python submission/inference.py path/to/test.csv` from any folder: it writes `predictions.csv` and
+> `pv_extensions_predictions.csv` to the current directory, fully offline, loading the bundled model from
+> `submission/artifacts/`. Verified in clean plain-pip environments on Python 3.12 and 3.13, CPU only, network blocked,
+> two runs byte-identical.
+
 Detects photovoltaic installations, commissioning dates and nominal capacity (kWp) from 15-minute grid-withdrawal time series (AIL NeuralWave challenge). `IMPLEMENTATION_HANDOFF.md` describes the original baseline; `goals/hybrid-pv-integration/plan.md` records the approved integration.
 
 The repository also retains Pipeline A, strict conversion of authorized CSV manifests into canonical Parquet, and Pipeline B, deterministic paired synthetic PV scenarios. Use fabricated fixtures for agent-run development checks.

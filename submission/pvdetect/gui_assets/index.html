@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="pvd-token" content="__PVD_TOKEN__">
+  <meta name="referrer" content="no-referrer">
+  <title>PV Detect | Local</title>
+  <link rel="preload" href="/assets/inter.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <header class="hdr">
+    <a class="logo" href="/" aria-label="PV Detect home">
+      <svg class="logo-icon" viewBox="0 0 32 32" aria-hidden="true">
+        <circle cx="16" cy="16" r="16" fill="#FFD053"/>
+        <path d="M16 6.5v3M16 22.5v3M6.5 16h3M22.5 16h3M9.3 9.3l2.1 2.1M20.6 20.6l2.1 2.1M9.3 22.7l2.1-2.1M20.6 11.4l2.1-2.1" stroke="#14120E" stroke-width="1.8" stroke-linecap="round"/>
+        <circle cx="16" cy="16" r="4.2" fill="#14120E"/>
+      </svg>
+      <span class="logo-text">
+        <span class="wordmark"><b>PV</b> DETECT</span>
+        <span class="powered">powered by <b>NEURALWAVE</b></span>
+      </span>
+    </a>
+    <nav class="hdr-nav" aria-label="Session">
+      <span class="hdr-tab" id="tab-demo">Synthetic check</span>
+      <span class="hdr-tab" id="tab-private">Local CSV</span>
+    </nav>
+    <div class="hdr-right">
+      <div class="model-state" title="Model configured at launch">
+        <span class="model-state-tag">Trained model</span>
+        <span class="model-state-val"><i class="dot" id="model-dot"></i><span id="model-label">checking…</span></span>
+      </div>
+      <input type="file" id="file-input" accept=".csv,text/csv,text/plain" class="sr-only" tabindex="-1">
+      <button type="button" class="btn btn-ghost" id="btn-upload">
+        <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M7.25 9.04l4.01-4.01.707-.708.708.707 4.01 4.01-1.414 1.415-2.304-2.303V16h-2V8.15L8.664 10.454zM1 20.34v-9h6v2H3v5h18v-5h-4v-2h6v9H1"/></svg>
+        <span class="btn-label">Analyze CSV</span>
+      </button>
+      <button type="button" class="btn btn-yellow" id="btn-synthetic">
+        <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path fill="currentColor" d="M2 1l9 5-9 5z"/></svg>
+        <span class="btn-label">Run synthetic check</span>
+      </button>
+      <div class="menu-wrap">
+        <button type="button" class="icon-btn" id="btn-download" aria-haspopup="menu" aria-expanded="false" aria-label="Download outputs" title="Download outputs" disabled>
+          <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="m16.75 8.96-4.01 4.01-.707.708-.708-.707-4.01-4.01 1.414-1.415 2.304 2.303V2h2v7.85l2.303-2.304zM1 20.34v-9h6v2H3v5h18v-5h-4v-2h6v9H1"/></svg>
+        </button>
+        <div class="menu" id="download-menu" role="menu" hidden>
+          <div class="menu-head">Exact files written by the CLI writers</div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div class="shell">
+    <aside class="side" id="side" aria-label="Run summary"></aside>
+    <main class="main" id="main">
+      <div class="toolbar">
+        <div id="status" role="status" aria-live="polite"></div>
+        <div class="selects">
+          <label class="sel">View
+            <select id="sel-metric">
+              <option value="total">Daily withdrawal</option>
+              <option value="midday">Midday power</option>
+            </select>
+          </label>
+          <label class="sel">Resolution
+            <select id="sel-res">
+              <option value="weekly">Weekly</option>
+              <option value="daily">Daily</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <section class="chart-panel" aria-label="Customer withdrawal chart">
+        <div class="chart-host" id="chart"></div>
+        <div class="overlay" id="overlay" hidden></div>
+      </section>
+      <section class="cust-bar" id="cust-bar" aria-label="Selected customer"></section>
+      <div class="lower">
+        <section class="table-panel" aria-label="Customers">
+          <div class="table-tools">
+            <label class="search">
+              <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2.4" d="M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-3.5-3.5"/></svg>
+              <input type="search" id="search" placeholder="Search customer ID" aria-label="Search customer ID" autocomplete="off" spellcheck="false">
+            </label>
+            <label class="sel"><span class="sr-only">Filter</span>
+              <select id="sel-filter" aria-label="Filter customers">
+                <option value="all">All</option>
+                <option value="pv">PV</option>
+                <option value="nopv">No PV</option>
+              </select>
+            </label>
+            <span class="count num" id="count"></span>
+          </div>
+          <div class="table-scroll" id="table-scroll"></div>
+        </section>
+        <section class="profile-panel" aria-labelledby="profile-h">
+          <div class="panel-title">
+            <span id="profile-h">Typical day · before vs after</span>
+            <span class="legend" aria-hidden="true">
+              <span><i class="lg-before"></i>Before</span>
+              <span><i class="lg-after"></i>After</span>
+            </span>
+          </div>
+          <div class="profile-host" id="profile"></div>
+          <p class="panel-note" id="profile-note"></p>
+        </section>
+      </div>
+    </main>
+  </div>
+  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+</body>
+</html>

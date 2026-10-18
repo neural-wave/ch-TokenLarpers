@@ -43,6 +43,12 @@ PUBLISHED_ENCODERS = {
     "pretrained/medium/encoder.json": "5cd05732b466dae1f28683081612583ff71ee97f9c76ad574da4dbde2146df03",
     "pretrained/pv_presence/fraunhofer.pt": "55c68001718cf5a5932c9af5d99bd8e466229fc9ca1cc719dd3e44c26b34d08b",
     "pretrained/pv_presence/model.json": "c5d845e08f687a98dc8a652829e0cd773787dd920a7cbf446ef4b7a851566e73",
+    # The submitted model (user-approved publication in this submission repository, 2026-10-18; organizer answer 2:
+    # a pre-trained model may be included). Exported by scripts/export_submission.sh from main ae555d8.
+    "submission/artifacts/model.json": "55e4ebd5e08e801ef3b6447848353d4dd5e9d9c9a76c24a2a6228b879080bd88",
+    "submission/artifacts/catboost_clf.cbm": "60ca8482c68b23641ccc5e94f5de5385edcc4ee4afa5f693650a1ca0a187de90",
+    "submission/artifacts/catboost_ext.cbm": "19fc2ddb8059ca270c9ae440fa2613c97c4f23783ca3ceffe67bf146cba50aea",
+    "submission/artifacts/fraunhofer.pt": "992fdbcc13cbf5ea56e242fd24b05ded71232d643eda598295712bf1fda20756",
 }
 
 
