@@ -103,6 +103,21 @@ def _attach_unlabelled(table, dev_ids: list[str], args):
     return replace(table, unlabelled=prior, unlabelled_pool=pool or None)
 
 
+def _attach_extension_pool(table, dev_ids: list[str], args):
+    """Stream `--ext-unlabelled` (dev customers excluded) and attach up to `--ext-pool` customers with ≥365
+    valid days as the extension nowcaster's label-free pool; the main model's options are unaffected."""
+    dailies, _ = accumulate_file(
+        args.ext_unlabelled,
+        chunksize=args.unlabelled_chunksize,
+        id_prefix=args.unlabelled_id_prefix,
+        exclude_ids=set(dev_ids),
+    )
+    pool = build_pool(args.ext_unlabelled, dailies, args.ext_pool, chunksize=args.unlabelled_chunksize)
+    del dailies
+    print(f"ext_pool: customers={len(pool)} max={args.ext_pool} min_valid_days={POOL_MIN_VALID_DAYS}")
+    return replace(table, extension_pool=pool or None)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--timeseries", required=True)
@@ -141,6 +156,13 @@ def main(argv: list[str] | None = None) -> int:
         default=300,
         help="unlabelled customers (≥365 valid days) for the pseudo-labelling option; 0 disables; needs --unlabelled",
     )
+    ap.add_argument("--no-extensions", action="store_true", help="header-only extension file (no nowcaster)")
+    ap.add_argument(
+        "--ext-unlabelled",
+        help="not recommended (lowered recall in the synthetic benchmark): unlabelled CSV whose PV customers "
+        "(main-model P ≥ 0.95, per fit) pseudo-label the extension nowcaster; changes no main-model option",
+    )
+    ap.add_argument("--ext-pool", type=int, default=400, help="max unlabelled customers for --ext-unlabelled")
     ap.add_argument(
         "--split-dir",
         help="split --timeseries by customer into DIR/training.csv and DIR/test.csv, then train on training.csv only",
@@ -208,6 +230,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.unlabelled:
         table = _attach_unlabelled(table, input_ids or loaded.customer_ids, args)
+    if args.ext_unlabelled and not args.no_extensions:
+        table = _attach_extension_pool(table, input_ids or loaded.customer_ids, args)
+    ext_kw = {"ext_labels": ext_labels, "extensions": not args.no_extensions}
 
     if args.cv:
         if fold_maps is not None:
@@ -226,6 +251,7 @@ def main(argv: list[str] | None = None) -> int:
                 options=options,
                 encoder=encoder,
                 feature_block=args.feature_block,
+                **ext_kw,
             )
             res = nested_cv(fit_fn, predict, table, labels, splits, ext_labels=ext_labels)
             k = count_decisions(REPO / "DECISIONS.md")
@@ -267,7 +293,9 @@ def main(argv: list[str] | None = None) -> int:
                 b = res.ext_scores
                 print(
                     f"ext: bonus={np.mean([x['bonus'] for x in b]):.2f} f1_ext={np.mean([x['f1_ext'] for x in b]):.3f} "
-                    f"D_ext={np.mean([x['D_ext'] for x in b]):.3f} P_ext={np.mean([x['P_ext'] for x in b]):.3f}"
+                    f"D_ext={np.mean([x['D_ext'] for x in b]):.3f} P_ext={np.mean([x['P_ext'] for x in b]):.3f} "
+                    f"tp={np.mean([x['tp'] for x in b]):.2f} fp={np.mean([x['fp'] for x in b]):.2f} "
+                    f"fn={np.mean([x['fn'] for x in b]):.2f} (means over repeats; top-3 cap applies per outer fold)"
                 )
             print(_selection_line(res.fit_infos))
             if args.report_dir:
@@ -290,12 +318,19 @@ def main(argv: list[str] | None = None) -> int:
         options=options,
         encoder=encoder,
         feature_block=args.feature_block,
+        **ext_kw,
     )
     save_model(model, args.out)
     sel = model["selection"]
     print(
         f"final: classifier={sel['classifier']} threshold={sel['threshold']:.2f} capacity={sel['capacity']} "
         f"kappa={sel['kappa']:.2f} offset_days={sel['offset_event']} start_lag_days={sel.get('start_lag', 0)}"
+    )
+    ext = model["extensions"]
+    print(
+        f"extensions: enabled={str(ext.get('enabled')).lower()} labelled_customers={ext.get('labelled_customers', 0)} "
+        f"pool_customers={ext.get('pool_customers', 0)} windows={ext.get('windows', 0)}"
+        + (f" reason={ext['reason']}" if ext.get("reason") else "")
     )
     return 0
 

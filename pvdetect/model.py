@@ -98,7 +98,7 @@ def save_model(model: dict, path: str | Path) -> None:
 
             torch.save(obj.state_dict(), str(path.parent / "fraunhofer.pt"))
             continue
-        if name not in {"catboost_clf", "catboost_cap"} or not hasattr(obj, "save_model"):
+        if name not in {"catboost_clf", "catboost_cap", "catboost_ext"} or not hasattr(obj, "save_model"):
             raise ValueError(f"unexpected model object: {name}")
         obj.save_model(str(path.parent / f"{name}.cbm"), format="cbm")
     embedding = model.get("embedding")
@@ -131,7 +131,7 @@ def save_model(model: dict, path: str | Path) -> None:
 
 def referenced_files(model: dict) -> list[str]:
     files = []
-    for section in ("classifier", "capacity"):
+    for section in ("classifier", "capacity", "extensions"):
         f = (model.get(section) or {}).get("catboost_file")
         if f:
             files.append(_safe_reference(f))

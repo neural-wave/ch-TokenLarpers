@@ -178,7 +178,7 @@ def test_fit_with_avg_saves_both_sub_models_and_predicts_their_mean(data, monkey
 
     monkeypatch.setattr(procedure, "_inner_oof", stub)
     ids = labels["customer_id"].tolist()
-    model = fit(table, labels, ids, options=E1E2)
+    model = fit(table, labels, ids, options=E1E2, extensions=False)
     clf = model["classifier"]
     assert clf["kind"] == "avg" and clf["logreg"] is not None and clf["catboost_file"] == "catboost_clf.cbm"
     assert model["selection"]["feature_block"] == "base"

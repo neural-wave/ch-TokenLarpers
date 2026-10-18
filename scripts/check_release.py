@@ -59,7 +59,7 @@ def model_files(model: dict) -> list[str]:
     Raises ``ValueError`` for absolute, parent-relative or otherwise unsafe names.
     """
     names = []
-    for section in ("classifier", "capacity"):
+    for section in ("classifier", "capacity", "extensions"):
         name = (model.get(section) or {}).get("catboost_file")
         if not name:
             continue

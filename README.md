@@ -195,7 +195,7 @@ python gui.py --model $P/runs/base/model.json
 - `compare A B`: `pvdetect.compare` on the two runs' out-of-fold files into `$P/runs/B/compare_vs_A/`; uses one decision of the budget and prints the verdict and the `DECISIONS.md` line to add. Beyond the budget only with `--force`, which is recorded. Adopt a candidate only on `improvement`; once the budget is spent, freeze.
 - `freeze NAME`: records the git commit (and whether tracked files were modified), the run's flags and the hash of its model; prints the `git tag freeze-vN` command. No code change after this.
 - `open`: checks the seal hashes and the frozen model's hash, predicts `lockbox.csv` with the frozen run's model (fit on all dev customers) through `inference.run_inference`, scores it like `pvdetect.diagnose` with a 90 % customer-bootstrap interval (2000 draws) and states whether the score is inside, below or above the run's nested `ci90`. `lockbox_result.json` (aggregates only) goes to `$P` and next to the frozen model, where the GUI shows it as "Lock-box · single look"; the predictions stay in `$P/lockbox_predictions/`. A second `open` refuses unless `--force`, which is recorded and shown. Below the interval means possible overfitting: report it and still submit the frozen model; never re-tune on the lock-box. With 10 customers the interval is wide.
-- `final --energy E --labels L [--cv]`: after `open` (or with a recorded `--force`), refits the frozen run's flags on all customers into `$P/final/model.json` (`--cv` adds nested CV and its diagnosis) and prints the `scripts/export_submission.sh` command.
+- `final --energy E --labels L [--cv] [--ext-labels X | --no-extensions]`: after `open` (or with a recorded `--force`), refits the frozen run's flags on all customers into `$P/final/model.json`. `--cv` adds nested CV and its diagnosis; `--ext-labels` / `--no-extensions` pass through to `train.py`. It prints the `scripts/export_submission.sh` command. A model with an extension section must be exported from a commit that contains `pvdetect/extensions.py`.
 - `status`: stage, runs with their nested scores, decisions used of the budget, lock-box opened or not.
 
 `python -m pvdetect.stability MODEL_A MODEL_B UNLABELLED [--pool 300]` is the label-free check of the report stage: it builds the same bounded unlabelled pool as pseudo-labelling (≥365 valid days, salted-hash choice), predicts it with both models and prints the predicted PV share of each, the number and share of customers whose decision flips, and the mean absolute change of the PV probability.
@@ -288,9 +288,35 @@ python inference.py path/to/test.csv
 Loads `artifacts/model.json` (plus sibling files) automatically and writes to the current directory:
 
 - `predictions.csv`: `customer_id;pv_installed;pv_installation_date;pv_capacity_kwp`, one row per customer in the input, UTF-8, `;` separator, decimal point, `TRUE`/`FALSE`, `YYYY-MM-DD`, empty date/capacity when FALSE. Every TRUE row has a date and a positive capacity.
-- `pv_extensions_predictions.csv`: `customer_id;extension_date;pv_capacity_after_extension_kwp` (header only until extensions are implemented).
+- `pv_extensions_predictions.csv`: `customer_id;extension_date;pv_capacity_after_extension_kwp`. The file holds at most 3 rows and at most 2 per customer. Rows appear only for customers predicted TRUE, with dates after the predicted installation and totals above the predicted initial kWp. If the model has no extension section, or detection raises, the file is header-only and `predictions.csv` is unaffected.
 
 The loader sniffs `;`/`,` separators and comma decimals, accepts epoch seconds or milliseconds, drops duplicate timestamps, and maps every reading to fixed UTC+1 so DST days (92/100 rows) become ordinary 96-slot days.
+
+### PV extensions (optional bonus)
+
+`pvdetect/extensions.py` fits a capacity nowcast and runs a per-customer seasonal change-point test. It runs after the main model and never changes `predictions.csv`; a test asserts this.
+
+1. **Window features.** Every 7 days, a 35-day window of the customer gets label-free features:
+   - the length of the zero-withdrawal run around 12:30 on its typical and clearest days;
+   - load levels outside PV hours;
+   - midday/evening ratios;
+   - the season.
+
+   PV usually clips midday withdrawal to 0, so the zero run's start and end carry the array size.
+2. **Nowcast.** A CatBoost regressor maps each window to log kWp installed at that time. It is fitted inside `procedure.fit` on the fit's training customers only. Training windows lie inside one labelled capacity regime (the initial kWp, or the total after a labelled `--ext-labels` extension).
+   - Optional, **off by default and not recommended:** with `--ext-unlabelled PATH`, up to `--ext-pool` (default 400) unlabelled customers with ≥ 365 valid days are added. Each fit's own main model predicts them, and those it calls PV with P ≥ 0.95 add one pseudo-labelled regime (predicted date and kWp).
+   - The flag changes no main-model option.
+   - In the end-to-end synthetic benchmark these pseudo-labels cut recall 2–9× (see the evidence document), so the submission trains without it.
+3. **Per-customer seasonal change-point.** The nowcast is fitted as a level plus the customer's own two annual harmonics plus up to two persistent steps, all jointly by least squares.
+   - The nowcast's seasonal swing differs from customer to customer and is often larger than an extension step. Fitting it per customer stops it from mimicking or hiding a step.
+   - A step needs ≥ ×1.15 and z ≥ 4. The deseasonalized medians after and before it must also differ by ≥ ×1.15, which a short outage or vacation cannot achieve.
+   - Steps are placed greedily. With two close changes, the first step can sit between them; re-placing steps changed no benchmark outcome, so it is not used.
+4. **Date and capacity.** The date is the two-segment fit of the daily year-over-year zero-run envelope within ±50 days. The capacity after is the median nowcast on the new plateau, or the predicted initial kWp × the step ratio when that median is not above it.
+5. **Global cap.** The 3 highest-z events of the prediction call are kept. The challenge text states that 3 hidden-test events exist.
+
+Thresholds are fixed constants from synthetic development seeds and never tuned on real labels. `--no-extensions` restores the header-only file. With `--ext-labels`, nested CV prints `ext: … tp= fp= fn=`. The final fit prints one `extensions:` line.
+
+Synthetic evidence (dev seeds, variants A and B, ablations, hidden-test-geometry Monte Carlo) is in [docs/extension_evidence.md](docs/extension_evidence.md). Reproduce it with `python -m pvdetect.ext_benchmark --variant A --repeats 5`.
 
 ## Local GUI (optional)
 
@@ -356,6 +382,21 @@ python -m pvdetect.benchmark --suite holdout --log benchmarks/LOG.md   # phase g
 
 Every full run starts with the pilot and is refused if the projection exceeds `--budget-min` (default 30) or memory looks too high, unless `--force`. The holdout suite uses generator variant B (different PV, cloud and load models plus confounders absent from the dev generator) and seeds from `benchmarks/HOLDOUT_SEED_BLOCK`; a code change made in response to a holdout result burns the block.
 
+### Synthetic extension suite
+
+```
+python -m pvdetect.synthetic /tmp/pvsyn_ext --n 90 --seed 101 --extension-suite
+```
+
+`generate_extension_dataset(n, seed, variant="A"|"B")` writes `energy.csv`, `labels.csv`, `extensions.csv` and `cases.csv` (the case of each customer), for extension research only. Customer `i` gets case `EXT_CASES[i % 15]`. Nine cases carry labelled extensions:
+- `single`, `double` (two events at least 120 days apart), `early` (inside the install year) and `late` (30–120 days before the series ends);
+- `winter` (15 Nov–31 Jan), `small` (+15–30 %) and `clipped` (large PV on a low load);
+- `ew_added` (east–west modules added to a south array) and `with_battery` (extension and battery on the same day).
+
+Six cases are look-alikes with no extension: `plain`, `outage` (a 14–60-day inverter outage, then repair), `battery_retrofit`, `load_change`, `degradation` (1–2 %/year) and `no_pv`.
+
+All customers in one dataset share national daily sunshine. Each also gets one of three correlated regional components (`CustomerSpec.region`), so PV output co-varies across customers the way real weather does. Labels follow the official contract: totals after each event, not added kWp. The suite is not wired into `pvdetect.benchmark`; holdout-gate rules are unchanged.
+
 ## Organizer clarifications
 
 Questions for the organizers (Step 2.5-H and the team's Discord questions); answers get recorded here.
@@ -373,7 +414,7 @@ Questions for the organizers (Step 2.5-H and the team's Discord questions); answ
 
 ## Status
 
-The baseline and optional frozen-encoder pipeline are integrated, including upstream unlabelled-derived climatology and evidence-scale options (`--unlabelled`) and inner-CV model selection. Local checks use wholly artificial data only; they establish execution and leakage-contract behavior, not competition accuracy. Real-data nested CV and blind-customer evaluation remain data-holder tasks. Extensions remain header-only. Upstream organizer restrictions apply to all AIL outputs, including aggregates: they must not be shared with coding agents.
+The baseline and optional frozen-encoder pipeline are integrated, including upstream unlabelled-derived climatology and evidence-scale options (`--unlabelled`) and inner-CV model selection. Local checks use wholly artificial data only; they establish execution and leakage-contract behavior, not competition accuracy. Real-data nested CV and blind-customer evaluation remain data-holder tasks. The extension detector is verified on synthetic data only and ships only if the pre-registered real-data false-alarm gate in `DECISIONS.md` passes; otherwise train with `--no-extensions`. Upstream organizer restrictions apply to all AIL outputs, including aggregates: they must not be shared with coding agents.
 
 Upstream baseline export rehearsal (reported on `Jeffremm10/new-stack`, Step 2.5-X2, synthetic model, 2026-10-17): passed with default `python3` and fresh Python 3.12.14 dependencies; network-blocked inference on 20 synthetic customers produced repeatable output. Hybrid integration verification is recorded separately in `docs/evaluation_protocol.md`.
 

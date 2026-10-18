@@ -23,8 +23,9 @@ def stability(model_a: dict, model_b: dict, pool: dict) -> dict:
     """Aggregates of both models' predictions on the same pool customers."""
     ids = sorted(pool)
     table = FeatureTable(ids=ids, customers=pool)
-    pa, _ = predict(model_a, table, ids)
-    pb, _ = predict(model_b, table, ids)
+    off = {"extensions": {"enabled": False}}  # main-prediction aggregates only
+    pa, _ = predict({**model_a, **off}, table, ids)
+    pb, _ = predict({**model_b, **off}, table, ids)
     a, b = pa["pv_installed"].to_numpy(bool), pb["pv_installed"].to_numpy(bool)
     n = len(ids)
     return {
