@@ -1,61 +1,47 @@
-# Detecting PV installations from grid-withdrawal profiles
+# Voltera — three-page hackathon report
 
-AIL NeuralWave challenge. Team: Alessandro Tognoni, Jeffre Daniel Martinez Marroquin, Tarun Deepak.
+Canonical manuscript: [`report.qmd`](report.qmd). Finished rendering: [`voltera-report.pdf`](voltera-report.pdf). The earlier LaTeX draft has been superseded; there is one maintained manuscript.
 
-Outline, at most 3 pages.
+## Page structure
 
-## Approach
+1. **Time-series problem and data:** task, meter interpretation, daily/weekly/seasonal structure, missingness and daylight saving. One conceptual before/after PV-withdrawal schematic, explicitly not customer measurements.
+2. **Time-series methodology:** preprocessing, features, temporal baselines, changepoints, classification, commissioning date and nominal capacity. A LaTeX/TikZ vector flowchart shows the separate evidence paths. Extensions remain a separate research experiment.
+3. **Results and discussion:** customer-disjoint evaluation, synthetic extension findings in prose, date/capacity errors and failure cases. One diagram follows our Transformer research and decision to change direction. There is no benchmark table.
 
-A rooftop PV system lowers what a household draws from the grid on sunny daytime hours. We look for that signature in 15-minute withdrawal series. We use no weather, irradiation or location data, only the timestamps.
+## Build
 
-Most of the knowledge sits in hand-built features:
+Rendering the manuscript requires Quarto >=1.7 with bundled Typst. The rendered revision used Quarto 1.10.19 / Typst 0.15.1. The compiled diagram is included, so a normal report render does not need LaTeX. Editing the diagram requires `latexmk`, `pdflatex`, TikZ and the `standalone` document class.
 
-- a deseasonalized daytime signal, so that summer does not look like a PV start;
-- exact-zero statistics, because import-only meters clip PV surplus to zero;
-- a changepoint detector with a year-over-year recurrence check;
-- confounder features for night loads, batteries and commercial profiles;
-- capacity from the midday pre-vs-post dip and a physics kWp estimate from the pre-install midday level and the width of the zero-reading window around solar noon.
+From the repository root:
 
-The learned part is small: a logistic or CatBoost classifier, a decision threshold, a ridge or CatBoost capacity model, a scale factor κ and a date rule. Dates come from one of three regimes: a visible event, PV already present at the start of the series, or too little data.
+```bash
+quarto render report/report.qmd --to arxiv-typst
+pdfinfo report/voltera-report.pdf
+```
 
-All of these choices are made by inner cross-validation inside one fit procedure. Nested cross-validation on the 40 labelled customers scores the whole procedure, option pool included. The final model is the same procedure fit on all 40.
+Each page has one LaTeX/TikZ vector visual. Sources are `figures/pv-signature.tex`, `figures/methodology.tex` and `figures/research-path.tex`; each is embedded as its corresponding PDF. None contains customer data. To rebuild them from the repository root:
 
-## Results
+```bash
+latexmk -pdf -interaction=nonstopmode -halt-on-error \
+  -outdir=/tmp/voltera-tikz-build report/figures/*.tex
+cp /tmp/voltera-tikz-build/{pv-signature,methodology,research-path}.pdf report/figures/
+quarto render report/report.qmd --to arxiv-typst
+```
 
-Filled after the real-data run (P3) from aggregate lines only: `nested:`, `dates:`, `selection:` and the shared-fold comparison against the other branches. No per-customer values.
+The previous Python plots and their generator have been removed. Recheck the **three-page limit** after substantive edits.
 
-`outer_informed_decisions=1`, so the estimate is labelled selection-biased.
+## Template and methodological provenance
 
-How to read the numbers. Every number we report rests on 40 labelled customers. Cutting their histories into thousands of weekly windows does not create thousands of independent cases. The spread across CV repeats shows how much the result depends on the particular split of those 40 customers; it is not new data. The bootstrap interval resamples fixed out-of-fold predictions and leaves out the uncertainty of model selection. Capacity cannot be read off directly from grid withdrawal: load, orientation, shading, inverter limits and batteries can produce the same readings, so kWp is an estimate.
+- Vendored [quarto-arxiv-typst](https://github.com/stephenturner/quarto-arxiv-typst) under `_extensions/arxiv`, upstream revision `6a038e279822eb911fb91c2dc0af064a99623415`. Upstream MIT license and bundled font licenses are retained. A4/margins are configured in the manuscript.
+- [aeon-benchmark](https://github.com/aeon-toolkit/aeon-benchmark), reviewed at `8d21e6e4327857bd2758a1627ce2b00243f2ac29`, informs reproducibility conventions: fixed splits, seeds, matched comparisons and task-specific metrics. No aeon benchmark code or result is claimed as Voltera's.
+- Latest reviewed `origin/main`: `d886652` (same model implementation as `883a3ad`; newer commit updates the decision log).
+- Preserved local Transformer hybrid: `8b81795`. The team confirmed PatchTST is **not in the chosen Voltera pipeline**. Retained code/checkpoints do not imply selected inference use.
+- Isolated extension experiment: `14e0049`, branch `experiment/pv-extensions`, not merged into main.
+- Results transcribe the recorded fabricated benchmark's **end-to-end** arm: nine customer scenarios and seven true events, using predicted initial dates/capacities. This is not the conditional run supplied with known initial targets.
+- The 44-test statement refers to the recorded focused regression run, not a full-suite rerun for this manuscript.
 
-<!-- figures: synthetic and labelled "synthetic customer" only; real data only as aggregate lines, and only if the organizers allow (Step 2.5-D-pub). No real-customer plots, traces, dates or per-customer predictions. -->
+## Evidence and publication boundary
 
-Synthetic holdout benchmark (P2 gate, 40 customers, 2 repeats, code `3d2e5cd`, before the Phase 2.5 fixes). These numbers are synthetic and are not evidence of competition accuracy:
+This is a team-review draft. Dataset sizes come from the public specification, not private inspection. No claim is made that every supplied unlabelled customer entered training. No aggregate AIL metrics, real-customer traces, identifiers or predictions are included. Repository/organizer rules prohibit real-customer figures even when anonymized. Real main-task precision/recall/F1 and date/capacity performance remain data-holder material and must not be inferred from the optional synthetic benchmark.
 
-| scenario | score |
-|---|---|
-| base | 83.6 |
-| confounders x2 | 81.3 |
-| east/west heavy | 84.2 |
-| battery heavy | 87.9 |
-| short coverage | 77.5 |
-| 5% missing | 84.4 |
-| commercial heavy | 81.5 |
-| PV before start | 81.2 |
-
-## Challenges
-
-- The raw changepoint fired on seasonal drops: spring looks like a new PV system. On synthetic data, deseasonalizing and a year-over-year recurrence check removed most of these false detections.
-- The labelled commissioning date may lag the onset that is visible in the data. We do not assume a fixed lag; an offset is learned from the training customers inside each fit.
-- Night loads such as heat pumps and storage heaters shift consumption in ways that mimic PV. Dedicated confounder features separate them on synthetic data; they do not solve it in general.
-- With 40 labelled customers, any choice made by looking at results overfits. We moved all tuning inside the fit and log every outer-informed decision.
-- Different branches scored on different splits, so numbers were not comparable. We fixed shared customer folds and a common out-of-fold format.
-<!-- team: keep or drop the next item (Step 2.5-D-pub); if dropped, keep only the controls. -->
-- Data hygiene: a benchmark report on one branch exposed customer identifiers and per-customer values. We scrubbed it at the branch tip, added a commit hook that blocks data files and identifiers, keep the repository private until the old commits are removed, and hand in only a clean export without history.
-- What did not work: (to fill after P3).
-
-## AI agents and LLM usage
-
-<!-- team: confirm this section is accurate before submission -->
-
-Coding assistants and agents wrote much of the code. They worked from a plan the team wrote and reviewed, and every change was reviewed. Agents worked on synthetic data only; real-data runs were done by a team member. No LLM is part of training or inference. Inference runs offline.
+Development/training results are not independent validation. The decision log records an audit involving lock-box customers, so the report does not describe subsequent evidence as a pristine lock-box result. The team must review the final narrative and AI-use disclosure before publication. No new encoder training, pipeline change or model adoption is part of this report revision.
