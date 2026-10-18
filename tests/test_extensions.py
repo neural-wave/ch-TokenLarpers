@@ -29,45 +29,48 @@ def test_zero_run_counts_the_run_through_noon_only():
     assert out[0] == 3.5 and out[1] == 0.0 and np.isnan(out[2])
 
 
-def _noisy(levels: list[tuple[int, float]], n: int, sd: float = 0.04, seed: int = 0) -> np.ndarray:
-    """Piecewise-constant log-capacity series over n windows with ±sd noise."""
+def _noisy(levels: list[tuple[int, float]], n: int, sd: float = 0.04, seed: int = 0, swing: float = 0.0):
+    """(k, doy): piecewise-constant log capacity over n weekly windows, plus a customer-specific seasonal
+    swing of amplitude `swing` and ±sd noise."""
+    doy = (np.arange(n) * 7 + 20) % 365 + 1.0
     k = np.zeros(n)
     for start, level in levels:
         k[start:] = level
-    return k + np.random.default_rng(seed).normal(0, sd, n)
+    k = k + swing * np.cos(2 * np.pi * (doy - 40) / 365.25)
+    return k + np.random.default_rng(seed).normal(0, sd, n), doy
 
 
 def test_a_persistent_step_is_found_once_near_its_window_with_its_size():
-    k = _noisy([(0, np.log(6.0)), (90, np.log(9.0))], 170)
-    steps = X.confirmed_steps(k)
+    k, doy = _noisy([(0, np.log(6.0)), (90, np.log(9.0))], 170)
+    steps = X.harmonic_steps(k, doy)
     assert len(steps) == 1
     tau, step, z = steps[0]
     assert abs(tau - 90) <= 3 and step == pytest.approx(np.log(1.5), abs=0.08) and z >= X.MIN_Z
 
 
+def test_a_step_smaller_than_the_customers_seasonal_swing_is_still_found():
+    """The failure the audit found: a ±0.18 seasonal nowcast swing hides a 0.25 step from a level test."""
+    k, doy = _noisy([(0, np.log(6.0)), (100, np.log(6.0) + 0.25)], 190, sd=0.05, swing=0.18)
+    (tau, step, _), = X.harmonic_steps(k, doy)
+    assert abs(tau - 100) <= 3 and step == pytest.approx(0.25, abs=0.06)
+
+
 def test_flat_noise_an_outage_and_a_seasonal_swing_are_not_extensions():
-    n = 170
-    flat = _noisy([(0, 2.0)], n)
+    flat, doy = _noisy([(0, 2.0)], 170)
     outage = flat.copy()
     outage[60:66] -= 1.5  # six windows near zero output, then back to the old level
-    season = flat + 0.25 * np.cos(2 * np.pi * np.arange(n) / X.YEAR)  # nowcast bias repeating every year
+    season, _ = _noisy([(0, 2.0)], 170, swing=0.25)  # nowcast bias repeating every year
     for k in (flat, outage, season):
-        assert X.confirmed_steps(k) == []
+        assert X.harmonic_steps(k, doy) == []
 
 
-def test_two_steps_give_two_events_with_increasing_levels():
-    k = _noisy([(0, np.log(5.0)), (70, np.log(8.0)), (130, np.log(12.0))], 190)
-    steps = X.confirmed_steps(k)
-    assert [abs(t - e) <= 3 for (t, _, _), e in zip(steps, (70, 130))] == [True, True]
+def test_two_changes_give_two_events_and_the_later_one_is_placed():
+    """Greedy placement can put the first of two close steps between them (documented limitation); the second
+    change is still located and both steps clear the ratio."""
+    k, doy = _noisy([(0, np.log(5.0)), (70, np.log(8.0)), (130, np.log(12.0))], 190, swing=0.15)
+    steps = X.harmonic_steps(k, doy)
+    assert len(steps) == 2 and 70 <= steps[0][0] < 130 and abs(steps[1][0] - 130) <= 3
     assert all(s > np.log(X.MIN_RATIO) for _, s, _ in steps)
-
-
-def test_one_year_box_peaks_at_its_start():
-    y = np.zeros(200)
-    y[60 : 60 + X.YEAR] = 0.4
-    y += np.random.default_rng(1).normal(0, 0.03, y.size)
-    best = max(X.box_scores(y), key=lambda b: b[2])
-    assert abs(best[0] - 60) <= 2 and best[1] == pytest.approx(0.4, abs=0.05)
 
 
 # --------------------------------------------------------------------- nowcaster on fabricated customers

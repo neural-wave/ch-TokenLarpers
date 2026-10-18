@@ -303,10 +303,12 @@ The loader sniffs `;`/`,` separators and comma decimals, accepts epoch seconds o
    - Optional, **off by default and not recommended:** with `--ext-unlabelled PATH`, up to `--ext-pool` (default 400) unlabelled customers with ≥ 365 valid days are added. Each fit's own main model predicts them, and those it calls PV with P ≥ 0.95 add one pseudo-labelled regime (predicted date and kWp).
    - The flag changes no main-model option.
    - In the end-to-end synthetic benchmark these pseudo-labels cut recall 2–9× (see the evidence document), so the submission trains without it.
-3. **Level test.** PELT segmentation of the nowcast. A new plateau must beat every earlier long plateau by ≥ ×1.15 at z ≥ 3. The median of the rest of the series must clear the same margin: installed capacity does not fall back.
-4. **Year-over-year box.** A capacity step makes k(t) − k(t − 364 d) a box exactly one year wide. That box must agree within ±6 weeks (z ≥ 1.5). Without a year of history, the level step needs z ≥ 4.
-5. **Date and capacity.** The date is the two-segment fit of the daily year-over-year zero-run envelope within ±50 days. The capacity after is the median nowcast on the new plateau, or the predicted initial kWp × the step ratio when that median is not above it.
-6. **Global cap.** The 3 highest-z events of the prediction call are kept. The challenge text states that 3 hidden-test events exist.
+3. **Per-customer seasonal change-point.** The nowcast is fitted as a level plus the customer's own two annual harmonics plus up to two persistent steps, all jointly by least squares.
+   - The nowcast's seasonal swing differs from customer to customer and is often larger than an extension step. Fitting it per customer stops it from mimicking or hiding a step.
+   - A step needs ≥ ×1.15 and z ≥ 4. The deseasonalized medians after and before it must also differ by ≥ ×1.15, which a short outage or vacation cannot achieve.
+   - After a second step is added, each step is re-placed given the other.
+4. **Date and capacity.** The date is the two-segment fit of the daily year-over-year zero-run envelope within ±50 days. The capacity after is the median nowcast on the new plateau, or the predicted initial kWp × the step ratio when that median is not above it.
+5. **Global cap.** The 3 highest-z events of the prediction call are kept. The challenge text states that 3 hidden-test events exist.
 
 Thresholds are fixed constants from synthetic development seeds and never tuned on real labels. `--no-extensions` restores the header-only file. With `--ext-labels`, nested CV prints `ext: … tp= fp= fn=`. The final fit prints one `extensions:` line.
 

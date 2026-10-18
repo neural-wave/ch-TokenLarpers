@@ -1,4 +1,4 @@
-"""PV capacity-extension detection: a rolling capacity nowcast and a two-geometry change test.
+"""PV capacity-extension detection: a rolling capacity nowcast and a per-customer seasonal change-point test.
 
 Steps, per customer the main model calls PV:
 1. Every STEP days, a WIN-day window yields label-free physics features (`window_features`): the length of the
@@ -8,15 +8,15 @@ Steps, per customer the main model calls PV:
    only) maps each window to log kWp installed at that time. Targets: labelled PV customers' windows that
    lie inside one capacity regime (initial kWp, or the total after a labelled extension), plus optional
    pseudo-labelled windows of unlabelled customers the fit's own main model calls PV (`POOL_PROB`).
-3. Level test: PELT on the nowcast k(t); a new plateau must beat every earlier long plateau by ≥ MIN_RATIO
-   at z ≥ MIN_Z (rejects outage recovery and seasonal swings).
-4. Year-over-year box: a capacity step at τ makes y(t) = k(t) − k(t − 364 d) a box exactly one year wide;
-   the best box start within ±BOX_TOL windows must have z ≥ BOX_Z. Without a year of history the level step
-   needs z ≥ MIN_Z + STRICT_EXTRA instead.
-5. Date: two-segment fit on the daily year-over-year difference of a 7-day zero-run envelope (±REFINE days).
+3. Per-customer seasonal change-point (`harmonic_steps`): the nowcast k(t) is modelled as a level plus the
+   customer's own annual harmonics plus up to MAX_PER_CUSTOMER persistent steps, fitted jointly by least
+   squares; a step needs ≥ MIN_RATIO, z ≥ MIN_Z, and the same margin between deseasonalized medians after
+   and before it. (The nowcast's seasonal swing is customer-specific and larger than typical extension steps,
+   so a plain level test against earlier plateaus cannot separate them; see docs/extension_evidence.md.)
+4. Date: two-segment fit on the daily year-over-year difference of a 7-day zero-run envelope (±REFINE days).
    Capacity after: median nowcast on the new plateau; if that is not above the predicted initial kWp, the
    predicted initial kWp × the cumulative step ratio.
-6. At most MAX_PER_CUSTOMER events per customer and MAX_TOTAL per prediction call, highest z first. The
+5. At most MAX_PER_CUSTOMER events per customer and MAX_TOTAL per prediction call, highest z first. The
    challenge text states 2 of the 20 hidden-test customers have extensions, one of them twice (3 events).
 
 All thresholds are fixed constants from synthetic development seeds; nothing is tuned on real labels.
@@ -42,14 +42,13 @@ ZERO_KWH = 0.005  # a slot at or below this withdrawal counts as zero (pvdetect.
 MIN_DAYS = 18  # valid days a window needs
 POST_INSTALL_DAYS = 14  # windows start at least this long after the (predicted) installation date
 MIN_RATIO = 1.15
-MIN_Z = 3.0
-BOX_Z = 1.5
-BOX_TOL = 6
-STRICT_EXTRA = 1.0
-PLATEAU = 6  # windows an earlier plateau needs to count as a reference
+MIN_Z = 4.0
+HARMONICS = 2  # annual harmonics fitted per customer (one when the usable span is under two years)
+MIN_SPAN_H1 = 60  # windows of usable span below which no harmonic is fitted
+MIN_SEG = 6  # windows on each side of a candidate step
+MIN_GAP = 17  # windows between two steps of one customer
+PLATEAU = 6
 RAMP = WIN // STEP  # windows after a boundary still mixing both regimes
-MERGE = 8  # up-steps starting within this many windows are one ramp
-BOX_MIN_IN, BOX_MIN_OUT, BOX_HALF = 6, 4, 26
 REFINE = 50  # days searched either side of a step for its date
 MAX_PER_CUSTOMER = 2
 MAX_TOTAL = 3
@@ -204,111 +203,76 @@ def nowcast(nowcaster, f: pd.DataFrame, usable: np.ndarray) -> np.ndarray:
 # --------------------------------------------------------------------------------------- change tests
 
 
-def _segment(x: np.ndarray) -> list[int]:
-    """PELT (l2) boundaries of the NaN-interpolated series; BIC-like penalty from the diff-MAD noise,
-    inflated for the overlap of consecutive windows."""
-    import ruptures as rpt
-
-    ok = np.isfinite(x)
-    if ok.sum() < 2 * PLATEAU:
-        return []
-    idx = np.arange(x.size)
-    y = np.interp(idx, idx[ok], x[ok])
-    d = np.diff(y)
-    sig = max(1.4826 * float(np.median(np.abs(d - np.median(d)))) / np.sqrt(2), 0.03)
-    pen = 3.0 * sig**2 * np.log(y.size) * (WIN / STEP) ** 0.5
-    return [b for b in rpt.Pelt(model="l2", min_size=3, jump=1).fit(y).predict(pen=pen) if b < y.size]
+def _harmonics(theta: np.ndarray, n_h: int) -> np.ndarray:
+    cols = [np.ones_like(theta)]
+    for h in range(1, n_h + 1):
+        cols += [np.cos(h * theta), np.sin(h * theta)]
+    return np.column_stack(cols)
 
 
-def _plateau(x: np.ndarray, a: int, b: int) -> float:
-    v = x[min(a + RAMP, b - 1) : b] if b - a > RAMP + 1 else x[a:b]
-    return float(np.nanmedian(v)) if np.isfinite(v).any() else np.nan
+def harmonic_steps(k: np.ndarray, doy: np.ndarray) -> list[tuple[int, float, float]]:
+    """(window index, log step, z) of up to MAX_PER_CUSTOMER persistent capacity steps in the nowcast k.
 
-
-def level_steps(k: np.ndarray) -> list[tuple[int, float, float]]:
-    """(window index, log step, z) of persistent up-steps above every earlier long plateau whose rest-of-series
-    median also clears the reference."""
+    Model, per customer: k(t) = a + Σ_h [b_h cos(hθ_t) + c_h sin(hθ_t)] + Σ_j δ_j·1[t ≥ τ_j] + e_t, θ from the
+    window-centre day of year `doy`. The customer's own seasonal swing of the nowcast is fitted jointly with
+    the steps over the whole series, so it can neither mimic nor hide a step. Greedy: for every admissible τ
+    add the step column and solve least squares; z = δ / se(δ), σ from the residual MAD, inflated for the
+    overlap of consecutive windows. Accept the best positive step if δ ≥ log MIN_RATIO, z ≥ MIN_Z and the
+    deseasonalized medians after vs before (ramp windows excluded) also differ by ≥ log MIN_RATIO, which a
+    short dip (outage, vacation) cannot achieve."""
     ok = np.flatnonzero(np.isfinite(k))
-    if ok.size < 2 * PLATEAU:
+    if ok.size < 2 * PLATEAU + 4:
         return []
-    first, last = int(ok[0]), int(ok[-1]) + 1
-    x = k[first:last]
-    bounds = _segment(x)
-    edges = [0, *bounds, x.size]
-    segs = list(zip(edges[:-1], edges[1:]))
-    levels = [_plateau(x, a, b) for a, b in segs]
-    with np.errstate(all="ignore"):
-        med = np.concatenate([np.full(b - a, lv) for (a, b), lv in zip(segs, levels)])
-        sig = max(1.4826 * float(np.nanmedian(np.abs(x - med))), 0.05)
+    t, y = ok, k[ok]
+    span = int(ok[-1] - ok[0] + 1)
+    n_h = HARMONICS if span >= 2 * YEAR else (1 if span >= MIN_SPAN_H1 else 0)
+    base = _harmonics(2 * np.pi * doy[ok] / 365.25, n_h)
     n_eff = WIN / STEP
-    out, last_ref, i = [], 0, 1
-    while i < len(segs):
-        refs = [levels[j] for j in range(last_ref, i) if segs[j][1] - segs[j][0] >= PLATEAU and np.isfinite(levels[j])]
-        refs = refs or [levels[j] for j in range(last_ref, i) if np.isfinite(levels[j])]
-        ref = max(refs) if refs else np.nan
-        j = i
-        while j + 1 < len(segs) and segs[j + 1][0] - segs[i][0] < MERGE and levels[j + 1] > levels[j]:
-            j += 1
-        new, b = levels[j], segs[i][0]
-        n_after = int(np.isfinite(x[b : segs[j][1]]).sum())
-        n_ref = int(np.isfinite(x[max(0, b - BOX_HALF) : b]).sum())
-        if np.isfinite(ref) and np.isfinite(new) and n_after >= 4 and n_ref >= 4:
-            step = new - ref
-            z = step / (sig * np.sqrt(n_eff / n_after + n_eff / n_ref))
-            # installed capacity does not fall back: the whole rest of the series (all seasons, so a seasonal
-            # nowcast bias averages out) must also sit above the reference by the same margin
-            rest = x[min(b + RAMP, x.size - 1) :]
-            persist = float(np.nanmedian(rest)) - ref if np.isfinite(rest).sum() >= 4 else np.nan
-            if step >= np.log(MIN_RATIO) and z >= MIN_Z and persist >= np.log(MIN_RATIO):
-                out.append((first + b, float(step), float(z)))
-                last_ref, i = j, j + 1
+
+    def best_step(fixed: list[int]):
+        """Best positive step position given the other steps `fixed`: (τ, δ, z, coef) or None."""
+        D0 = np.column_stack([base, *[(t >= s).astype(float) for s in fixed]])
+        best = None
+        for j in range(MIN_SEG, t.size - MIN_SEG):
+            tau = int(t[j])
+            if any(abs(tau - s) < MIN_GAP for s in fixed):
                 continue
-        i += 1
-    return out
-
-
-def box_scores(y: np.ndarray) -> list[tuple[int, float, float]]:
-    """(box start τ, height, z) for one-year boxes in y; τ may precede the first defined value (falling edge
-    only) or leave the box cut by the series end (rising edge only)."""
-    ok = np.flatnonzero(np.isfinite(y))
-    if ok.size < BOX_MIN_IN + BOX_MIN_OUT:
-        return []
-    v = y[ok]
-    sig = max(1.4826 * float(np.median(np.abs(v - np.median(v)))), 0.03)
-    n_eff = WIN / STEP
-    out = []
-    for tau in range(int(ok[0]) - YEAR + BOX_MIN_IN, int(ok[-1]) - BOX_MIN_IN + 2):
-        a, e = max(tau, 0), min(tau + YEAR, y.size)
-        inside = y[a:e][np.isfinite(y[a:e])]
-        flanks = [y[max(tau - BOX_HALF, 0) : max(tau, 0)], y[min(tau + YEAR, y.size) : min(tau + YEAR + BOX_HALF, y.size)]]
-        flanks = [f[np.isfinite(f)] for f in flanks]
-        flanks = [f for f in flanks if f.size >= BOX_MIN_OUT]
-        if inside.size < BOX_MIN_IN or not flanks:
-            continue
-        outv = np.concatenate(flanks)
-        h = float(np.median(inside) - np.median(outv))
-        out.append((tau, h, h / (sig * np.sqrt(n_eff / inside.size + n_eff / outv.size))))
-    return out
-
-
-def confirmed_steps(k: np.ndarray) -> list[tuple[int, float, float]]:
-    """Level steps (in date order) that the year-over-year box agrees with (see module docstring). Each
-    confirmed step's own box is removed from y before the next step is scored, so a second extension inside
-    the first one's year is not hidden by the first box sitting in its flank."""
-    y = np.full(k.size, np.nan)
-    y[YEAR:] = k[YEAR:] - k[:-YEAR]
-    out = []
-    for tau, step, z in level_steps(k):
-        near = [b for b in box_scores(y) if abs(b[0] - tau) <= BOX_TOL]
-        if near:
-            best = max(near, key=lambda b: b[2])
-            if not (best[2] >= BOX_Z and best[1] > 0):
+            D = np.column_stack([D0, (t >= tau).astype(float)])
+            coef, *_ = np.linalg.lstsq(D, y, rcond=None)
+            delta = float(coef[-1])
+            if delta <= 0:
                 continue
-        elif z < MIN_Z + STRICT_EXTRA:
-            continue
-        out.append((tau, step, z))
-        y[max(tau, 0) : tau + YEAR] -= step
-    return sorted(sorted(out, key=lambda e: -e[2])[:MAX_PER_CUSTOMER])
+            res = y - D @ coef
+            sig = max(1.4826 * float(np.median(np.abs(res - np.median(res)))), 0.03)
+            try:
+                var = float(np.linalg.inv(D.T @ D)[-1, -1])
+            except np.linalg.LinAlgError:
+                continue
+            z = delta / (sig * np.sqrt(var * n_eff))
+            if best is None or z > best[2]:
+                best = (tau, delta, z, coef)
+        return best
+
+    def accepted(tau: int, delta: float, z: float, coef: np.ndarray, others: list[int]) -> bool:
+        ds = y - base[:, 1:] @ coef[1 : base.shape[1]] if base.shape[1] > 1 else y
+        earlier = [s for s in others if s < tau]
+        later = [s for s in others if s > tau]
+        pre = ds[(t < tau - RAMP) & (t >= (max(earlier) + RAMP if earlier else t[0]))]
+        post = ds[(t >= tau + RAMP) & (t < (min(later) if later else t[-1] + 1))]
+        if pre.size < 4 or post.size < 4:
+            return False
+        robust = float(np.median(post) - np.median(pre))
+        return delta >= np.log(MIN_RATIO) and z >= MIN_Z and robust >= np.log(MIN_RATIO)
+
+    # Greedy, as evaluated: with two close changes the first step can sit between them (re-placing each step
+    # given the other changed no benchmark outcome on a fresh block, so it is not used; see the evidence doc).
+    steps: list[tuple[int, float, float]] = []
+    for _ in range(MAX_PER_CUSTOMER):
+        found = best_step([s for s, _, _ in steps])
+        if found is None or not accepted(*found, [s for s, _, _ in steps]):
+            break
+        steps.append(found[:3])
+    return sorted(steps)
 
 
 def refine_day(M: np.ndarray, d0: int) -> int:
@@ -346,7 +310,7 @@ def customer_events(nowcaster, cid: str, cd: CustomerData, install: dt.date | No
     first = pd.Timestamp(install) if install is not None else pd.Timestamp(cd.dates[0]) - pd.Timedelta(days=1)
     usable = (f["start"] >= first + pd.Timedelta(days=POST_INSTALL_DAYS)).to_numpy()
     k = nowcast(nowcaster, f, usable)
-    steps = confirmed_steps(k)
+    steps = harmonic_steps(k, f["centre"].dt.dayofyear.to_numpy(float))
     events, cum = [], 1.0
     for j, (tau, step, z) in enumerate(steps):
         nxt = steps[j + 1][0] if j + 1 < len(steps) else len(k)

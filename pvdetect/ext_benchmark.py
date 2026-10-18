@@ -6,10 +6,10 @@ unlabelled-like pool (`600 + r`, ids prefixed "U", labels never read) and a test
 then predicted by `pipeline.predict`, so presence, dates and initial kWp come from the main model, not labels.
 
 Arms (same fitted main model per repeat):
-- `shipped`: level + year-over-year box test, labelled customers only (no `--ext-unlabelled`), global top-3;
+- `shipped`: per-customer harmonic change-point test, labelled customers only (no `--ext-unlabelled`), top-3;
 - `with_pool`: plus pool pseudo-labels from the fit's own main model (`--ext-unlabelled`);
-- `no_box`: level test only (ablation of the year-over-year confirmation), no pool;
-- `no_topk`: shipped without the global top-3 cap.
+- `no_topk`: shipped without the global top-3 cap (population rows of `shipped` and `no_topk` are the same
+  uncapped per-customer candidates; the cap only acts in the Monte Carlo).
 
 Reported: pooled TP/FP/FN, F1_ext, D_ext, P_ext and bonus over the whole test population, a customer-level
 bootstrap 90 % interval of the bonus, per-case counts, and a Monte Carlo of the hidden-test geometry
@@ -35,7 +35,7 @@ from pvdetect.procedure import fit
 from pvdetect.scoring import extension_bonus
 from pvdetect.synthetic import EXT_CASES, EXT_NEGATIVE_CASES, EXT_POSITIVE_CASES, generate_extension_dataset
 
-ARMS = ("shipped", "with_pool", "no_box", "no_topk")
+ARMS = ("shipped", "with_pool", "no_topk")
 ONE_EVENT_CASES = tuple(c for c in EXT_POSITIVE_CASES if c != "double")
 
 
@@ -73,21 +73,16 @@ def _ext(ext: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _candidates(nowcaster, table, pred: pd.DataFrame, box: bool) -> list[X.Event]:
-    """Every event of every predicted-PV customer before the global cap (the module's own per-customer path;
-    `box=False` swaps the confirmation for the bare level test)."""
-    original = X.confirmed_steps
-    if not box:
-        X.confirmed_steps = lambda k: sorted(sorted(X.level_steps(k), key=lambda e: -e[2])[: X.MAX_PER_CUSTOMER])
-    try:
-        out = []
-        for r in pred[pred["pv_installed"].astype(bool)].itertuples(index=False):
-            cd = table.customers.get(r.customer_id)
-            install = pd.Timestamp(r.pv_installation_date).date() if pd.notna(r.pv_installation_date) else None
-            out += X.customer_events(nowcaster, r.customer_id, cd, install, float(r.pv_capacity_kwp))
-        return out
-    finally:
-        X.confirmed_steps = original
+def _candidates(nowcaster, table, pred: pd.DataFrame) -> list[X.Event]:
+    """Every event of every predicted-PV customer before the global cap (the module's own per-customer path)."""
+    out = []
+    for r in pred[pred["pv_installed"].astype(bool)].itertuples(index=False):
+        cd = table.customers.get(r.customer_id)
+        if cd is None or not np.isfinite(r.pv_capacity_kwp):
+            continue
+        install = pd.Timestamp(r.pv_installation_date).date() if pd.notna(r.pv_installation_date) else None
+        out += X.customer_events(nowcaster, r.customer_id, cd, install, float(r.pv_capacity_kwp))
+    return out
 
 
 def _frame(events: list[X.Event], cap: int | None) -> pd.DataFrame:
@@ -112,9 +107,8 @@ def run_repeat(r: int, variant: str, n_train: int, n_pool: int, n_test: int, bas
     test = build_feature_table(_loaded(tts))
     pred, _ = predict(with_pool, test, test.ids)
     cands = {
-        "shipped": _candidates(no_pool, test, pred, box=True),
-        "with_pool": _candidates(with_pool["_objects"]["catboost_ext"], test, pred, box=True),
-        "no_box": _candidates(no_pool, test, pred, box=False),
+        "shipped": _candidates(no_pool, test, pred),
+        "with_pool": _candidates(with_pool["_objects"]["catboost_ext"], test, pred),
     }
     cands["no_topk"] = cands["shipped"]
     truth = text.assign(pv_capacity_after_extension_kwp=text["pv_capacity_after_extension_kwp"].astype(float))
