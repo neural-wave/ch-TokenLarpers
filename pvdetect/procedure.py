@@ -885,19 +885,19 @@ def _choose_tobit(
     table, labels, lab, train_ids, splits, names, cap_names, setting, oof, sel, avg=True, C=LOGREG_C, weekly=False,
     dkw=None,
 ):
-    """`tobit` capacity feature on top of the current capacity names, same inner splits and rule."""
+    """`tobit` capacity feature is always added while the option is in the pool (not re-decided by the total-score
+    margin rule, which a capacity-only feature can rarely clear; DECISIONS.md). Both inner scores are recorded."""
     cand_cap = cap_names + list(TOBIT_FEATURES)
     c_oof = _inner_oof(
         table, labels, lab, train_ids, splits, names, cand_cap, setting, C=C, weekly=weekly, **(dkw or {})
     )
     c_sel = _select(c_oof, avg)
     c_sel["inner_score"] = _full_inner_score(c_oof, c_sel)
-    adopt, boot = _adopt((oof, sel), (c_oof, c_sel))
     info = {
-        "tobit": "on" if adopt else "off",
-        "tobit_options": {"off": sel["inner_score"], "on": c_sel["inner_score"], "bootstrap_p": boot},
+        "tobit": "on",
+        "tobit_options": {"off": sel["inner_score"], "on": c_sel["inner_score"], "bootstrap_p": None},
     }
-    return (cand_cap, c_oof, c_sel, info) if adopt else (cap_names, oof, sel, info)
+    return cand_cap, c_oof, c_sel, info
 
 
 def _choose_onset_first(
@@ -1078,6 +1078,9 @@ def fit(
         if "onset_first" in options:  # the fixed dating rule needs no inner CV
             dkw["onset_first"] = True
             onset_first_info = {"onset_first": "on"}
+        if "tobit" in options:  # fixed capacity feature: no inner CV needed
+            cap_names = cap_names + list(TOBIT_FEATURES)
+            tobit_info = {"tobit": "on"}
     labeller = None
     if table.unlabelled_pool and splits:
         from pvdetect.pseudolabel import choose_pseudo  # pseudolabel imports this module
