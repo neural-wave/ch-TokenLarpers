@@ -284,9 +284,33 @@ python inference.py path/to/test.csv
 Loads `artifacts/model.json` (plus sibling files) automatically and writes to the current directory:
 
 - `predictions.csv`: `customer_id;pv_installed;pv_installation_date;pv_capacity_kwp`, one row per customer in the input, UTF-8, `;` separator, decimal point, `TRUE`/`FALSE`, `YYYY-MM-DD`, empty date/capacity when FALSE. Every TRUE row has a date and a positive capacity.
-- `pv_extensions_predictions.csv`: `customer_id;extension_date;pv_capacity_after_extension_kwp` (header only until extensions are implemented).
+- `pv_extensions_predictions.csv`: `customer_id;extension_date;pv_capacity_after_extension_kwp`. The file holds at most 3 rows and at most 2 per customer. Rows appear only for customers predicted TRUE, with dates after the predicted installation and totals above the predicted initial kWp. If the model has no extension section, or detection raises, the file is header-only and `predictions.csv` is unaffected.
 
 The loader sniffs `;`/`,` separators and comma decimals, accepts epoch seconds or milliseconds, drops duplicate timestamps, and maps every reading to fixed UTC+1 so DST days (92/100 rows) become ordinary 96-slot days.
+
+### PV extensions (optional bonus)
+
+`pvdetect/extensions.py` fits a capacity nowcast and runs a two-geometry change test. It runs after the main model and never changes `predictions.csv`; a test asserts this.
+
+1. **Window features.** Every 7 days, a 35-day window of the customer gets label-free features:
+   - the length of the zero-withdrawal run around 12:30 on its typical and clearest days;
+   - load levels outside PV hours;
+   - midday/evening ratios;
+   - the season.
+
+   PV usually clips midday withdrawal to 0, so the zero run's start and end carry the array size.
+2. **Nowcast.** A CatBoost regressor maps each window to log kWp installed at that time. It is fitted inside `procedure.fit` on the fit's training customers only. Training windows lie inside one labelled capacity regime (the initial kWp, or the total after a labelled `--ext-labels` extension).
+   - Optional, **off by default and not recommended:** with `--ext-unlabelled PATH`, up to `--ext-pool` (default 400) unlabelled customers with ≥ 365 valid days are added. Each fit's own main model predicts them, and those it calls PV with P ≥ 0.95 add one pseudo-labelled regime (predicted date and kWp).
+   - The flag changes no main-model option.
+   - In the end-to-end synthetic benchmark these pseudo-labels cut recall roughly tenfold (see the evidence document), so the submission trains without it.
+3. **Level test.** PELT segmentation of the nowcast. A new plateau must beat every earlier long plateau by ≥ ×1.15 at z ≥ 3. The median of the rest of the series must clear the same margin: installed capacity does not fall back.
+4. **Year-over-year box.** A capacity step makes k(t) − k(t − 364 d) a box exactly one year wide. That box must agree within ±6 weeks (z ≥ 1.5). Without a year of history, the level step needs z ≥ 4.
+5. **Date and capacity.** The date is the two-segment fit of the daily year-over-year zero-run envelope within ±50 days. The capacity after is the median nowcast on the new plateau, or the predicted initial kWp × the step ratio when that median is not above it.
+6. **Global cap.** The 3 highest-z events of the prediction call are kept. The challenge text states that 3 hidden-test events exist.
+
+Thresholds are fixed constants from synthetic development seeds and never tuned on real labels. `--no-extensions` restores the header-only file. With `--ext-labels`, nested CV prints `ext: … tp= fp= fn=`. The final fit prints one `extensions:` line.
+
+Synthetic evidence (dev seeds, variants A and B, ablations, hidden-test-geometry Monte Carlo) is in [docs/extension_evidence.md](docs/extension_evidence.md). Reproduce it with `python -m pvdetect.ext_benchmark --variant A --repeats 5`.
 
 ## Local GUI (optional)
 
@@ -384,7 +408,7 @@ Questions for the organizers (Step 2.5-H and the team's Discord questions); answ
 
 ## Status
 
-The baseline and optional frozen-encoder pipeline are integrated, including upstream unlabelled-derived climatology and evidence-scale options (`--unlabelled`) and inner-CV model selection. Local checks use wholly artificial data only; they establish execution and leakage-contract behavior, not competition accuracy. Real-data nested CV and blind-customer evaluation remain data-holder tasks. Extensions remain header-only. Upstream organizer restrictions apply to all AIL outputs, including aggregates: they must not be shared with coding agents.
+The baseline and optional frozen-encoder pipeline are integrated, including upstream unlabelled-derived climatology and evidence-scale options (`--unlabelled`) and inner-CV model selection. Local checks use wholly artificial data only; they establish execution and leakage-contract behavior, not competition accuracy. Real-data nested CV and blind-customer evaluation remain data-holder tasks. The extension detector is verified on synthetic data only and ships only if the pre-registered real-data false-alarm gate in `DECISIONS.md` passes; otherwise train with `--no-extensions`. Upstream organizer restrictions apply to all AIL outputs, including aggregates: they must not be shared with coding agents.
 
 Upstream baseline export rehearsal (reported on `Jeffremm10/new-stack`, Step 2.5-X2, synthetic model, 2026-10-17): passed with default `python3` and fresh Python 3.12.14 dependencies; network-blocked inference on 20 synthetic customers produced repeatable output. Hybrid integration verification is recorded separately in `docs/evaluation_protocol.md`.
 

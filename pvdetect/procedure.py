@@ -905,8 +905,11 @@ def fit(
     encoder=None,
     feature_block: str = "auto",
     options: frozenset = DEFAULT_OPTIONS,
+    ext_labels: pd.DataFrame | None = None,
+    extensions: bool = True,
 ) -> dict:
-    """Fit option-selected baseline features, optionally augmented by a frozen encoder."""
+    """Fit option-selected baseline features, optionally augmented by a frozen encoder. With `extensions`, the
+    extension nowcaster is fitted last on `train_ids` (and `ext_labels` of those customers only)."""
     if feature_block not in {"auto", "baseline", "embedding"}:
         raise ValueError("feature_block must be auto, baseline, or embedding")
     if not options <= ALL_OPTIONS:
@@ -1239,7 +1242,7 @@ def fit(
         },
         "date": date,
         "selection": sel,
-        "extensions": {"enabled": False},
+        "extensions": {"enabled": False, "reason": "off"},
         "_objects": objects,
     }
     if block == "embedding":
@@ -1253,4 +1256,14 @@ def fit(
         }
         model["_encoder_source"] = str(encoder.directory)
         model["_embedding_encoder"] = encoder
+    if extensions:
+        from pvdetect.extensions import fit_extensions
+
+        try:
+            section, nowcaster = fit_extensions(table, labels, train_ids, ext_labels, model)
+        except Exception as exc:  # the bonus model is optional; the main model must still be returned
+            section, nowcaster = {"enabled": False, "reason": f"fit failed: {type(exc).__name__}"}, None
+        model["extensions"] = section
+        if nowcaster is not None:
+            model["_objects"]["catboost_ext"] = nowcaster
     return model

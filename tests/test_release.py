@@ -59,13 +59,13 @@ def test_saved_model_files_carry_no_training_customer_ids(tmp_path, monkeypatch)
     ids = labels["customer_id"].tolist()
     assert all(cid.startswith("SYNREL-") for cid in ids)
 
-    selected = _model_saved_files(procedure.fit(table, labels, ids), tmp_path / "selected" / "model.json")
+    selected = _model_saved_files(procedure.fit(table, labels, ids, extensions=False), tmp_path / "selected" / "model.json")
     assert _model_leaked_ids(selected, ids) == []
 
     forced_sel = {"classifier": "catboost", "threshold": 0.5, "capacity": "catboost", "kappa": 1.0, "insufficient_rule": "weak_candidate", "inner_score": float("nan")}
     monkeypatch.setattr(procedure, "_select", lambda oof, avg=True: dict(forced_sel))
     no_oof = procedure.DEFAULT_OPTIONS - {"ctune", "offset_tri", "recur_strict"}  # keep the forced selection as is
-    forced = procedure.fit(table, labels, ids, options=no_oof)
+    forced = procedure.fit(table, labels, ids, options=no_oof, extensions=False)
     assert forced["classifier"]["kind"] == "catboost" and forced["capacity"]["kind"] == "catboost"
     files = _model_saved_files(forced, tmp_path / "catboost" / "model.json")
     assert sorted(f.name for f in files if f.suffix == ".cbm") == ["catboost_cap.cbm", "catboost_clf.cbm"]

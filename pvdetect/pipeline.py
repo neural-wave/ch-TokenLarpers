@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import sys
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -55,6 +56,8 @@ class FeatureTable:
     frame: pd.DataFrame | None = None
     unlabelled: UnlabelledPrior | None = None
     unlabelled_pool: dict[str, CustomerData] | None = None
+    # optional label-free unlabelled customers whose windows the extension nowcaster may pseudo-label
+    extension_pool: dict[str, CustomerData] | None = None
 
     def dailies(self) -> dict[str, pd.DataFrame]:
         return {c: d.daily for c, d in self.customers.items() if d is not None}
@@ -282,4 +285,18 @@ def predict(model: dict, table: FeatureTable, ids: list[str]) -> tuple[pd.DataFr
             }
         )
     pred = pd.concat([pd.DataFrame(rows), F.reset_index(drop=True)], axis=1)
-    return pred, pd.DataFrame(columns=EXT_COLUMNS)
+    return pred, _extensions(model, table, pred)
+
+
+def _extensions(model: dict, table: FeatureTable, pred: pd.DataFrame) -> pd.DataFrame:
+    """Extension rows; any failure degrades to the valid header-only file and never touches `pred`."""
+    if not (model.get("extensions") or {}).get("enabled"):
+        return pd.DataFrame(columns=EXT_COLUMNS)
+    try:
+        from pvdetect.extensions import predict_extensions
+
+        return predict_extensions(model, table, pred)
+    except Exception as exc:  # the bonus file is optional; the main predictions must still be written
+        print(f"warning: extension detection failed ({type(exc).__name__}: {exc}); header-only extension file",
+              file=sys.stderr)
+        return pd.DataFrame(columns=EXT_COLUMNS)
