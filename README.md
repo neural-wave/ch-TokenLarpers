@@ -352,6 +352,21 @@ python -m pvdetect.benchmark --suite holdout --log benchmarks/LOG.md   # phase g
 
 Every full run starts with the pilot and is refused if the projection exceeds `--budget-min` (default 30) or memory looks too high, unless `--force`. The holdout suite uses generator variant B (different PV, cloud and load models plus confounders absent from the dev generator) and seeds from `benchmarks/HOLDOUT_SEED_BLOCK`; a code change made in response to a holdout result burns the block.
 
+### Synthetic extension suite
+
+```
+python -m pvdetect.synthetic /tmp/pvsyn_ext --n 90 --seed 101 --extension-suite
+```
+
+`generate_extension_dataset(n, seed, variant="A"|"B")` writes `energy.csv`, `labels.csv`, `extensions.csv` and `cases.csv` (the case of each customer), for extension research only. Customer `i` gets case `EXT_CASES[i % 15]`. Nine cases carry labelled extensions:
+- `single`, `double` (two events at least 120 days apart), `early` (inside the install year) and `late` (30–120 days before the series ends);
+- `winter` (15 Nov–31 Jan), `small` (+15–30 %) and `clipped` (large PV on a low load);
+- `ew_added` (east–west modules added to a south array) and `with_battery` (extension and battery on the same day).
+
+Six cases are look-alikes with no extension: `plain`, `outage` (a 14–60-day inverter outage, then repair), `battery_retrofit`, `load_change`, `degradation` (1–2 %/year) and `no_pv`.
+
+All customers in one dataset share national daily sunshine. Each also gets one of three correlated regional components (`CustomerSpec.region`), so PV output co-varies across customers the way real weather does. Labels follow the official contract: totals after each event, not added kWp. The suite is not wired into `pvdetect.benchmark`; holdout-gate rules are unchanged.
+
 ## Organizer clarifications
 
 Questions for the organizers (Step 2.5-H and the team's Discord questions); answers get recorded here.

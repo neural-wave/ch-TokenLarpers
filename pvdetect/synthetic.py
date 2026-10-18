@@ -75,6 +75,30 @@ SHARED_WEATHER_KINDS = ("ac", "summer_absence")
 SPIKES_PER_YEAR = 3
 WEATHER_EPOCH = np.datetime64("2015-01-01", "D")
 WEATHER_DAYS = 6000  # 2015-01-01 .. 2031-06
+# Extension suite (`generate_extension_dataset`): one case per customer, cycled in this order. Cases in
+# EXT_POSITIVE_CASES carry ≥1 labelled extension; the others are PV or non-PV customers whose post-install
+# behaviour can imitate one (inverter outage then repair, battery retrofit, a load change, ageing modules).
+EXT_POSITIVE_CASES = (
+    "single",  # one extension 200–700 days after install, total ×1.3–2.5
+    "double",  # two extensions ≥120 days apart, each ×1.2–1.8
+    "early",  # one extension 60–300 days after install (inside the first year)
+    "late",  # one extension 30–120 days before the series ends (short post-extension history)
+    "winter",  # one extension 15 Nov–31 Jan (weak until spring)
+    "small",  # one extension of +15–30 %
+    "clipped",  # large PV on a low load: midday withdrawal mostly 0 before and after
+    "ew_added",  # east–west modules added to a south array (broader daily shape)
+    "with_battery",  # extension and battery commissioned on the same day
+)
+EXT_NEGATIVE_CASES = (
+    "plain",  # PV, no change
+    "outage",  # inverter outage of 14–60 days, then repaired: a rise that is not an extension
+    "battery_retrofit",  # battery added later, no extension
+    "load_change",  # one post-install confounder event of the variant's kinds
+    "degradation",  # PV output falls 1–2 % per year
+    "no_pv",  # no PV, one confounder event
+)
+EXT_CASES = EXT_POSITIVE_CASES + EXT_NEGATIVE_CASES
+N_REGIONS = 3  # extension suite: customers share national weather plus one of N_REGIONS regional components
 
 
 @dataclass(frozen=True)
@@ -86,6 +110,10 @@ class PVSpec:
     battery_kwh: float = 0.0
     extensions: tuple[tuple[str, float], ...] = ()  # (local date, total kWp after)
     label_lag_days: int = 0  # labelled date − visible onset (`label_lag_60`)
+    extension_orientation: Literal["south", "east_west"] | None = None  # added modules; None = `orientation`
+    outages: tuple[tuple[str, str], ...] = ()  # [start, end) local dates with zero production
+    degradation: float = 0.0  # fractional output loss per year since `date`
+    battery_from: str | None = None  # battery works from this local date on; None = whole series
 
 
 @dataclass(frozen=True)
@@ -109,6 +137,7 @@ class CustomerSpec:
     spikes_per_year: int = 0  # isolated single-slot meter spikes (`meter_spikes`)
     weather_seed: int | None = None  # dataset-wide daily sunshine series (`shared_weather`)
     load_scale: float = 1.0  # multiplies the household load (`cap_outlier`)
+    region: int = 0  # with `weather_seed`: 0 = national sunshine only, k > 0 adds regional component k
 
 
 @dataclass
@@ -330,35 +359,58 @@ def _kwp_series(g: _Grid, pv: PVSpec) -> np.ndarray:
     return kwp
 
 
-def _shared_sun(weather_seed: int, g: _Grid) -> np.ndarray:
-    """Per-row daily sunshine fraction in [0.2, 1], identical for every customer on the same absolute
-    UTC+1 day: one AR(1) series drawn from `weather_seed` alone."""
-    rng = np.random.default_rng([weather_seed, 7])
+def _output_factor(g: _Grid, pv: PVSpec) -> np.ndarray | None:
+    """Per-row production multiplier for module ageing and inverter outages; None when neither applies."""
+    if not pv.degradation and not pv.outages:
+        return None
+    years = (g.local_day - np.datetime64(pv.date, "D")).astype(np.int64) / 365.25
+    f = 1.0 - pv.degradation * np.clip(years, 0.0, None)
+    for a, b in pv.outages:
+        f = np.where((g.local_day >= np.datetime64(a, "D")) & (g.local_day < np.datetime64(b, "D")), 0.0, f)
+    return f
+
+
+def _added_kwp(g: _Grid, pv: PVSpec) -> np.ndarray | None:
+    """Per-row kWp of extension modules whose orientation differs from the initial array; else None."""
+    if pv.extension_orientation in (None, pv.orientation):
+        return None
+    kwp = _kwp_series(g, pv)
+    return kwp - np.minimum(kwp, pv.kwp)
+
+
+def _ar_weather(key: list[int]) -> np.ndarray:
+    rng = np.random.default_rng(key)
     eps = rng.normal(0.0, 0.25, WEATHER_DAYS)
     k = np.empty(WEATHER_DAYS)
     k[0] = 0.6
     for d in range(1, WEATHER_DAYS):
         k[d] = 0.6 + 0.5 * (k[d - 1] - 0.6) + eps[d]
+    return k
+
+
+def _shared_sun(weather_seed: int, g: _Grid, region: int = 0) -> np.ndarray:
+    """Per-row daily sunshine fraction in [0.2, 1], identical for every customer on the same absolute
+    UTC+1 day: one AR(1) series drawn from `weather_seed` alone. With `region` k > 0, the national series is
+    mixed with regional series k (cross-region correlation ≈ 0.6)."""
+    k = _ar_weather([weather_seed, 7])
+    if region:
+        k = 0.6 + 0.75 * (k - 0.6) + 0.6 * (_ar_weather([weather_seed, 7, region]) - 0.6)
     first = (WEATHER_EPOCH - np.datetime64("1970-01-01", "D")).astype(np.int64)
     return np.clip(k, 0.2, 1.0)[(g.epoch + 3600) // 86400 - first]
 
 
-def _pv_a(g: _Grid, pv: PVSpec, rng: np.random.Generator, sun: np.ndarray | None = None) -> np.ndarray:
+def _profile_a(g: _Grid, orientation: str) -> tuple[np.ndarray, np.ndarray]:
     c = _seasonal(g.doy, 172)
     hw = 4.0 + 2.5 * c
     amp = 0.55 + 0.25 * c
-    if pv.orientation == "east_west":
+    if orientation == "east_west":
         hw = hw * 1.25
         amp = amp * 0.85
     x = (g.hs - 12.5) / hw
-    shape = np.where(np.abs(x) < 1, np.cos(np.pi / 2 * np.clip(x, -1, 1)) ** 1.5, 0.0)
-    cloud = rng.uniform(0.2, 1.0, g.n_days)[g.std_day]  # drawn in every case: keeps the base stream
-    if sun is not None:
-        cloud = sun
-    return _kwp_series(g, pv) * 0.25 * amp * shape * cloud
+    return amp, np.where(np.abs(x) < 1, np.cos(np.pi / 2 * np.clip(x, -1, 1)) ** 1.5, 0.0)
 
 
-def _pv_b(g: _Grid, pv: PVSpec, rng: np.random.Generator) -> np.ndarray:
+def _profile_b(g: _Grid, orientation: str) -> tuple[np.ndarray, np.ndarray]:
     c = _seasonal(g.doy, 172)
     day_len = 12 + 3.9 * c
     sunrise = 12.5 - day_len / 2
@@ -366,11 +418,32 @@ def _pv_b(g: _Grid, pv: PVSpec, rng: np.random.Generator) -> np.ndarray:
     inside = (phase > 0) & (phase < 1)
     s = np.sin(np.pi * np.clip(phase, 0, 1))
     amp = 0.5 + 0.3 * c
-    if pv.orientation == "east_west":
-        shape = np.where(inside, np.clip(1.6 * s, 0, 1), 0.0)
-        amp = amp * 0.8
-    else:
-        shape = np.where(inside, s**1.2, 0.0)
+    if orientation == "east_west":
+        return amp * 0.8, np.where(inside, np.clip(1.6 * s, 0, 1), 0.0)
+    return amp, np.where(inside, s**1.2, 0.0)
+
+
+def _finish_pv(g: _Grid, pv: PVSpec, prod: np.ndarray, weather: np.ndarray, profile) -> np.ndarray:
+    """Adds extension modules of another orientation and applies ageing/outages to `prod`."""
+    added = _added_kwp(g, pv)
+    if added is not None:
+        amp0, shape0 = profile(g, pv.orientation)
+        amp1, shape1 = profile(g, pv.extension_orientation)
+        prod = prod + added * 0.25 * (amp1 * shape1 - amp0 * shape0) * weather
+    f = _output_factor(g, pv)
+    return prod if f is None else prod * f
+
+
+def _pv_a(g: _Grid, pv: PVSpec, rng: np.random.Generator, sun: np.ndarray | None = None) -> np.ndarray:
+    amp, shape = _profile_a(g, pv.orientation)
+    cloud = rng.uniform(0.2, 1.0, g.n_days)[g.std_day]  # drawn in every case: keeps the base stream
+    if sun is not None:
+        cloud = sun
+    return _finish_pv(g, pv, _kwp_series(g, pv) * 0.25 * amp * shape * cloud, cloud, _profile_a)
+
+
+def _pv_b(g: _Grid, pv: PVSpec, rng: np.random.Generator, sun: np.ndarray | None = None) -> np.ndarray:
+    amp, shape = _profile_b(g, pv.orientation)
     k = np.empty(g.n_days)
     k[0] = 0.6
     eps = rng.normal(0, 0.2, g.n_days)
@@ -378,7 +451,9 @@ def _pv_b(g: _Grid, pv: PVSpec, rng: np.random.Generator) -> np.ndarray:
         k[d] = min(max(0.6 + 0.8 * (k[d - 1] - 0.6) + eps[d], 0.05), 1.0)
     hour_key = g.std_day * 24 + np.floor(g.hs).astype(np.int64)
     hour_noise = rng.lognormal(0, 0.15, g.n_days * 24 + 1)[hour_key]
-    return _kwp_series(g, pv) * 0.25 * amp * shape * k[g.std_day] * hour_noise
+    day = k[g.std_day] if sun is None else sun  # k is drawn in every case: keeps the base stream
+    prod = _kwp_series(g, pv) * 0.25 * amp * shape * day * hour_noise
+    return _finish_pv(g, pv, prod, day * hour_noise, _profile_b)
 
 
 def _battery(g: _Grid, net: np.ndarray, cap: float) -> np.ndarray:
@@ -408,16 +483,19 @@ def generate_customer(spec: CustomerSpec, seed: int, variant: Literal["A", "B"] 
     sun = None
     if spec.weather_seed is not None:  # shared sunshine with a little local (per-customer) variation
         local = np.random.default_rng([seed, 3]).lognormal(0.0, 0.1, g.n_days)[g.std_day]
-        sun = np.clip(_shared_sun(spec.weather_seed, g) * local, 0.1, 1.0)
+        sun = np.clip(_shared_sun(spec.weather_seed, g, spec.region) * local, 0.1, 1.0)
     load = (_load_a if variant == "A" else _load_b)(g, spec.profile, rng) * spec.load_scale
     for ev in spec.events:
         load = _apply_event(g, load, ev, rng, sun)
     net = load
     if spec.pv is not None:
-        prod = _pv_a(g, spec.pv, rng, sun) if variant == "A" else _pv_b(g, spec.pv, rng)
+        prod = _pv_a(g, spec.pv, rng, sun) if variant == "A" else _pv_b(g, spec.pv, rng, sun)
         net = load - prod
         if spec.pv.battery_kwh > 0:
-            net = _battery(g, net, spec.pv.battery_kwh)
+            stored = _battery(g, net, spec.pv.battery_kwh)
+            net = stored if spec.pv.battery_from is None else np.where(
+                g.local_day >= np.datetime64(spec.pv.battery_from, "D"), stored, net
+            )
         if not spec.pv.export:
             net = np.maximum(net, 0.0)
     if spec.spikes_per_year > 0:
@@ -607,7 +685,12 @@ def generate_dataset(
     scenario: str = "base",
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Return (timeseries, labels, extension labels) with string label columns."""
-    specs = _dataset_specs(n, seed, start, end, hard_negatives, with_extensions, variant, scenario)
+    return _assemble(_dataset_specs(n, seed, start, end, hard_negatives, with_extensions, variant, scenario), seed, variant)
+
+
+def _assemble(
+    specs: list[CustomerSpec], seed: int, variant: Literal["A", "B"]
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     frames, labels, exts = [], [], []
     for i, spec in enumerate(specs):
         frames.append(generate_customer(spec, seed * 1000 + i, variant))
@@ -637,6 +720,128 @@ def generate_dataset(
     )
 
 
+def _winter_day(lo: pd.Timestamp, hi: pd.Timestamp, rng: np.random.Generator) -> pd.Timestamp | None:
+    """A uniformly drawn day in 15 Nov–31 Jan that lies in [lo, hi]; None if there is none."""
+    days = [d for d in pd.date_range(lo, hi, freq="D") if (d.month, d.day) >= (11, 15) or d.month == 1]
+    return days[int(rng.integers(0, len(days)))] if days else None
+
+
+def _extension_specs(n: int, seed: int, start: str, end: str, variant: Literal["A", "B"]) -> list[tuple[CustomerSpec, str]]:
+    """(spec, case) per customer; customer i gets case EXT_CASES[i % len(EXT_CASES)]. Coverage ≥ 920 days,
+    shared regional weather (`weather_seed` = seed, region i % N_REGIONS), install 30–365 days before the
+    series (present at start) or 60–360 days into it; events lie ≥ 60 days inside the coverage."""
+    rng = np.random.default_rng([seed, 11])
+    kinds = A_KINDS if variant == "A" else B_KINDS
+    t0, t1 = pd.Timestamp(start), pd.Timestamp(end)
+    days = lambda k: pd.Timedelta(days=int(k))  # noqa: E731
+    out = []
+    for i in range(n):
+        case = EXT_CASES[i % len(EXT_CASES)]
+        cstart = t0 + days(rng.integers(0, 271))
+        cend = t1 - days(rng.integers(0, 271))
+        commercial = i % 7 == 3 and case != "clipped"
+        if case != "early" and rng.random() < 0.3:
+            pv_date = cstart - days(rng.integers(30, 366))
+        else:
+            pv_date = cstart + days(rng.integers(60, 361))
+        kwp = round(float(rng.uniform(15, 60) if commercial else rng.uniform(3, 15)), 1)
+        load_scale = 1.0
+        lo = max(pv_date + days(150), cstart + days(60))
+        hi = cend - days(90)
+
+        def draw(a: pd.Timestamp, b: pd.Timestamp) -> pd.Timestamp:
+            return a + days(rng.integers(0, max(1, (b - a).days + 1)))
+
+        def total(prev: float, a: float, b: float) -> float:
+            return round(prev * float(rng.uniform(a, b)), 1)
+
+        ext_dates: list[pd.Timestamp] = []
+        factors = (1.3, 2.0)
+        ext_orientation = None
+        battery, battery_from, outages, degradation = 0.0, None, (), 0.0
+        events: list[Event] = []
+        if case == "single":
+            ext_dates, factors = [draw(max(lo, pv_date + days(200)), min(hi, max(lo, pv_date + days(700))))], (1.3, 2.5)
+        elif case == "double":
+            first = draw(lo, hi - days(120))
+            ext_dates, factors = [first, draw(first + days(120), hi)], (1.2, 1.8)
+        elif case == "early":
+            ext_dates = [pv_date + days(rng.integers(60, 301))]
+        elif case == "late":
+            ext_dates = [cend - days(rng.integers(30, 121))]
+        elif case == "winter":
+            winter = _winter_day(lo, hi, rng)
+            ext_dates = [winter if winter is not None else draw(lo, hi)]
+        elif case == "small":
+            ext_dates, factors = [draw(lo, hi)], (1.15, 1.30)
+        elif case == "clipped":
+            kwp = round(float(rng.uniform(8, 15)), 1)
+            load_scale = float(rng.uniform(0.4, 0.6))
+            ext_dates, factors = [draw(lo, hi)], (1.4, 1.8)
+        elif case == "ew_added":
+            ext_dates, factors, ext_orientation = [draw(lo, hi)], (1.4, 2.0), "east_west"
+        elif case == "with_battery":
+            ext_dates = [draw(lo, hi)]
+            battery, battery_from = round(float(rng.uniform(5, 10)), 1), _day(ext_dates[0])
+        elif case == "outage":
+            a = draw(max(pv_date, cstart) + days(60), hi - days(60))
+            outages = ((_day(a), _day(a + days(rng.integers(14, 61)))),)
+        elif case == "battery_retrofit":
+            battery, battery_from = round(float(rng.uniform(5, 10)), 1), _day(draw(lo, hi))
+        elif case == "load_change":
+            events.append(Event(kinds[(i // len(EXT_CASES)) % len(kinds)], _day(draw(lo, hi))))
+        elif case == "degradation":
+            degradation = float(rng.uniform(0.01, 0.02))
+        elif case == "no_pv":
+            events.append(Event(kinds[(i // len(EXT_CASES)) % len(kinds)], _day(draw(cstart + days(120), hi))))
+        exts, prev = [], kwp
+        for d in ext_dates:
+            prev = total(prev, *factors)
+            exts.append((_day(d), prev))
+        pv = None
+        if case != "no_pv":
+            pv = PVSpec(
+                date=_day(pv_date),
+                kwp=kwp,
+                orientation="east_west" if (i // len(EXT_CASES)) % 4 == 3 and case != "ew_added" else "south",
+                export=i % 10 == 0,
+                battery_kwh=battery,
+                extensions=tuple(exts),
+                extension_orientation=ext_orientation,
+                outages=outages,
+                degradation=degradation,
+                battery_from=battery_from,
+            )
+        spec = CustomerSpec(
+            customer_id=f"{i:06d}",
+            start=_day(cstart),
+            end=_day(cend),
+            profile="commercial" if commercial else "residential",
+            pv=pv,
+            events=tuple(events),
+            weather_seed=seed,
+            load_scale=load_scale,
+            region=i % N_REGIONS,
+        )
+        out.append((spec, case))
+    return out
+
+
+def generate_extension_dataset(
+    n: int,
+    seed: int,
+    start: str = "2022-01-01",
+    end: str = "2025-12-31",
+    variant: Literal["A", "B"] = "A",
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Extension benchmark: (timeseries, labels, extension labels, cases) with string label columns.
+    `cases` maps each customer_id to its EXT_CASES entry, so failures can be attributed per case."""
+    pairs = _extension_specs(n, seed, start, end, variant)
+    ts, labels, ext = _assemble([s for s, _ in pairs], seed, variant)
+    cases = pd.DataFrame({"customer_id": [s.customer_id for s, _ in pairs], "case": [c for _, c in pairs]})
+    return ts, labels, ext, cases
+
+
 def write_dataset(
     out_dir: Path,
     ts: pd.DataFrame,
@@ -658,15 +863,25 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--sep", default=",")
     ap.add_argument("--no-hard-negatives", action="store_true")
     ap.add_argument("--with-extensions", action="store_true")
-    args = ap.parse_args(argv)
-    ts, labels, ext = generate_dataset(
-        args.n,
-        args.seed,
-        hard_negatives=not args.no_hard_negatives,
-        with_extensions=args.with_extensions,
+    ap.add_argument(
+        "--extension-suite",
+        action="store_true",
+        help="write the extension benchmark (generate_extension_dataset) plus cases.csv instead",
     )
-    write_dataset(args.out_dir, ts, labels, ext, sep=args.sep)
-    print(f"wrote {len(ts)} rows, {len(labels)} customers to {args.out_dir}")
+    args = ap.parse_args(argv)
+    if args.extension_suite:
+        ts, labels, ext, cases = generate_extension_dataset(args.n, args.seed)
+        write_dataset(args.out_dir, ts, labels, ext, sep=args.sep)
+        cases.to_csv(args.out_dir / "cases.csv", sep=args.sep, index=False)
+    else:
+        ts, labels, ext = generate_dataset(
+            args.n,
+            args.seed,
+            hard_negatives=not args.no_hard_negatives,
+            with_extensions=args.with_extensions,
+        )
+        write_dataset(args.out_dir, ts, labels, ext, sep=args.sep)
+    print(f"wrote {len(ts)} rows, {len(labels)} customers, {len(ext)} extension events to {args.out_dir}")
     return 0
 
 
@@ -675,11 +890,15 @@ __all__ = [
     "B_KINDS",
     "SCENARIOS",
     "A_ONLY_SCENARIOS",
+    "EXT_CASES",
+    "EXT_POSITIVE_CASES",
+    "EXT_NEGATIVE_CASES",
     "PVSpec",
     "Event",
     "CustomerSpec",
     "generate_customer",
     "generate_dataset",
+    "generate_extension_dataset",
     "write_dataset",
 ]
 
