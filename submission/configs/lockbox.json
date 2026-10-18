@@ -1,1 +1,0 @@
-{"seed": 2026, "lockbox_size": 10, "strata": ["pv_installed"], "outer_seeds": [17, 42, 100], "outer_folds": 5, "decision_budget": 3}
