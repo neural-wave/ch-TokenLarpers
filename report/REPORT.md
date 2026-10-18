@@ -6,7 +6,7 @@ Canonical manuscript: [`report.qmd`](report.qmd). Finished rendering: [`voltera-
 
 1. **Time-series problem and data:** task, meter interpretation, daily/weekly/seasonal structure, missingness and daylight saving. One conceptual before/after PV-withdrawal schematic, explicitly not customer measurements.
 2. **Time-series methodology:** preprocessing, features, temporal baselines, changepoints, classification, commissioning date and nominal capacity. A LaTeX/TikZ vector flowchart shows the separate evidence paths. Extensions remain a separate research experiment.
-3. **Results and discussion:** customer-disjoint evaluation, synthetic extension findings in prose, date/capacity errors and failure cases. One diagram follows our Transformer research and decision to change direction. There is no benchmark table.
+3. **Results and discussion:** customer-disjoint evaluation, recorded mainline ensemble and censored-likelihood capacity comparisons, and a brief synthetic extension diagnostic. One diagram follows our Transformer research and decision to change direction. There is no benchmark table.
 
 ## Build
 
@@ -34,14 +34,14 @@ The previous Python plots and their generator have been removed. Recheck the **t
 
 - Vendored [quarto-arxiv-typst](https://github.com/stephenturner/quarto-arxiv-typst) under `_extensions/arxiv`, upstream revision `6a038e279822eb911fb91c2dc0af064a99623415`. Upstream MIT license and bundled font licenses are retained. A4/margins are configured in the manuscript.
 - [aeon-benchmark](https://github.com/aeon-toolkit/aeon-benchmark), reviewed at `8d21e6e4327857bd2758a1627ce2b00243f2ac29`, informs reproducibility conventions: fixed splits, seeds, matched comparisons and task-specific metrics. No aeon benchmark code or result is claimed as Voltera's.
-- Latest reviewed `origin/main`: `d886652` (same model implementation as `883a3ad`; newer commit updates the decision log).
+- Latest reviewed `origin/main`: `7180670`. Report updated for the `avg_cnn` ensemble and fixed `log_kwp_tobit` capacity feature. Code, not the stale README statement about per-fit Tobit admission, establishes that the feature is included whenever `tobit` is enabled. Dataset-dependent transformations remain fitted inside each training fold.
 - Preserved local Transformer hybrid: `8b81795`. The team confirmed PatchTST is **not in the chosen Voltera pipeline**. Retained code/checkpoints do not imply selected inference use.
 - Isolated extension experiment: `14e0049`, branch `experiment/pv-extensions`, not merged into main.
-- Results transcribe the recorded fabricated benchmark's **end-to-end** arm: nine customer scenarios and seven true events, using predicted initial dates/capacities. This is not the conditional run supplied with known initial targets.
-- The 44-test statement refers to the recorded focused regression run, not a full-suite rerun for this manuscript.
+- Recorded real-data comparison figures come from `DECISIONS.md` entries for ensemble adoption (`326bc25` lineage) and censored-likelihood adoption (`7180670`). They are team-reported development evaluations, not runs repeated for report editing or hidden-test results. Fresh outer split seeds do not supply new independent customers.
+- Synthetic extension findings are from the earlier end-to-end diagnostic using predicted initial estimates, separate from the conditional known-initial-target run and not deployed in main inference.
 
 ## Evidence and publication boundary
 
-This is a team-review draft. Dataset sizes come from the public specification, not private inspection. No claim is made that every supplied unlabelled customer entered training. No aggregate AIL metrics, real-customer traces, identifiers or predictions are included. Repository/organizer rules prohibit real-customer figures even when anonymized. Real main-task precision/recall/F1 and date/capacity performance remain data-holder material and must not be inferred from the optional synthetic benchmark.
+This is a team-review draft. Dataset sizes come from the public specification. The user confirmed updated AIL permission to share results in this conversation; this report includes only aggregate development figures already recorded in the team decision log. No raw traces, identifiers or customer-level predictions are published. No claim is made that every supplied unlabelled customer entered training. The optional synthetic benchmark is not evidence of AIL accuracy.
 
 Development/training results are not independent validation. The decision log records an audit involving lock-box customers, so the report does not describe subsequent evidence as a pristine lock-box result. The team must review the final narrative and AI-use disclosure before publication. No new encoder training, pipeline change or model adoption is part of this report revision.

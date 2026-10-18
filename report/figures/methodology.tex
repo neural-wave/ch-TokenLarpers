@@ -14,8 +14,8 @@
 \node[stage] (prep) at (3.2,0) {Time alignment\\and missingness};
 \node[stage] (physical) at (6.5,1.15) {Daily signals\\Seasonal baseline\\Persistent changes};
 \node[stage] (weekly) at (6.5,-1.15) {Weekly profiles\\and distributions};
-\node[stage] (estimates) at (9.9,1.15) {Date regimes\\Capacity proxies\\and calibration};
-\node[stage] (presence) at (9.9,-1.15) {PV classification\\Tabular / weekly\\or CNN candidate};
+\node[stage] (estimates) at (9.9,1.15) {Date regimes\\Capacity + censored\\likelihood feature};
+\node[stage] (presence) at (9.9,-1.15) {PV classification\\Tabular / weekly,\\CNN or ensemble};
 \node[stage] (output) at (13.3,0) {PV decision\\Initial date\\Initial capacity};
 \draw[flow] (input) -- (prep);
 \draw[flow] (prep.east) -- ++(0.35,0) |- (physical.west);
