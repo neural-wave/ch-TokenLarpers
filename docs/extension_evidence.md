@@ -97,3 +97,48 @@ Per case, shipped arm (TP/FP/FN, summed over 5 repeats; 30 customers per case):
 
 ## Real-data gate (data holder)
 Pre-registered in `DECISIONS.md`. Ship extensions only if the nested-CV `ext:` line shows `fp ≤ 1.00` (mean over outer repeats; 40 dev customers out-of-fold). Otherwise make the final fit with `--no-extensions`. The dev extension's `tp` is reported, not gated. No extension constant changes after the run.
+
+## Second audit: four independent agents (fresh seeds 1100+ / 1300+, synthetic)
+Each agent ran its own scripts read-only (under `/tmp/audit_*`) and confirmed it reproduced the shipped arm exactly.
+
+**1. The harness measures correctly.**
+- Truth fed back as predictions scores 10.0.
+- Date shifts of ±20 d, +30 d and +31 d and a ×1.25 kWp error each give the expected D, P and TP.
+- Independent brute-force re-scoring of all arms matches exactly (A 26/53/274, B 29/38/271).
+- No customers are dropped or duplicated. Dates have no systematic offset: median signed error −1 d (A) and −4 d (B).
+- Low recall is real, not a measurement bug.
+
+**2. Where events are lost** (variant A, 120 events, main-model inputs):
+
+| Stage | Share |
+|---|---|
+| Customer not called PV | 0 % |
+| Main model's install date on/after the extension, or within 60 d of it (predicted 440–1389 d late) | 22 % |
+| Nowcast shows a step below ×1.15 | 28 % |
+| Level test rejects (MIN_RATIO against the max earlier plateau) | 17 % |
+| No PELT boundary | 7 % |
+| Dated > 30 d off | 6 % |
+| Found (TP) | 10 % |
+
+With a perfect nowcast, the ceiling under the main model's inputs and guards would be about 61 % (73 of 120).
+
+**3. Root cause: the nowcaster.**
+- Inside one constant-capacity regime it swings with the season by 0.26–0.43 in log space (p90–p10). That is three times the ×1.15 threshold.
+- It registers only about half of a true step: median observed/true ratio 0.47–0.53, event-level slope 0.23. Clipped extensions are almost invisible (ratio 0.13).
+- The swing is customer-specific. A cross-fitted per-week bias curve spans only 0.05–0.14, so subtracting it leaves the swing unchanged.
+
+**4. Fixes tested on fresh seeds; none adopted.** Population TP/FP; top-3 = TP/FP after the shipped global top-3 cap.
+
+| Change | Result vs. shipped | Verdict |
+|---|---|---|
+| Oracle presence/date/kWp | +4 TP of 120 | Main-model inputs are not the main loss |
+| Prototype HistGradientBoosting nowcaster | ≈ equal at n_train 24; +5 TP only at 90 | Not a fix at dev size |
+| Training customers 24 → 90 | +4–5 TP | Small data-hunger effect |
+| Reference = latest plateau | fresh 8/16 → 14/47; top-3 4/2 → 1/5 | Reject |
+| Seasonal de-bias (raw or customer-centred) | fresh main 8/16 → 8/16 or 8/13; top-3 equal or worse | Reject |
+| De-bias + latest plateau | top-3 4/2 → 1/5 | Reject |
+| Install-step guard removed | +1–2 TP, +1–5 FP; inconsistent across repeats | Reject |
+| MIN_RATIO 1.08 | +3 TP, +2 FP (within repeat noise of ±4 TP) | Not adopted |
+| Six date-refinement alternatives | ±2 TP | Keep `refine_day` |
+
+**Conclusion.** The detector is implemented and measured correctly. Its ceiling is set by a nowcast whose customer-specific seasonal swing is larger than typical extension steps. A real fix needs a redesign: a per-customer seasonal model, or change detection on the year-over-year difference of the nowcast. That is unmeasured and out of scope before the deadline. The shipped constants stay as pre-registered.
