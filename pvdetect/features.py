@@ -64,6 +64,18 @@ SMALLPV_MIN_DAYS = 30  # valid summer and winter days in the last 365
 CAPACITY_FEATURES = ("dip_kw", "log_kwp_phys", "zero_window_h", "night_kw", "log_mean_daily_kwh")
 EXPORT_CAPACITY_FEATURES = ("export_kw", "night_kw")
 LOG1P_CAPACITY = ("dip_kw", "zero_window_h", "night_kw", "export_kw")
+# Capacity feature (option `tobit`): censored-likelihood capacity estimate (Brown, Abate & Rogers 2021). The meter
+# reads r = max(0, load − PV), so a zero reading only says PV ≥ load. Depends on the fit's onset and yield shape,
+# so computed in every fit/predict, never cached; the capacity model uses it only when inner CV picks it.
+TOBIT_FEATURES = ("log_kwp_tobit",)
+TOBIT_SLOTS = np.arange(20, 80)  # 05:00–20:00 UTC+1 (slot k covers k/4 h … (k+1)/4 h)
+TOBIT_POST_MONTHS = (4, 5, 6, 7, 8)
+TOBIT_MIN_PRE = 60  # valid pre-onset days
+TOBIT_MIN_SEASON = 20  # pre-onset weekdays of the post months before falling back to all pre-onset weekdays
+TOBIT_MIN_POST = 10  # selected post-onset weekdays
+TOBIT_GAP_DAYS = 14  # post days start this long after the onset
+TOBIT_GRID = np.linspace(np.log(5.0), np.log(2000.0), 80)
+TOBIT_EPS_KW = 4 * 0.005  # a reading at or below this (kW) is censored: generation ≥ load (the `zero` threshold)
 NOON_SLOT = 50  # 12:30 UTC+1
 
 
@@ -314,6 +326,113 @@ def _solar_shape_consistency(v: pd.DataFrame, cut: pd.Timestamp) -> float:
     return float(min(deltas))
 
 
+def tobit_bell(hours: np.ndarray, month: np.ndarray) -> np.ndarray:
+    """Timestamp-only clear-sky bell max(0, cos(π(h − 12.5)/L_m)), L_m linear in the month distance from June:
+    14 h in June, 9 h in December. No location (latitude, longitude, orientation) is used."""
+    dist = np.abs(((np.asarray(month) - 6) + 6) % 12 - 6)  # 0 in June … 6 in December
+    L = 14.0 - 5.0 * dist / 6.0
+    return np.maximum(0.0, np.cos(np.pi * (np.asarray(hours, float) - 12.5) / L))
+
+
+def tobit_loglik(log_c: np.ndarray, r: np.ndarray, f: np.ndarray, mu: np.ndarray, sd: np.ndarray) -> np.ndarray:
+    """Censored log-likelihood of capacities exp(log_c) for readings r (kW) under lognormal load (mu, sd of log
+    load per reading) and PV C·f: r > ε contributes the lognormal log-pdf of the load r + C·f, r ≤ ε the
+    log-cdf of C·f (load ≤ generation)."""
+    from scipy.stats import norm
+
+    C = np.exp(np.asarray(log_c, float))[:, None]
+    cens = r <= TOBIT_EPS_KW
+    out = np.zeros(C.shape[0])
+    if (~cens).any():
+        load = r[~cens] + C * f[~cens]
+        z = (np.log(load) - mu[~cens]) / sd[~cens]
+        out += np.sum(-0.5 * z**2 - 0.5 * np.log(2 * np.pi) - np.log(sd[~cens]) - np.log(load), axis=1)
+    if cens.any():
+        out += np.sum(norm.logcdf((np.log(C * f[cens]) - mu[cens]) / sd[cens]), axis=1)
+    return out
+
+
+def tobit_estimate(r: np.ndarray, f: np.ndarray, mu: np.ndarray, sd: np.ndarray) -> float:
+    """log Ĉ maximising `tobit_loglik`: 80-point grid over log 5 … log 2000 kWp, then golden-section refinement
+    between the neighbours of the best grid point."""
+    ll = tobit_loglik(TOBIT_GRID, r, f, mu, sd)
+    if not np.isfinite(ll).any():
+        return np.nan
+    i = int(np.nanargmax(np.where(np.isfinite(ll), ll, -np.inf)))
+    a, b = TOBIT_GRID[max(i - 1, 0)], TOBIT_GRID[min(i + 1, len(TOBIT_GRID) - 1)]
+    g = (np.sqrt(5) - 1) / 2
+    x1, x2 = b - g * (b - a), a + g * (b - a)
+    f1, f2 = tobit_loglik(np.array([x1, x2]), r, f, mu, sd)
+    for _ in range(40):
+        if f1 >= f2:
+            b, x2, f2 = x2, x1, f1
+            x1 = b - g * (b - a)
+            f1 = tobit_loglik(np.array([x1]), r, f, mu, sd)[0]
+        else:
+            a, x1, f1 = x1, x2, f2
+            x2 = a + g * (b - a)
+            f2 = tobit_loglik(np.array([x2]), r, f, mu, sd)[0]
+    x = (a + b) / 2
+    return float(x) if tobit_loglik(np.array([x]), r, f, mu, sd)[0] >= ll[i] else float(TOBIT_GRID[i])
+
+
+def tobit_features(
+    dates: np.ndarray, M: np.ndarray, valid: np.ndarray, onset: pd.Timestamp, yield_shape: np.ndarray
+) -> dict[str, float]:
+    """`log_kwp_tobit` from the UTC+1 day matrix around a detected onset (weekdays, 08:00–17:00).
+
+    Load per slot: lognormal with the mean/std of log readings over the pre-onset weekdays of the post months
+    (April–August; all pre-onset weekdays when fewer than TOBIT_MIN_SEASON), shifted by the log ratio of the
+    post/pre median night load. PV: C · yield_shape[week] · `tobit_bell`. Post days: April–August weekdays from
+    TOBIT_GAP_DAYS after the onset, the half with the largest midday deficit against the load model (clear-day
+    proxy). NaN without enough pre/post days."""
+    out = dict.fromkeys(TOBIT_FEATURES, np.nan)
+    d = pd.DatetimeIndex(dates)
+    pre_all = valid & (d < onset)
+    if pre_all.sum() < TOBIT_MIN_PRE:
+        return out
+    month = d.month.to_numpy()
+    weekday = d.weekday.to_numpy() < 5
+    summer = np.isin(month, TOBIT_POST_MONTHS)
+    post = valid & weekday & summer & (d >= onset + pd.Timedelta(days=TOBIT_GAP_DAYS))
+    pre = pre_all & weekday & summer
+    if pre.sum() < TOBIT_MIN_SEASON:
+        pre = pre_all & weekday
+    if pre.sum() < TOBIT_MIN_SEASON or post.sum() < 2 * TOBIT_MIN_POST:
+        return out
+    X = 4 * M[:, TOBIT_SLOTS]
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        logs = np.log(np.where(X[pre] > TOBIT_EPS_KW, X[pre], np.nan))
+        mu, sd = np.nanmean(logs, axis=0), np.nanstd(logs, axis=0)
+        night = np.nanmean(M[:, 0:20], axis=1)
+        n_pre, n_post = np.nanmedian(night[pre_all]), np.nanmedian(night[valid & (d >= onset)])
+    if not (np.isfinite(n_pre) and np.isfinite(n_post) and n_pre > 0 and n_post > 0):
+        return out
+    mu = mu + np.log(n_post / n_pre)
+    ok = np.isfinite(mu) & np.isfinite(sd) & (sd > 1e-3)
+    if not ok.any():
+        return out
+    rows = np.flatnonzero(post)
+    expected = np.exp(mu + sd**2 / 2)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        deficit = np.nanmean(expected[ok] - X[rows][:, ok], axis=1)
+    keep = np.isfinite(deficit)
+    rows, deficit = rows[keep], deficit[keep]
+    if len(rows) < 2 * TOBIT_MIN_POST:
+        return out
+    rows = rows[deficit >= np.median(deficit)]
+    woy = np.minimum(d[rows].isocalendar().week.to_numpy().astype(int), 52)
+    hours = (TOBIT_SLOTS + 0.5) / 4
+    f = np.asarray(yield_shape, float)[woy - 1][:, None] * tobit_bell(hours[None, :], month[rows][:, None])
+    r = X[rows]
+    use = np.isfinite(r) & (f > 0) & ok[None, :]
+    mu_r, sd_r = np.broadcast_to(mu, r.shape)[use], np.broadcast_to(sd, r.shape)[use]
+    out["log_kwp_tobit"] = tobit_estimate(r[use], f[use], mu_r, sd_r)
+    return out
+
+
 def fitted_features(
     cd,
     clim: Climatology,
@@ -327,7 +446,7 @@ def fitted_features(
     `recur_strict` and `tail_guard` are the fit's detection options. `onset_first` is a dating option only:
     the features use the default candidate choice, and only the returned `Commissioning` (date and regime)
     uses the earliest-qualifying rule, so adopting it never changes the detection features."""
-    out = dict.fromkeys(FITTED + PERSISTENCE_FEATURES + SCHEDULE_FEATURES + SUN_FEATURES, np.nan)
+    out = dict.fromkeys(FITTED + PERSISTENCE_FEATURES + SCHEDULE_FEATURES + SUN_FEATURES + TOBIT_FEATURES, np.nan)
     if cd is None or cd.n_valid == 0:
         return out, None
     daily = cd.daily
@@ -369,6 +488,7 @@ def fitted_features(
     summer_all = v[v["month"].isin(SUMMER)]
     if cp is not None and cp.found:
         cut = pd.Timestamp(cp.date)
+        out.update(tobit_features(cd.dates, cd.M, daily["valid"].to_numpy(bool), cut, clim.yield_shape))
         pre = _med(summer_all.loc[summer_all.index < cut, "mid"], 10)
         post = summer_all.loc[summer_all.index >= cut, "mid"]
     else:

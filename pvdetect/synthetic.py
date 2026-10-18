@@ -39,6 +39,7 @@ SCENARIOS = (
     "label_lead_60",
     "winter_install_ramp",
     "holiday_tail",
+    "censored_large",
 )
 # Development-only scenarios (variant A): `label_lag_60` labels each PV customer 30–90 days after its
 # visible onset; `meter_spikes` adds a few isolated single-slot spikes of 20–50× the median slot value
@@ -59,6 +60,9 @@ SCENARIOS = (
 # install; the spring ramp creates a later, larger step that can outrank the true winter onset.
 # `holiday_tail` adds a commercial-style December vacation shutdown in the last 30–45 days of every
 # customer's series (PV and non-PV alike), creating an end-of-series artifact that can masquerade as an onset.
+# `censored_large`: half the customers are commercial (as `commercial_heavy`) and every commercial PV system is drawn
+# log-uniformly from 10–200 kWp, up to many times the midday load; without export the meter reads max(0, load − PV),
+# so the midday deficit saturates at the load and deficit-based capacity features cannot see the size.
 A_ONLY_SCENARIOS = (
     "label_lag_60",
     "meter_spikes",
@@ -70,6 +74,7 @@ A_ONLY_SCENARIOS = (
     "label_lead_60",
     "winter_install_ramp",
     "holiday_tail",
+    "censored_large",
 )
 SHARED_WEATHER_KINDS = ("ac", "summer_absence")
 SPIKES_PER_YEAR = 3
@@ -509,7 +514,7 @@ def _dataset_specs(
             if (cend - cstart).days < 730:
                 cend = min(t1, cstart + pd.Timedelta(days=730))
                 cstart = max(t0, cend - pd.Timedelta(days=730))
-        commercial = (i // 2) % 2 == 0 if scenario == "commercial_heavy" else i % 7 == 3
+        commercial = (i // 2) % 2 == 0 if scenario in ("commercial_heavy", "censored_large") else i % 7 == 3
         profile = "commercial" if commercial else "residential"
         missing_rate = 0.05 if scenario == "missing_5pct" else 0.005
         lo = cstart + pd.Timedelta(days=120)
@@ -535,6 +540,8 @@ def _dataset_specs(
                 pv_date = cend - pd.Timedelta(days=int(aux.integers(56, 113)))
             if scenario == "small_pv" and not commercial:
                 kwp = round(float(aux.uniform(0.8, 2.0)), 1)
+            if scenario == "censored_large" and commercial:
+                kwp = round(float(np.exp(aux.uniform(np.log(10.0), np.log(200.0)))), 1)
             if scenario == "east_west_heavy":
                 ew = (i // 2) % 2 == 0
             else:
