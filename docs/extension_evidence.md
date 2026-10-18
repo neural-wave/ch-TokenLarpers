@@ -142,3 +142,25 @@ With a perfect nowcast, the ceiling under the main model's inputs and guards wou
 | Six date-refinement alternatives | ±2 TP | Keep `refine_day` |
 
 **Conclusion.** The detector is implemented and measured correctly. Its ceiling is set by a nowcast whose customer-specific seasonal swing is larger than typical extension steps. A real fix needs a redesign: a per-customer seasonal model, or change detection on the year-over-year difference of the nowcast. That is unmeasured and out of scope before the deadline. The shipped constants stay as pre-registered.
+
+## Third round: per-customer seasonal change-point (rejected by pre-registered rule)
+**Candidate.** Replace the level test and year-over-year box with a per-customer harmonic change-point model: the customer's own two annual harmonics, fitted jointly with up to two steps (BFAST-style). It targets the root cause above.
+
+**Unit check.** On a hand-built series (customer-specific swing 0.35, true step 0.25):
+- The shipped test finds nothing.
+- The harmonic model finds the step at the exact window (δ 0.246, z 14.8).
+- It stays silent on the flat and outage series.
+
+**Adoption rule** (pre-registered in `DECISIONS.md`): adopt only if, in both variants, the hidden-test MC mean bonus beats shipped **and** MC FP is at most shipped + 0.10. FP matters because the real-data gate is `fp ≤ 1.00`.
+
+| Run | Shipped MC bonus / FP | Harmonic MC bonus / FP | Verdict |
+|---|---|---|---|
+| A dev r0–1 (Z chosen = 3) | 0.64 / 1.00 | 1.01 / 1.70 | (dev) |
+| A fresh r2–5, Z = 3 | 1.18 / 0.83 | 1.87 / 0.97 | fail: FP +0.14 |
+| B dev r0–1 (Z chosen = 3) | 1.06 / 0.98 | 1.92 / 0.95 | (dev) |
+| B fresh r2–5, Z = 3 | 1.24 / 0.86 | 2.21 / 0.77 | pass |
+| B new block r6–9, Z = 4 (Tier B, pre-registered) | 1.19 / 0.68 | 1.56 / 0.95 | fail: FP +0.27 |
+
+**Reading.** The harmonic model raised the MC bonus in every run (+0.37 to +0.97), but false alarms grew in three of four held-out comparisons, mostly on extension customers (double, clipped, winter). By the pre-registered rule the shipped detector stays.
+
+**Next steps after the deadline.** The bonus gain is consistent. Revisit with an FP control learned on training customers, for example a per-customer z calibration, and confirm on a new seed block.
