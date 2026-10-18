@@ -13,6 +13,7 @@ from pvdetect.features import (
     EXPORT_CAPACITY_FEATURES,
     RECENT_FEATURES,
     SCHEDULE_FEATURES,
+    TOBIT_FEATURES,
     SMALLPV_FEATURES,
     SUN_FEATURES,
     capacity_feature_names,
@@ -69,16 +70,18 @@ START_LAG_MIN_N = 3  # fewer present-at-start gaps: 0 (today) or, with `offset_t
 # Recall-targeted feature blocks (missed PV): `recent` (tail evidence against the same weeks of earlier years and
 # the customer's own earlier level) and `smallpv` (scale-free midday deficit against night/evening load).
 # Both are in the default pool; `train.py --no-recent --no-smallpv` removes them.
+# `tobit`: the censored-likelihood capacity feature `log_kwp_tobit` added to the capacity names (capacity model
+# only), in the default pool; `train.py --no-tobit` removes it.
 ALL_OPTIONS = frozenset(
     {
         "e1", "e2", "schedule", "weekly", "ctune", "offset_tri", "recur_strict", "sun", "recent", "smallpv",
-        "date_debias", "cap_ceiling", "onset_first", "tail_guard", "fraunhofer",
+        "date_debias", "cap_ceiling", "onset_first", "tail_guard", "fraunhofer", "tobit",
     }
 )
 DEFAULT_OPTIONS = frozenset(
     {
         "e1", "e2", "weekly", "ctune", "offset_tri", "recur_strict", "recent", "smallpv",
-        "date_debias", "cap_ceiling", "onset_first", "tail_guard",
+        "date_debias", "cap_ceiling", "onset_first", "tail_guard", "tobit",
     }
 )
 REGIMES = ("event", "present_at_start", "insufficient")
@@ -878,6 +881,25 @@ def _choose_block(
     return (cand_names, *cand, info) if adopt else (names, oof, sel, info)
 
 
+def _choose_tobit(
+    table, labels, lab, train_ids, splits, names, cap_names, setting, oof, sel, avg=True, C=LOGREG_C, weekly=False,
+    dkw=None,
+):
+    """`tobit` capacity feature on top of the current capacity names, same inner splits and rule."""
+    cand_cap = cap_names + list(TOBIT_FEATURES)
+    c_oof = _inner_oof(
+        table, labels, lab, train_ids, splits, names, cand_cap, setting, C=C, weekly=weekly, **(dkw or {})
+    )
+    c_sel = _select(c_oof, avg)
+    c_sel["inner_score"] = _full_inner_score(c_oof, c_sel)
+    adopt, boot = _adopt((oof, sel), (c_oof, c_sel))
+    info = {
+        "tobit": "on" if adopt else "off",
+        "tobit_options": {"off": sel["inner_score"], "on": c_sel["inner_score"], "bootstrap_p": boot},
+    }
+    return (cand_cap, c_oof, c_sel, info) if adopt else (cap_names, oof, sel, info)
+
+
 def _choose_onset_first(
     table, labels, lab, train_ids, splits, names, cap_names, oof, sel, avg=True, C=LOGREG_C, weekly=False, dkw=None
 ):
@@ -960,6 +982,7 @@ def fit(
     strict_info = {"recur_strict": "off"} if "recur_strict" in options else {}
     onset_first_info = {"onset_first": "off"} if "onset_first" in options else {}
     tail_guard_info = {"tail_guard": "off"} if "tail_guard" in options else {}
+    tobit_info = {"tobit": "off"} if "tobit" in options else {}
     dkw: dict = {}  # adopted date options, passed to every later inner OOF and the final fit
     base_oof = None
     base_sel = None
@@ -1031,6 +1054,10 @@ def fit(
                     recent_info = info
                 else:
                     smallpv_info = info
+        if "tobit" in options:
+            cap_names, oof, sel, tobit_info = _choose_tobit(
+                *block_args, names, cap_names, setting, oof, sel, avg, C, weekly, dkw
+            )
         base_oof, base_sel = oof, sel
         option_oof, option_sel = oof, sel
     else:
@@ -1179,6 +1206,7 @@ def fit(
     sel.update(sun_info)
     sel.update(recent_info)
     sel.update(smallpv_info)
+    sel.update(tobit_info)
     sel.update(pseudo_info)
     # the base kind is the classifier the final model evaluates next to the CNN (itself for every other kind)
     base = sel.get("classifier_base", sel["classifier"])

@@ -150,6 +150,37 @@ def test_label_flip_with_onset_first_and_tail_guard_forced_on(data, monkeypatch)
     pdt.assert_frame_equal(a, b)
 
 
+def test_label_flip_with_tobit_forced_on(data, monkeypatch):
+    """`tobit` forced on (margin/bootstrap disabled): `log_kwp_tobit` uses the fit's onset and yield shape, so it is
+    computed inside fit/predict; flipping held-out labels changes nothing in their fold."""
+    monkeypatch.setattr(procedure, "CLASSIFIER_MARGIN", -np.inf)
+    monkeypatch.setattr(procedure, "BOOTSTRAP_MIN", 0.0)
+    table, labels = data
+    options = frozenset({"tobit"})
+    train_ids, test_ids = outer_splits(labels, repeats=1, folds=3)[0][0]
+    model = fit(table, labels, train_ids, options=options)
+    assert model["selection"]["tobit"] == "on"
+    assert "log_kwp_tobit" in model["capacity_feature_names"]
+    a = _fold_predictions(table, labels, train_ids, test_ids, options)
+    b = _fold_predictions(table, _flip_test_ids(labels, test_ids), train_ids, test_ids, options)
+    pdt.assert_frame_equal(a, b)
+
+
+def test_models_without_tobit_predict_unchanged(data, monkeypatch):
+    """A model fitted without `tobit` (as every older model) never reads `log_kwp_tobit`: its predictions are the
+    same whether or not the feature is computed."""
+    from pvdetect import features
+
+    table, labels = data
+    train_ids, test_ids = outer_splits(labels, repeats=1, folds=3)[0][0]
+    model = fit(table, labels, train_ids, options=DEFAULT_OPTIONS - {"tobit"})
+    assert "tobit" not in model["selection"] and "log_kwp_tobit" not in model["capacity_feature_names"]
+    a = predict(model, table, test_ids)[0]
+    monkeypatch.setattr(features, "tobit_features", lambda *args, **kw: {"log_kwp_tobit": np.nan})
+    b = predict(model, table, test_ids)[0]
+    pdt.assert_frame_equal(a.drop(columns="log_kwp_tobit"), b.drop(columns="log_kwp_tobit"))
+
+
 def test_label_flip_with_avg_cnn_forced_on(data, monkeypatch):
     """With `fraunhofer` in the pool and every candidate adopted (margin and bootstrap disabled), the last
     candidate, `avg_cnn`, is the classifier; flipping held-out labels changes no prediction in their fold."""

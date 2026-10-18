@@ -69,7 +69,7 @@ def _selection_line(infos: list[dict]) -> str:
     pseudo = Counter(i.get("pseudo") for i in infos if i.get("pseudo"))
     if pseudo:
         parts.append(f"pseudo off={pseudo.get('off', 0)}/{n} on={pseudo.get('on', 0)}/{n}")
-    for key in ("offset_tri", "recur_strict", "onset_first", "tail_guard", "date_debias", "cap_ceiling"):
+    for key in ("offset_tri", "recur_strict", "onset_first", "tail_guard", "date_debias", "cap_ceiling", "tobit"):
         got = Counter(i.get(key) for i in infos if i.get(key))
         if got:
             parts.append(f"{key} off={got.get('off', 0)}/{n} on={got.get('on', 0)}/{n}")
@@ -130,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-date-debias", action="store_true", help="drop the per-regime residual date-bias option")
     ap.add_argument("--no-cap-ceiling", action="store_true", help="drop the learned capacity-band option")
     ap.add_argument("--no-onset-first", action="store_true", help="drop the onset-first date option (earlier-year recurrence + earliest-qualifying-candidate selection)")
+    ap.add_argument("--no-tobit", action="store_true", help="drop the censored-likelihood capacity feature option")
     ap.add_argument("--no-tail-guard", action="store_true", help="drop the tail-guard detection option (≥45 valid days after τ, ≥2 post months)")
     ap.add_argument("--schedule", action="store_true", help="add the schedule-robust feature-block option")
     ap.add_argument("--sun", action="store_true", help="add the sunshine-coupling feature-block option")
@@ -161,6 +162,7 @@ def main(argv: list[str] | None = None) -> int:
         | ({"cap_ceiling"} if args.no_cap_ceiling else set())
         | ({"onset_first"} if args.no_onset_first else set())
         | ({"tail_guard"} if args.no_tail_guard else set())
+        | ({"tobit"} if args.no_tobit else set())
     )
     options = DEFAULT_OPTIONS - dropped | {o for o in ("schedule", "sun", "fraunhofer") if getattr(args, o)}
     if args.oof_out and not args.cv:

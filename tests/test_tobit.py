@@ -84,3 +84,34 @@ def test_nan_without_any_pre_onset_reading():
     M = _matrix(40.0)
     M[np.asarray(DATES < ONSET)] = np.nan
     assert np.isnan(tobit_features(DATES.values, M, np.ones(len(DATES), bool), ONSET, FLAT_YIELD)["log_kwp_tobit"])
+
+
+def _inner_scores(scenario: str, seed: int) -> tuple[float, float]:
+    """Full inner score without / with `log_kwp_tobit` in the capacity names, same inner splits."""
+    from pvdetect import procedure as P
+    from pvdetect.evaluation import inner_splits
+    from pvdetect.features import capacity_feature_names, feature_names
+    from pvdetect.pipeline import build_feature_table
+    from pvdetect.synthetic import generate_dataset
+    from tests.helpers import as_loaded
+    from tests.test_evaluation import typed_labels
+
+    ts, labels, _ = generate_dataset(32, seed=seed, scenario=scenario)
+    table, lab = build_feature_table(as_loaded(ts)), typed_labels(labels)
+    ids = list(lab["customer_id"])
+    splits = inner_splits(lab, ids)
+    names, cap = feature_names(False), capacity_feature_names(False)
+    scores = []
+    for cap_names in (cap, cap + ["log_kwp_tobit"]):
+        oof = P._inner_oof(table, lab, lab.set_index("customer_id"), ids, splits, names, cap_names)
+        scores.append(P._full_inner_score(oof, P._select(oof, False)))
+    return scores[0], scores[1]
+
+
+def test_tier_r_censored_large_gains_and_base_is_not_hurt():
+    """Tier R (dev seeds, variant A): with large non-exporting commercial PV the midday deficit saturates at the
+    load; `log_kwp_tobit` raises the inner score there and leaves `base` within a small tolerance."""
+    off, on = _inner_scores("censored_large", 11)
+    assert on - off >= 1.0
+    off, on = _inner_scores("base", 13)
+    assert on - off >= -0.2

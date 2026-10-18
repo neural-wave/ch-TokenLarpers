@@ -270,7 +270,7 @@ def test_label_flip_invariant_with_pool(data, monkeypatch, force):
         monkeypatch.setattr(procedure, "_adopt", lambda base, cand: (True, 1.0))
     train_ids, test_ids = outer_splits(labels, repeats=1, folds=3)[0][0]
     # forced tail_guard / onset_first re-select the classifier (weekly here), which pseudo-labels never refit
-    opts = procedure.DEFAULT_OPTIONS - {"tail_guard", "onset_first"}
+    opts = procedure.DEFAULT_OPTIONS - {"tail_guard", "onset_first", "tobit"}
     m_a = fit(pooled, labels, train_ids, options=opts)
     m_b = fit(pooled, _flip(labels, test_ids), train_ids, options=opts)
     if force:

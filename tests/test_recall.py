@@ -124,7 +124,7 @@ def data():
     return build_feature_table(as_loaded(ts)), typed_labels(labels)
 
 
-NO_OTHER = procedure.DEFAULT_OPTIONS - {"weekly", "ctune", "offset_tri", "recur_strict", "e1", "e2", "smallpv", "recent", "onset_first", "tail_guard"}
+NO_OTHER = procedure.DEFAULT_OPTIONS - {"weekly", "ctune", "offset_tri", "recur_strict", "e1", "e2", "smallpv", "recent", "onset_first", "tail_guard", "tobit"}
 
 
 @pytest.mark.parametrize("key,extra", [("recent", RECENT_FEATURES), ("smallpv", SMALLPV_FEATURES)])

@@ -27,7 +27,7 @@ from tests.test_evaluation import typed_labels
 PERSIST = PERSISTENCE_FEATURES[0]
 RELEASE_DIR = Path(__file__).resolve().parents[1] / "scripts"
 # The stubbed inner OOFs below score neither the weekly head nor other logreg Cs (see tests/test_weekly.py).
-E1E2 = procedure.DEFAULT_OPTIONS - {"weekly", "ctune", "offset_tri", "recur_strict", "recent", "smallpv", "onset_first", "tail_guard"}
+E1E2 = procedure.DEFAULT_OPTIONS - {"weekly", "ctune", "offset_tri", "recur_strict", "recent", "smallpv", "onset_first", "tail_guard", "tobit"}
 
 
 # ------------------------------------------------------------------ E1 feature
