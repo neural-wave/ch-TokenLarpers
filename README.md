@@ -302,7 +302,7 @@ The loader sniffs `;`/`,` separators and comma decimals, accepts epoch seconds o
 2. **Nowcast.** A CatBoost regressor maps each window to log kWp installed at that time. It is fitted inside `procedure.fit` on the fit's training customers only. Training windows lie inside one labelled capacity regime (the initial kWp, or the total after a labelled `--ext-labels` extension).
    - Optional, **off by default and not recommended:** with `--ext-unlabelled PATH`, up to `--ext-pool` (default 400) unlabelled customers with ≥ 365 valid days are added. Each fit's own main model predicts them, and those it calls PV with P ≥ 0.95 add one pseudo-labelled regime (predicted date and kWp).
    - The flag changes no main-model option.
-   - In the end-to-end synthetic benchmark these pseudo-labels cut recall roughly tenfold (see the evidence document), so the submission trains without it.
+   - In the end-to-end synthetic benchmark these pseudo-labels cut recall 2–9× (see the evidence document), so the submission trains without it.
 3. **Level test.** PELT segmentation of the nowcast. A new plateau must beat every earlier long plateau by ≥ ×1.15 at z ≥ 3. The median of the rest of the series must clear the same margin: installed capacity does not fall back.
 4. **Year-over-year box.** A capacity step makes k(t) − k(t − 364 d) a box exactly one year wide. That box must agree within ±6 weeks (z ≥ 1.5). Without a year of history, the level step needs z ≥ 4.
 5. **Date and capacity.** The date is the two-segment fit of the daily year-over-year zero-run envelope within ±50 days. The capacity after is the median nowcast on the new plateau, or the predicted initial kWp × the step ratio when that median is not above it.
