@@ -426,14 +426,21 @@ def _p_mean(ape: np.ndarray) -> float:
     return float(np.where(np.isfinite(ape), np.maximum(0, 1 - ape / 0.5), 0.0).mean()) if ape.size else np.nan
 
 
-def _proba(oof: pd.DataFrame, kind: str) -> np.ndarray:
+def _proba(oof: pd.DataFrame, kind: str, base: str | None = None) -> np.ndarray:
     """Inner OOF probabilities of a classifier option; `avg` (E2) is the mean of logreg and CatBoost,
-    `avg_weekly` the mean of logreg and the weekly head's customer score."""
+    `avg_weekly` the mean of logreg and the weekly head's customer score, `avg_cnn` the mean of the CNN
+    customer score and the `base` classifier chosen before the CNN step."""
+    if kind == "avg_cnn":
+        return (_proba(oof, base) + oof["p_fraunhofer"].to_numpy(float)) / 2
     if kind == "avg":
         return (oof["p_logreg"].to_numpy(float) + oof["p_catboost"].to_numpy(float)) / 2
     if kind == "avg_weekly":
         return (oof["p_logreg"].to_numpy(float) + oof["p_weekly"].to_numpy(float)) / 2
     return oof[f"p_{kind}"].to_numpy(float)
+
+
+def _sel_proba(oof: pd.DataFrame, sel: dict) -> np.ndarray:
+    return _proba(oof, sel["classifier"], sel.get("classifier_base"))
 
 
 def _select(oof: pd.DataFrame, avg: bool = True) -> dict:
@@ -472,6 +479,7 @@ def _select(oof: pd.DataFrame, avg: bool = True) -> dict:
                 boot_weekly[kind] = bootstrap_prob_better(_proba(oof, clf_kind), thr, p_k, t_k, t_pv, err, ape_r)
                 if boot_weekly[kind] >= BOOTSTRAP_MIN:
                     clf_kind, thr = kind, t_k
+    base_kind = clf_kind
     if "p_fraunhofer" in oof.columns:
         p_fh = _proba(oof, "fraunhofer")
         t_fh, scores["fraunhofer"] = pick_threshold(threshold_scores(p_fh, t_pv, err, ape_r))
@@ -482,7 +490,17 @@ def _select(oof: pd.DataFrame, avg: bool = True) -> dict:
             )
             if boot_weekly["fraunhofer"] >= BOOTSTRAP_MIN:
                 clf_kind, thr = "fraunhofer", t_fh
-    prob = _proba(oof, clf_kind)
+        # `avg_cnn`: the CNN averaged with the classifier chosen above, against the best of the others.
+        p_ac = _proba(oof, "avg_cnn", base_kind)
+        t_ac, scores["avg_cnn"] = pick_threshold(threshold_scores(p_ac, t_pv, err, ape_r))
+        boot_weekly["avg_cnn"] = None
+        if scores["avg_cnn"] - scores[clf_kind] >= CLASSIFIER_MARGIN:
+            boot_weekly["avg_cnn"] = bootstrap_prob_better(
+                _proba(oof, clf_kind, base_kind), thr, p_ac, t_ac, t_pv, err, ape_r
+            )
+            if boot_weekly["avg_cnn"] >= BOOTSTRAP_MIN:
+                clf_kind, thr = "avg_cnn", t_ac
+    prob = _proba(oof, clf_kind, base_kind)
     tp = t_pv & (prob >= thr)
     true_k = oof["t_kwp"].to_numpy(float)
     P_r = _p_mean(ape_r[tp])
@@ -534,6 +552,8 @@ def _select(oof: pd.DataFrame, avg: bool = True) -> dict:
         "kappa_initial": kappa_initial,
         "insufficient_rule": rule,
     }
+    if clf_kind == "avg_cnn":
+        out["classifier_base"] = base_kind
     if not avg:
         del out["inner_score_avg"], out["bootstrap_p_avg"]
     for kind in boot_weekly:
@@ -541,7 +561,7 @@ def _select(oof: pd.DataFrame, avg: bool = True) -> dict:
         out[f"bootstrap_p_{kind}"] = boot_weekly[kind]
     return out
 def _full_inner_predictions(oof: pd.DataFrame, sel: dict) -> tuple[pd.DataFrame, pd.DataFrame]:
-    prob = _proba(oof, sel["classifier"])
+    prob = _sel_proba(oof, sel)
     raw_kwp = oof[f"kwp_{sel['capacity']}"].to_numpy(float)
     kwp = np.clip(float(sel.get("kappa", 1.0)) * raw_kwp, 0.5, 500.0)
     regime = oof["regime"].to_numpy()
@@ -666,7 +686,7 @@ def _choose_logreg_c(oof: pd.DataFrame, sel: dict, avg: bool = True) -> tuple[fl
 
 def _select_outputs(oof: pd.DataFrame, sel: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Outputs a configuration would submit: prediction, date error, capacity APE."""
-    pred = _proba(oof, sel["classifier"]) >= sel["threshold"]
+    pred = _sel_proba(oof, sel) >= sel["threshold"]
     dates = oof["date_first"] if sel["insufficient_rule"] == "first_date" else oof["date_weak"]
     err = _err_days(dates, oof["t_date"].to_numpy("datetime64[ns]"))
     ape = ape_array(sel["kappa"] * oof[f"kwp_{sel['capacity']}"].to_numpy(float), oof["t_kwp"].to_numpy(float))
@@ -704,7 +724,7 @@ def _debias_oof(oof: pd.DataFrame, sel: dict) -> tuple[pd.DataFrame, dict]:
     bias of the other folds' rows, so a customer's own label never moves its date. Also returns the bias
     over all rows (the fit's training customers), used by the final model."""
     t_pv = oof["t_pv"].to_numpy(bool)
-    tp = t_pv & (_proba(oof, sel["classifier"]) >= sel["threshold"])
+    tp = t_pv & (_sel_proba(oof, sel) >= sel["threshold"])
     dates = oof["date_first"] if sel["insufficient_rule"] == "first_date" else oof["date_weak"]
     err = _err_days(dates, oof["t_date"].to_numpy("datetime64[ns]"))
     regimes = oof["regime"].to_numpy()
@@ -1126,7 +1146,11 @@ def fit(
         cnn_oof = (emb_oof if block == "embedding" else option_oof).copy()
         cnn_oof["p_fraunhofer"] = inner_customer_scores(table, labels, train_ids, splits)
         cnn_sel = _select(cnn_oof, avg)
-        if cnn_sel["classifier"] == "fraunhofer":
+        if cnn_sel["classifier"] == "avg_cnn":
+            # the base classifier's inner OOF (pseudo-labelled or not) is what was scored; keep its fit
+            cnn_sel["inner_score"] = _full_inner_score(cnn_oof, cnn_sel)
+            sel = cnn_sel
+        elif cnn_sel["classifier"] == "fraunhofer":
             cnn_sel["inner_score"] = _full_inner_score(cnn_oof, cnn_sel)
             sel = cnn_sel
             if labeller:
@@ -1135,6 +1159,8 @@ def fit(
                 pseudo_info.update(pseudo="off", pseudo_disabled_reason="CNN trains on labelled customers only")
         sel["inner_score_fraunhofer"] = cnn_sel["inner_score_fraunhofer"]
         sel["bootstrap_p_fraunhofer"] = cnn_sel["bootstrap_p_fraunhofer"]
+        sel["inner_score_avg_cnn"] = cnn_sel["inner_score_avg_cnn"]
+        sel["bootstrap_p_avg_cnn"] = cnn_sel["bootstrap_p_avg_cnn"]
     if block == "embedding" and labeller:
         labeller = None
         pseudo_info = {k: v for k, v in pseudo_info.items() if k != "pseudo_labeller"}
@@ -1154,7 +1180,9 @@ def fit(
     sel.update(recent_info)
     sel.update(smallpv_info)
     sel.update(pseudo_info)
-    clf_kinds = ("logreg", "catboost") if sel["classifier"] in ("avg", "catboost") or labeller else ("logreg", "logreg")
+    # the base kind is the classifier the final model evaluates next to the CNN (itself for every other kind)
+    base = sel.get("classifier_base", sel["classifier"])
+    clf_kinds = ("logreg", "catboost") if base in ("avg", "catboost") or labeller else ("logreg", "logreg")
     comp = _fit_components(
         table,
         lab,
@@ -1173,9 +1201,12 @@ def fit(
         from pvdetect.pseudolabel import final_pseudo
 
         comp = final_pseudo(table, lab, train_ids, names, comp, pseudo_info)
-    if sel["classifier"] in ("catboost", "avg") and "catboost_clf" not in comp.objects:
-        sel["classifier"] = "logreg"
-        sel["inner_score"] = sel.get("inner_score_logreg", sel.get("inner_score", np.nan))
+    if base in ("catboost", "avg") and "catboost_clf" not in comp.objects:
+        if sel["classifier"] == "avg_cnn":
+            sel["classifier_base"] = base = "logreg"
+        else:
+            sel["classifier"] = base = "logreg"
+            sel["inner_score"] = sel.get("inner_score_logreg", sel.get("inner_score", np.nan))
     if sel["capacity"] == "catboost" and "catboost_cap" not in comp.objects:
         sel["capacity"] = "ridge"
     date = {**comp.date_params, "insufficient_rule": sel["insufficient_rule"]}
@@ -1200,20 +1231,20 @@ def fit(
         sel["feature_block"] = "embedding"
     if unavailable_reason is not None:
         sel["embedding_unavailable_reason"] = unavailable_reason
-    uses_cb = sel["classifier"] in ("catboost", "avg")
+    uses_cb = base in ("catboost", "avg")
     objects = {}
-    if sel["classifier"] == "fraunhofer":
+    if sel["classifier"] in ("fraunhofer", "avg_cnn"):
         from pvdetect.fraunhofer import build_window_dataset, train_fraunhofer
 
         train_ds = build_window_dataset(table.customers, labels, train_ids)
         fh_net = train_fraunhofer(train_ds, epochs=(40, 30, 20), batch_size=256, lr=1e-3, seed=0)
         objects["fraunhofer"] = fh_net
-    elif uses_cb:
+    if uses_cb:
         objects["catboost_clf"] = comp.objects["catboost_clf"]
     if sel["capacity"] == "catboost":
         objects["catboost_cap"] = comp.objects["catboost_cap"]
     # the weekly head is fitted on the labelled customers only (pseudo-labels refit the logreg/CatBoost only)
-    head = {"weekly": fit_head(table, lab, train_ids, comp.clim)} if sel["classifier"] in WEEKLY_KINDS else {}
+    head = {"weekly": fit_head(table, lab, train_ids, comp.clim)} if base in WEEKLY_KINDS else {}
     model = {
         "version": CURRENT_VERSION,
         "feature_names": names,
@@ -1223,8 +1254,9 @@ def fit(
         "classifier": {
             "kind": sel["classifier"],
             "threshold": sel["threshold"],
-            "fraunhofer_file": "fraunhofer.pt" if sel["classifier"] == "fraunhofer" else None,
-            "logreg": comp.logreg if sel["classifier"] in ("logreg", "avg", "avg_weekly") else None,
+            "fraunhofer_file": "fraunhofer.pt" if sel["classifier"] in ("fraunhofer", "avg_cnn") else None,
+            "logreg": comp.logreg if base in ("logreg", "avg", "avg_weekly") else None,
+            **({"base_kind": base} if sel["classifier"] == "avg_cnn" else {}),
             "catboost_file": "catboost_clf.cbm" if uses_cb else None,
             **head,
         },

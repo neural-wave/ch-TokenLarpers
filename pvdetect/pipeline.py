@@ -162,8 +162,12 @@ def classifier_proba(
     fraunhofer: np.ndarray | None = None,
 ) -> np.ndarray:
     """P(PV); `avg` (E2) is the mean of the logreg and CatBoost probabilities; `weekly` kinds need the
-    weekly head's customer scores (`weekly`): `weekly` is that score, `avg_weekly` its mean with logreg."""
+    weekly head's customer scores (`weekly`): `weekly` is that score, `avg_weekly` its mean with logreg;
+    `avg_cnn` is the mean of the CNN score and the `base_kind` classifier."""
     kind = kind or clf["kind"]
+    if kind == "avg_cnn":
+        base = classifier_proba(clf, objects, F, names, clf["base_kind"], weekly=weekly)
+        return (base + classifier_proba(clf, objects, F, names, "fraunhofer", fraunhofer=fraunhofer)) / 2
     if kind == "fraunhofer":
         if fraunhofer is None:
             raise ValueError("CNN classifier requires window probabilities and a loaded CNN artifact")
@@ -251,7 +255,7 @@ def predict(model: dict, table: FeatureTable, ids: list[str]) -> tuple[pd.DataFr
     clf = model["classifier"]
     weekly = customer_scores(clf["weekly"], table, ids, clim) if "weekly" in clf else None
     fh = None
-    if clf.get("kind") == "fraunhofer" and "fraunhofer" in objects:
+    if clf.get("kind") in ("fraunhofer", "avg_cnn") and "fraunhofer" in objects:
         from pvdetect.fraunhofer import fraunhofer_customer_scores
 
         fh = fraunhofer_customer_scores(objects["fraunhofer"], table, ids)

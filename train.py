@@ -37,6 +37,8 @@ def _selection_line(infos: list[dict]) -> str:
     clf_part = f"classifier logreg={clf.get('logreg', 0)}/{n} catboost={clf.get('catboost', 0)}/{n} avg={clf.get('avg', 0)}/{n}"
     if any("inner_score_weekly" in i for i in infos) or any(clf.get(k) for k in WEEKLY_KINDS):
         clf_part += "".join(f" {k}={clf.get(k, 0)}/{n}" for k in WEEKLY_KINDS)
+    if any("inner_score_fraunhofer" in i for i in infos) or clf.get("fraunhofer") or clf.get("avg_cnn"):
+        clf_part += "".join(f" {k}={clf.get(k, 0)}/{n}" for k in ("fraunhofer", "avg_cnn"))
     parts = [clf_part]
     cs = Counter(i.get("logreg_C") for i in infos if i.get("logreg_C") is not None)
     if cs:

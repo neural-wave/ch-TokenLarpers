@@ -9,13 +9,16 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from pvdetect import fraunhofer as fh
-from pvdetect.model import CURRENT_VERSION, load_model, save_model
-from pvdetect.pipeline import build_feature_table
-from pvdetect.procedure import _select
+from pvdetect import procedure
+from pvdetect.evaluation import outer_splits
+from pvdetect.model import CURRENT_VERSION, linear_score, load_model, referenced_files, save_model, sigmoid
+from pvdetect.pipeline import build_feature_table, classifier_proba, compute_features, predict
+from pvdetect.procedure import _select, fit
+from pvdetect.season import Climatology
 from pvdetect.synthetic import CustomerSpec, PVSpec, generate_customer
 from tests.helpers import as_loaded
 from tests.test_evaluation import _truth8
-from tests.test_precision import _oof
+from tests.test_precision import _oof, _split_probs, _truth
 
 
 @pytest.fixture(scope="module")
@@ -26,6 +29,24 @@ def cnn_data():
         for i in range(4)
     ]
     ts = pd.concat([generate_customer(s, seed=80 + i) for i, s in enumerate(specs)])
+    labels = pd.DataFrame({
+        "customer_id": [s.customer_id for s in specs],
+        "pv_installed": [s.pv is not None for s in specs],
+        "pv_installation_date": pd.to_datetime([s.pv.date if s.pv else None for s in specs]),
+        "pv_capacity_kwp": [5.0 if s.pv else np.nan for s in specs],
+    })
+    return build_feature_table(as_loaded(ts)), labels
+
+
+@pytest.fixture(scope="module")
+def cnn8():
+    """8 fabricated customers, half with PV installed mid-series."""
+    specs = [
+        CustomerSpec(f"{i:06d}", "2024-01-01", "2024-03-10", missing=False,
+                     pv=PVSpec("2024-02-05", 5.0) if i % 2 else None)
+        for i in range(8)
+    ]
+    ts = pd.concat([generate_customer(s, seed=90 + i) for i, s in enumerate(specs)])
     labels = pd.DataFrame({
         "customer_id": [s.customer_id for s in specs],
         "pv_installed": [s.pv is not None for s in specs],
@@ -191,3 +212,100 @@ def test_repeating_one_customer_history_preserves_loss_and_gradient():
     repeated_loss, repeated_gradient = objective(np.array([0, 1] + [2, 3] * 9))
     torch.testing.assert_close(repeated_loss, loss)
     torch.testing.assert_close(repeated_gradient, gradient)
+
+
+# ------------------------------------------------------------- avg_cnn kind
+
+
+def _fast_cnn(monkeypatch):
+    """One epoch per stage on CPU, whatever the caller asks for; the CNN is not the subject here."""
+    train = fh.train_fraunhofer
+
+    def fast(ds, *args, **kwargs):
+        return train(ds, epochs=(1, 1, 1), batch_size=64, lr=1e-3, device="cpu", seed=0)
+
+    monkeypatch.setattr(fh, "train_fraunhofer", fast)
+
+
+def test_avg_cnn_is_the_mean_with_the_pre_cnn_classifier_and_learns_its_threshold():
+    """Logreg misranks the first 3 PV and non-PV customers, the CNN the next 3: neither alone clears the
+    margin over the other, their mean separates everyone."""
+    t = _truth()
+    t_pv = t["pv_installed"].to_numpy(bool)
+    p_lr, p_cnn = _split_probs(t_pv, 3)
+    oof = _oof(t, p_lr, p_lr)
+    oof["p_fraunhofer"] = p_cnn
+    expected = np.where(t_pv, 0.95, 0.05)
+    pos, neg = np.flatnonzero(t_pv), np.flatnonzero(~t_pv)
+    expected[pos[:6]] = (0.30 + 0.95) / 2
+    expected[neg[:6]] = (0.70 + 0.05) / 2
+    np.testing.assert_array_equal(procedure._proba(oof, "avg_cnn", "logreg"), expected)
+    sel = _select(oof)
+    assert sel["classifier"] == "avg_cnn" and sel["classifier_base"] == "logreg"
+    assert sel["threshold"] == 0.5  # 0.375 < t <= 0.625 all separate; ties go to the one nearest 0.5
+    assert sel["inner_score_avg_cnn"] == pytest.approx(100.0)
+    assert sel["inner_score_fraunhofer"] == pytest.approx(sel["inner_score_logreg"])
+    assert sel["inner_score_logreg"] < 100.0
+    assert sel["bootstrap_p_fraunhofer"] is None
+    assert sel["bootstrap_p_avg_cnn"] >= procedure.BOOTSTRAP_MIN
+    np.testing.assert_array_equal(procedure._sel_proba(oof, sel), expected)
+
+
+def test_avg_cnn_needs_the_margin_over_the_best_other_kind():
+    t = _truth()
+    t_pv = t["pv_installed"].to_numpy(bool)
+    p_lr, _ = _split_probs(t_pv, 3, flawed=("logreg",))
+    oof = _oof(t, p_lr, p_lr)
+    oof["p_fraunhofer"] = np.where(t_pv, 0.95, 0.05)  # perfect CNN: adopted alone, the average adds nothing
+    sel = _select(oof)
+    assert sel["classifier"] == "fraunhofer" and "classifier_base" not in sel
+    assert sel["bootstrap_p_avg_cnn"] is None
+    del oof["p_fraunhofer"]
+    assert "inner_score_avg_cnn" not in _select(oof)
+
+
+def test_fit_with_avg_cnn_saves_both_components_and_predicts_their_mean(cnn8, monkeypatch, tmp_path):
+    table, labels = cnn8
+    _fast_cnn(monkeypatch)
+    # 8 customers cannot give a bootstrap of 0.8; the margin still decides (the full rule is tested above)
+    monkeypatch.setattr(procedure, "BOOTSTRAP_MIN", 0.0)
+
+    def stub(table, labels, lab, train_ids, splits, names, cap_names, setting=procedure.BASE_SETTING, **_):
+        t = lab.loc[train_ids]
+        return _oof(t, *(2 * [_split_probs(t["pv_installed"].to_numpy(bool), 1)[0]]))
+
+    def cnn_stub(table, labels, ids, splits):
+        t_pv = labels.set_index("customer_id").loc[list(ids), "pv_installed"].to_numpy(bool)
+        return _split_probs(t_pv, 1)[1]
+
+    monkeypatch.setattr(procedure, "_inner_oof", stub)
+    monkeypatch.setattr(fh, "inner_customer_scores", cnn_stub)
+    ids = labels["customer_id"].tolist()
+    model = fit(table, labels, ids, options=frozenset({"fraunhofer"}))
+    clf = model["classifier"]
+    assert clf["kind"] == "avg_cnn" and clf["base_kind"] == "logreg"
+    assert clf["logreg"] is not None and clf["fraunhofer_file"] == "fraunhofer.pt" and clf["catboost_file"] is None
+    assert model["selection"]["classifier_base"] == "logreg"
+    save_model(model, tmp_path / "model.json")
+    loaded = load_model(tmp_path / "model.json")
+    assert referenced_files(loaded) == ["fraunhofer.pt"]
+    before, _ = predict(model, table, ids)
+    after, _ = predict(loaded, table, ids)
+    pd.testing.assert_frame_equal(before, after, check_exact=False, rtol=1e-5, atol=1e-6)
+    F, _ = compute_features(table, ids, Climatology.from_json(loaded["climatology"]))
+    p_lr = sigmoid(linear_score(clf["logreg"], F[loaded["feature_names"]].to_numpy(float)))
+    p_cnn = fh.fraunhofer_customer_scores(loaded["_objects"]["fraunhofer"], table, ids)
+    np.testing.assert_allclose(after["prob"].to_numpy(float), (p_lr + p_cnn) / 2, rtol=0, atol=1e-6)
+
+
+def test_models_without_base_kind_predict_as_before():
+    """Old (pre-`avg_cnn`) classifier sections carry no `base_kind` and are untouched by the new branch."""
+    F = pd.DataFrame({"a": [0.0, 1.0, -2.0, 3.0]})
+    clf = {"kind": "logreg", "logreg": {"impute": [0.0], "mean": [0.0], "scale": [1.0], "coef": [0.5], "intercept": 0.1}}
+    fh_scores = np.array([0.2, 0.4, 0.6, 0.8])
+    p_lr = classifier_proba(clf, {}, F, ["a"])
+    np.testing.assert_allclose(p_lr, sigmoid(linear_score(clf["logreg"], F[["a"]].to_numpy(float))))
+    np.testing.assert_array_equal(classifier_proba({"kind": "fraunhofer"}, {}, F, ["a"], fraunhofer=fh_scores), fh_scores)
+    both = classifier_proba({**clf, "kind": "avg_cnn", "base_kind": "logreg"}, {}, F, ["a"], fraunhofer=fh_scores)
+    np.testing.assert_allclose(both, (p_lr + fh_scores) / 2, rtol=0, atol=1e-15)
+

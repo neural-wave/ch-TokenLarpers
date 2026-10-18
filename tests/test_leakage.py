@@ -148,3 +148,29 @@ def test_label_flip_with_onset_first_and_tail_guard_forced_on(data, monkeypatch)
     a = _fold_predictions(table, labels, train_ids, test_ids, options)
     b = _fold_predictions(table, flipped, train_ids, test_ids, options)
     pdt.assert_frame_equal(a, b)
+
+
+def test_label_flip_with_avg_cnn_forced_on(data, monkeypatch):
+    """With `fraunhofer` in the pool and every candidate adopted (margin and bootstrap disabled), the last
+    candidate, `avg_cnn`, is the classifier; flipping held-out labels changes no prediction in their fold."""
+    torch = pytest.importorskip("torch")
+    from pvdetect import fraunhofer as fh
+
+    train = fh.train_fraunhofer
+    # one epoch per stage on CPU: the CNN's fold safety is the subject, not its accuracy
+    monkeypatch.setattr(fh, "train_fraunhofer", lambda ds, *a, **k: train(ds, epochs=(1, 1, 1), device="cpu", seed=0))
+    monkeypatch.setattr(procedure, "CLASSIFIER_MARGIN", -np.inf)
+    monkeypatch.setattr(procedure, "BOOTSTRAP_MIN", 0.0)
+    table, labels = data
+    options = frozenset({"fraunhofer"})
+    train_ids, test_ids = outer_splits(labels, repeats=1, folds=3)[0][0]
+    old_threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        model = fit(table, labels, train_ids, options=options)
+        assert model["classifier"]["kind"] == "avg_cnn"
+        a = predict(model, table, test_ids)[0]
+        b = predict(fit(table, _flip_test_ids(labels, test_ids), train_ids, options=options), table, test_ids)[0]
+    finally:
+        torch.set_num_threads(old_threads)
+    pdt.assert_frame_equal(a, b)
