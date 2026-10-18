@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "neuralwave-data"
 version = "0.1.0"
 description = "Privacy-safe NeuralWave preprocessing and canonical data contract"
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.11,<3.14"
 dependencies = [
   "numpy>=1.24,<2",
   "pandas>=2.0,<3",

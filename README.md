@@ -23,14 +23,14 @@ For a readable, step-by-step explanation of the implemented pipeline, open [`doc
 Both pretrained encoder sizes are included under `pretrained/`. For clone-contained offline setup and matched baseline/hybrid experiments, see [`docs/hybrid_team_setup.md`](docs/hybrid_team_setup.md). After installing dependencies, run `python scripts/check_pretrained.py --models small medium` to verify both.
 
 
-Python 3.11–3.12 (`requires-python >=3.11,<3.13`; verified on 3.12).
+Python 3.11–3.13 (`requires-python >=3.11,<3.14`; plain `pip install -r requirements.txt` verified on 3.12 and 3.13). `requirements.txt` carries per-version pins via environment markers: 3.11–3.12 keep the rehearsed versions, 3.13 uses the oldest releases with 3.13 wheels.
 
 ```
 uv venv --python 3.12 .venv && source .venv/bin/activate
 uv pip install -r requirements.txt -r requirements-dev.txt
 ```
 
-or plain `pip install -r requirements.txt`. `requirements.txt` is compiled from `requirements.in` with exact pins (`uv pip compile requirements.in -o requirements.txt --python-version 3.12`).
+or plain `pip install -r requirements.txt`. `requirements.txt` is compiled from `requirements.in` with exact pins (`uv pip compile requirements.in --universal --python-version 3.11 -o requirements.txt`).
 
 PyTorch is included in the standard requirements for selected CNN inference.
 The `experiment` extra remains accepted by existing editable-install commands.
