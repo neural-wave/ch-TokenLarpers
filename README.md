@@ -191,7 +191,7 @@ python gui.py --model $P/runs/base/model.json
 - `compare A B`: `pvdetect.compare` on the two runs' out-of-fold files into `$P/runs/B/compare_vs_A/`; uses one decision of the budget and prints the verdict and the `DECISIONS.md` line to add. Beyond the budget only with `--force`, which is recorded. Adopt a candidate only on `improvement`; once the budget is spent, freeze.
 - `freeze NAME`: records the git commit (and whether tracked files were modified), the run's flags and the hash of its model; prints the `git tag freeze-vN` command. No code change after this.
 - `open`: checks the seal hashes and the frozen model's hash, predicts `lockbox.csv` with the frozen run's model (fit on all dev customers) through `inference.run_inference`, scores it like `pvdetect.diagnose` with a 90 % customer-bootstrap interval (2000 draws) and states whether the score is inside, below or above the run's nested `ci90`. `lockbox_result.json` (aggregates only) goes to `$P` and next to the frozen model, where the GUI shows it as "Lock-box · single look"; the predictions stay in `$P/lockbox_predictions/`. A second `open` refuses unless `--force`, which is recorded and shown. Below the interval means possible overfitting: report it and still submit the frozen model; never re-tune on the lock-box. With 10 customers the interval is wide.
-- `final --energy E --labels L [--cv]`: after `open` (or with a recorded `--force`), refits the frozen run's flags on all customers into `$P/final/model.json` (`--cv` adds nested CV and its diagnosis) and prints the `scripts/export_submission.sh` command.
+- `final --energy E --labels L [--cv] [--ext-labels X | --no-extensions]`: after `open` (or with a recorded `--force`), refits the frozen run's flags on all customers into `$P/final/model.json`. `--cv` adds nested CV and its diagnosis; `--ext-labels` / `--no-extensions` pass through to `train.py`. It prints the `scripts/export_submission.sh` command. A model with an extension section must be exported from a commit that contains `pvdetect/extensions.py`.
 - `status`: stage, runs with their nested scores, decisions used of the budget, lock-box opened or not.
 
 `python -m pvdetect.stability MODEL_A MODEL_B UNLABELLED [--pool 300]` is the label-free check of the report stage: it builds the same bounded unlabelled pool as pseudo-labelling (≥365 valid days, salted-hash choice), predicts it with both models and prints the predicted PV share of each, the number and share of customers whose decision flips, and the mean absolute change of the PV probability.
@@ -290,7 +290,7 @@ The loader sniffs `;`/`,` separators and comma decimals, accepts epoch seconds o
 
 ### PV extensions (optional bonus)
 
-`pvdetect/extensions.py` fits a capacity nowcast and runs a two-geometry change test. It runs after the main model and never changes `predictions.csv`; a test asserts this.
+`pvdetect/extensions.py` fits a capacity nowcast and runs a per-customer seasonal change-point test. It runs after the main model and never changes `predictions.csv`; a test asserts this.
 
 1. **Window features.** Every 7 days, a 35-day window of the customer gets label-free features:
    - the length of the zero-withdrawal run around 12:30 on its typical and clearest days;
@@ -306,7 +306,7 @@ The loader sniffs `;`/`,` separators and comma decimals, accepts epoch seconds o
 3. **Per-customer seasonal change-point.** The nowcast is fitted as a level plus the customer's own two annual harmonics plus up to two persistent steps, all jointly by least squares.
    - The nowcast's seasonal swing differs from customer to customer and is often larger than an extension step. Fitting it per customer stops it from mimicking or hiding a step.
    - A step needs ≥ ×1.15 and z ≥ 4. The deseasonalized medians after and before it must also differ by ≥ ×1.15, which a short outage or vacation cannot achieve.
-   - After a second step is added, each step is re-placed given the other.
+   - Steps are placed greedily. With two close changes, the first step can sit between them; re-placing steps changed no benchmark outcome, so it is not used.
 4. **Date and capacity.** The date is the two-segment fit of the daily year-over-year zero-run envelope within ±50 days. The capacity after is the median nowcast on the new plateau, or the predicted initial kWp × the step ratio when that median is not above it.
 5. **Global cap.** The 3 highest-z events of the prediction call are kept. The challenge text states that 3 hidden-test events exist.
 

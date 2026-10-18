@@ -242,6 +242,13 @@ def test_open_verifies_seal_looks_once_and_final_refits(tiny, fake_train, fake_i
     assert _arg(argv, "--timeseries") == str(tiny.energy.resolve()) and "--cv" not in argv
     st = _state(tiny)
     assert st["stage"] == "final" and st["final"]["labelled"] == 12
+    assert "--ext-labels" not in argv and st["final"]["extensions"] == "no extension labels"
+    ext = tiny.labels.parent / "ext.csv"
+    ext.write_text("customer_id;extension_date;pv_capacity_after_extension_kwp\n")
+    assert _lb("final", "--dir", d, "--energy", tiny.energy, "--labels", tiny.labels, "--ext-labels", ext) == 0
+    assert _arg(fake_train[-1], "--ext-labels") == str(ext.resolve()) and _state(tiny)["final"]["extensions"] == "labelled"
+    assert _lb("final", "--dir", d, "--energy", tiny.energy, "--labels", tiny.labels, "--no-extensions") == 0
+    assert "--no-extensions" in fake_train[-1] and _state(tiny)["final"]["extensions"] == "off"
     assert _lb("status", "--dir", d) == 0
     out = capsys.readouterr().out
     assert "stage: final" in out and "lockbox opened: yes opens=2" in out and "decisions: used=0/1" in out

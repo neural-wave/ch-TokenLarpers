@@ -626,9 +626,11 @@ def final(args) -> int:
     out.mkdir(exist_ok=True)
     for name in ("model.json", "oof.csv", "diagnosis.json"):
         (out / name).unlink(missing_ok=True)
+    ext = [*(["--ext-labels", str(Path(args.ext_labels).expanduser().resolve())] if args.ext_labels else []),
+           *(["--no-extensions"] if args.no_extensions else [])]
     argv = [
         "--timeseries", str(Path(args.energy).expanduser().resolve()), "--labels", str(Path(args.labels).expanduser().resolve()),
-        "--out", str(out / "model.json"), *(["--unlabelled", unlabelled] if unlabelled else []), *fr["flags"],
+        "--out", str(out / "model.json"), *(["--unlabelled", unlabelled] if unlabelled else []), *fr["flags"], *ext,
         *(["--cv", "--oof-out", str(out / "oof.csv")] if args.cv else []),
     ]
     text = _run(_repo_module("train").main, argv)
@@ -640,6 +642,7 @@ def final(args) -> int:
     now = _now()
     st["final"] = {
         "time": now, "labelled": len(labels), "flags": fr["flags"], "unlabelled": unlabelled, "cv": bool(args.cv),
+        "extensions": "off" if args.no_extensions else ("labelled" if args.ext_labels else "no extension labels"),
         "nested": parse_nested(text) if args.cv else None, "model_sha256": _sha256_file(out / "model.json"),
     }
     st["timestamps"]["final"] = now
@@ -648,6 +651,9 @@ def final(args) -> int:
     print(f"final: frozen run={fr['run']} refit on labelled={len(labels)} flags={' '.join(fr['flags']) or '(defaults)'}")
     print("final: model written to the private --dir (final/model.json); export it with:")
     print(f"  sh scripts/export_submission.sh {fr['git_commit'][:12]} NW26_DIR {out}")
+    if not args.no_extensions:
+        print("note: the model has an extension section; export a commit that contains pvdetect/extensions.py "
+              "(the frozen commit may predate it), e.g. the current HEAD if it descends from the frozen commit")
     return 0
 
 
@@ -709,6 +715,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--labels", required=True)
     p.add_argument("--unlabelled")
     p.add_argument("--cv", action="store_true")
+    p.add_argument("--ext-labels", help="pv_extensions_labels_dev.csv, passed to train.py for the extension nowcaster")
+    p.add_argument("--no-extensions", action="store_true", help="refit without the extension detector (header-only)")
     p.add_argument("--force", action="store_true")
     sub.add_parser("status", parents=[common], help="stage, runs, decisions, lock-box")
     args = ap.parse_args(argv)
